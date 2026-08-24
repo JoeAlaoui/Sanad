@@ -1,0 +1,90 @@
+{
+  "2026-06-01": {
+    "calls": 22,
+    "duration_sec": 1919
+  },
+  "2026-06-02": {
+    "calls": 11,
+    "duration_sec": 1789
+  },
+  "2026-06-03": {
+    "calls": 12,
+    "duration_sec": 2076
+  },
+  "2026-06-04": {
+    "calls": 8,
+    "duration_sec": 929
+  },
+  "2026-06-05": {
+    "calls": 35,
+    "duration_sec": 2545
+  },
+  "2026-06-08": {
+    "calls": 0,
+    "duration_sec": 0
+  },
+  "2026-06-09": {
+    "calls": 20,
+    "duration_sec": 1675
+  },
+  "2026-06-10": {
+    "calls": 12,
+    "duration_sec": 1505
+  },
+  "2026-06-11": {
+    "calls": 12,
+    "duration_sec": 2018
+  },
+  "2026-06-12": {
+    "calls": 13,
+    "duration_sec": 2592
+  },
+  "2026-06-15": {
+    "calls": 14,
+    "duration_sec": 1755
+  },
+  "2026-06-16": {
+    "calls": 22,
+    "duration_sec": 2634
+  },
+  "2026-06-17": {
+    "calls": 0,
+    "duration_sec": 0
+  },
+  "2026-06-18": {
+    "calls": 7,
+    "duration_sec": 1149
+  },
+  "2026-06-19": {
+    "calls": 8,
+    "duration_sec": 1342
+  },
+  "2026-06-22": {
+    "calls": 13,
+    "duration_sec": 2166
+  },
+  "2026-06-23": {
+    "calls": 7,
+    "duration_sec": 411
+  },
+  "2026-06-24": {
+    "calls": 12,
+    "duration_sec": 2377
+  },
+  "2026-06-25": {
+    "calls": 14,
+    "duration_sec": 1418
+  },
+  "2026-06-26": {
+    "calls": 11,
+    "duration_sec": 1561
+  },
+  "2026-06-29": {
+    "calls": 19,
+    "duration_sec": 1630
+  },
+  "2026-06-30": {
+    "calls": 1,
+    "duration_sec": 92
+  }
+}

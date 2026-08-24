@@ -1,0 +1,796 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>SANAD — Plateforme de pilotage du Helpdesk SI</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+
+<!-- AUTH OVERLAY -->
+<div class="auth-overlay" id="authOverlay">
+  <div class="auth-box">
+    <div class="auth-brand">
+      <div class="brand-mark" style="width:44px;height:44px;font-size:20px;">H</div>
+      <div class="auth-brand-title">SANAD<div style="font-size:11px;font-weight:500;color:var(--muted);margin-top:2px;">Plateforme de pilotage du Helpdesk SI</div></div>
+    </div>
+
+    <div id="setupForm" style="display:none;">
+      <h2>Création du compte administrateur</h2>
+      <p class="hint">Premier lancement — créez le compte Responsable Helpdesk (accès complet).</p>
+      <input type="text" id="setupName" placeholder="Nom complet">
+      <input type="text" id="setupUsername" placeholder="Identifiant">
+      <input type="password" id="setupPassword" placeholder="Mot de passe (4 caractères min.)">
+      <button class="btn btn-primary" id="setupSubmitBtn" style="width:100%;margin-top:10px;">Créer le compte</button>
+      <div class="auth-error" id="setupError"></div>
+    </div>
+
+    <div id="loginForm">
+      <h2>Connexion</h2>
+      <input type="text" id="loginUsername" placeholder="Identifiant">
+      <input type="password" id="loginPassword" placeholder="Mot de passe">
+      <button class="btn btn-primary" id="loginSubmitBtn" style="width:100%;margin-top:10px;">Se connecter</button>
+      <div class="auth-error" id="loginError"></div>
+    </div>
+  </div>
+</div>
+
+<div class="app">
+
+  <!-- SIDEBAR -->
+  <aside class="sidebar">
+    <div class="sanad-brand" id="sanadBrand">
+      <img id="sanadLogoImg" src="" alt="SANAD" style="display:none;">
+      <span id="sanadLogoText">SANAD</span>
+    </div>
+    <div class="module-switch" id="moduleSwitch"></div>
+
+    <div class="brand">
+      <div class="brand-mark" id="brandMark">T</div>
+      <div>
+        <div class="brand-title" id="brandTitle">Tarkhiss</div>
+        <div class="brand-sub" id="brandSub">Support Email &amp; Hotline</div>
+      </div>
+    </div>
+
+    <nav class="nav">
+      <!-- Tarkhiss -->
+      <button class="nav-item active" data-tab="dashboard" data-module="tarkhiss" data-roles="admin,superviseur">
+        <span class="nav-ico">▦</span> Dashboard
+      </button>
+      <button class="nav-item" data-tab="calls" data-module="tarkhiss" data-roles="admin,superviseur">
+        <span class="nav-ico">☎</span> Appels <span class="nav-badge" id="badgeCalls"></span>
+      </button>
+      <button class="nav-item" data-tab="emails" data-module="tarkhiss" data-roles="admin,superviseur">
+        <span class="nav-ico">✉</span> Emails <span class="nav-badge" id="badgeEmails"></span>
+      </button>
+      <button class="nav-item" data-tab="analysis" data-module="tarkhiss" data-roles="admin,superviseur">
+        <span class="nav-ico">◇</span> Analyse mensuelle
+      </button>
+      <button class="nav-item" data-tab="annual" data-module="tarkhiss" data-roles="admin,superviseur">
+        <span class="nav-ico">📈</span> Vue annuelle
+      </button>
+      <button class="nav-item" data-tab="prompts" data-module="tarkhiss" data-roles="admin,superviseur">
+        <span class="nav-ico">✦</span> Prompts Copilot
+      </button>
+
+      <!-- Moussanada -->
+      <button class="nav-item" data-tab="m-dashboard" data-module="moussanada" data-roles="admin,superviseur">
+        <span class="nav-ico">▦</span> Dashboard
+      </button>
+      <button class="nav-item" data-tab="m-sources" data-module="moussanada" data-roles="admin,superviseur">
+        <span class="nav-ico">📥</span> Données sources
+      </button>
+      <button class="nav-item" data-tab="m-analysis" data-module="moussanada" data-roles="admin,superviseur">
+        <span class="nav-ico">◇</span> Analyse &amp; Copilot
+      </button>
+      <button class="nav-item" data-tab="m-annual" data-module="moussanada" data-roles="admin,superviseur">
+        <span class="nav-ico">📈</span> Vue annuelle
+      </button>
+      <button class="nav-item" data-tab="m-guide" data-module="moussanada" data-roles="admin,superviseur">
+        <span class="nav-ico">📘</span> Guide GLPI
+      </button>
+
+      <!-- Partagé -->
+      <button class="nav-item" data-tab="admin" data-module="shared" data-roles="admin">
+        <span class="nav-ico">⚙</span> Administration
+      </button>
+      <button class="nav-item" data-tab="users" data-module="shared" data-roles="admin">
+        <span class="nav-ico">👤</span> Utilisateurs
+      </button>
+      <button class="nav-item" data-tab="notes" data-module="shared" data-roles="admin,hotliner">
+        <span class="nav-ico">💬</span> Notes
+      </button>
+      <button class="nav-item" data-tab="knowledge" data-module="shared" data-roles="admin,hotliner">
+        <span class="nav-ico">📚</span> Base de connaissances
+      </button>
+    </nav>
+
+    <div class="sidebar-footer">DSID · AMMPS</div>
+  </aside>
+
+  <!-- MAIN -->
+  <main class="main">
+
+    <header class="topbar">
+      <div class="month-picker" id="monthPickerWrap">
+        <label for="monthSelect">Mois</label>
+        <input type="month" id="monthSelect">
+      </div>
+      <div class="global-search-wrap">
+        <input type="text" id="globalSearch" placeholder="🔍 Recherche globale (mois, catégories, contacts...)">
+        <div class="global-search-results" id="globalSearchResults"></div>
+      </div>
+      <div id="saveIndicator" class="save-indicator"></div>
+      <div class="user-menu">
+        <span id="userMenuName"></span>
+        <span class="role-pill" id="userMenuRole"></span>
+        <button class="btn-add" id="logoutBtn">Déconnexion</button>
+      </div>
+    </header>
+
+    <div class="banner warn" id="reminderBanner" style="display:none;"></div>
+    <div class="banner info" id="moduleNotReadyBanner" style="display:none;">
+      🚧 Ce volet utilise la structure générique du support (appels, emails, analyse mensuelle) en attendant vos instructions spécifiques pour l'adapter davantage.
+    </div>
+
+    <!-- TAB: DASHBOARD -->
+    <section class="tab-panel active" id="tab-dashboard">
+      <div class="panel-head panel-head-row">
+        <div>
+          <h1 id="dashTitle">Dashboard</h1>
+          <p>Vue interactive, codes couleur automatiques.</p>
+        </div>
+        <div class="dash-actions">
+          <button class="btn btn-outline" id="xlsxBtn">⬇ Excel</button>
+          <button class="btn btn-outline" id="pdfBtn">⬇ PDF</button>
+          <button class="btn btn-outline" id="onePagerBtn">🖼 One-pager</button>
+          <button class="btn btn-primary" id="mailToggleBtn">✉ Envoyer par email</button>
+        </div>
+      </div>
+
+      <!-- Panneau d'envoi email -->
+      <div class="card email-panel" id="emailPanel" style="display:none;">
+        <h2>Envoi du rapport par email</h2>
+        <div class="email-panel-grid">
+          <div>
+            <div class="mini-label">Destinataires (À)</div>
+            <div class="contact-check-list" id="toCheckList"></div>
+          </div>
+          <div>
+            <div class="mini-label">Copie (Cc)</div>
+            <div class="contact-check-list" id="ccCheckList"></div>
+          </div>
+        </div>
+        <div class="mini-label" style="margin-top:12px;">Formule d'appel (bonjour)</div>
+        <textarea id="greetingInput" rows="2" placeholder="Bonjour M. Himi et Mme. Latifa,"></textarea>
+        <div class="actions-row" style="margin-top:12px;">
+          <button class="btn btn-outline" id="previewMailBtn">👁 Aperçu</button>
+          <button class="btn btn-primary" id="confirmSendBtn">✉ Confirmer et envoyer (Outlook)</button>
+        </div>
+      </div>
+
+      <div class="banner danger" id="tarkhissAlertBanner" style="display:none;"></div>
+      <div id="dashboardContent"></div>
+    </section>
+
+    <!-- TAB: APPELS -->
+    <section class="tab-panel" id="tab-calls">
+      <div class="panel-head panel-head-row">
+        <div>
+          <h1>Saisie des appels</h1>
+          <p>Nombre d'appels reçus par jour ouvré (hors week-end). Durée au format hh:mm:ss.</p>
+        </div>
+        <label class="btn btn-outline file-btn">
+          ⬆ Importer CSV
+          <input type="file" id="callsImportFile" accept=".csv" hidden>
+        </label>
+      </div>
+      <div class="card">
+        <table class="input-table" id="callsTable">
+          <thead>
+            <tr><th>Jour</th><th>Date</th><th>Appels reçus</th><th>Durée (hh:mm:ss)</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="actions-row">
+        <button class="btn btn-primary" id="saveCallsBtn">Enregistrer les appels</button>
+        <span class="hint">Total appels : <strong id="callsTotalHint">0</strong></span>
+        <span class="hint">Durée totale : <strong id="callsDurationHint">00:00:00</strong></span>
+        <span class="hint autosave-hint" id="callsAutosaveHint"></span>
+      </div>
+    </section>
+
+    <!-- TAB: EMAILS -->
+    <section class="tab-panel" id="tab-emails">
+      <div class="panel-head panel-head-row">
+        <div>
+          <h1>Saisie des emails</h1>
+          <p>Emails reçus et envoyés par jour. Les week-ends restent modifiables (email exceptionnel reçu).</p>
+        </div>
+        <label class="btn btn-outline file-btn">
+          ⬆ Importer CSV
+          <input type="file" id="emailsImportFile" accept=".csv" hidden>
+        </label>
+      </div>
+      <div class="card">
+        <table class="input-table" id="emailsTable">
+          <thead>
+            <tr><th>Jour</th><th>Date</th><th>Emails reçus</th><th>Emails envoyés</th></tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+      <div class="actions-row">
+        <button class="btn btn-primary" id="saveEmailsBtn">Enregistrer les emails</button>
+        <span class="hint">Reçus : <strong id="emailsRecvHint">0</strong> · Envoyés : <strong id="emailsSentHint">0</strong></span>
+        <span class="hint autosave-hint" id="emailsAutosaveHint"></span>
+      </div>
+    </section>
+
+    <!-- TAB: ANALYSE -->
+    <section class="tab-panel" id="tab-analysis">
+      <div class="panel-head panel-head-row">
+        <div>
+          <h1>Analyse mensuelle</h1>
+          <p>Résultats de la classification des emails (issus de Copilot Excel). Catégories libres, différentes chaque mois.</p>
+        </div>
+        <button class="btn btn-outline" id="duplicatePrevBtn">⧉ Dupliquer catégories du mois précédent</button>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>🔴 Problèmes techniques signalés</h2>
+          <div class="card-head-tools">
+            <input type="text" class="search-box" id="searchProblems" placeholder="Filtrer...">
+            <button class="btn-add" data-add="problems">+ Ajouter une catégorie</button>
+          </div>
+        </div>
+        <table class="cat-table" id="problemsTable">
+          <thead><tr><th>Type de problème</th><th>Nombre</th><th>Description</th><th>Action corrective</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>🟢 Demandes d'information</h2>
+          <div class="card-head-tools">
+            <input type="text" class="search-box" id="searchDemandes" placeholder="Filtrer...">
+            <button class="btn-add" data-add="demandes">+ Ajouter une catégorie</button>
+          </div>
+        </div>
+        <table class="cat-table" id="demandesTable">
+          <thead><tr><th>Type de demande</th><th>Nombre</th><th>Description</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>📅 Évolution hebdomadaire</h2>
+          <button class="btn-add" data-add="weekly">+ Ajouter une semaine</button>
+        </div>
+        <table class="cat-table" id="weeklyTable">
+          <thead><tr><th>Semaine</th><th>Bugs</th><th>Demandes</th><th>Observations</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>☁️ Nuage de mots-clés</h2>
+          <button class="btn-add" data-add="keywords">+ Ajouter un mot-clé</button>
+        </div>
+        <table class="cat-table" id="keywordsTable">
+          <thead><tr><th>Mot-clé</th><th>Fréquence</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>🔑 Constats clés</h2>
+        <textarea id="constatsBox" rows="4" placeholder="Un constat par ligne..."></textarea>
+      </div>
+
+      <div class="card">
+        <h2>✅ Recommandations</h2>
+        <textarea id="recoBox" rows="4" placeholder="Une recommandation par ligne..."></textarea>
+      </div>
+
+      <div class="card">
+        <h2>🗒️ Notes internes <span class="hint">(non incluses dans le rapport envoyé)</span></h2>
+        <textarea id="internalNotesBox" rows="3" placeholder="Contexte particulier, incident majeur..."></textarea>
+      </div>
+
+      <div class="actions-row">
+        <button class="btn btn-primary" id="saveAnalysisBtn">Enregistrer l'analyse</button>
+        <span class="hint autosave-hint" id="analysisAutosaveHint"></span>
+      </div>
+    </section>
+
+    <!-- TAB: VUE ANNUELLE -->
+    <section class="tab-panel" id="tab-annual">
+      <div class="panel-head panel-head-row">
+        <div>
+          <h1>Vue annuelle / trimestrielle</h1>
+          <p>Tendance sur la période, catégories récurrentes, charge par jour de semaine.</p>
+        </div>
+        <div class="period-picker">
+          <div class="period-presets" id="periodPresets"></div>
+          <div class="month-picker">
+            <label>Du</label><input type="month" id="periodStart">
+            <label>Au</label><input type="month" id="periodEnd">
+          </div>
+        </div>
+      </div>
+      <div id="annualContent"></div>
+    </section>
+
+    <!-- TAB: PROMPTS -->
+    <section class="tab-panel" id="tab-prompts">
+      <div class="panel-head">
+        <h1>Prompts Copilot Excel</h1>
+        <p>Prompts prêts à copier, adaptés automatiquement au mois sélectionné (<strong id="promptMonthLabel"></strong>).</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Prompt A — Volumes quotidiens emails reçus/envoyés</h2>
+          <button class="btn-add copy-btn" data-copy="promptA">📋 Copier</button>
+        </div>
+        <pre class="prompt-box" id="promptA"></pre>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Prompt B — Classification et analyse mensuelle</h2>
+          <button class="btn-add copy-btn" data-copy="promptB">📋 Copier</button>
+        </div>
+        <pre class="prompt-box" id="promptB"></pre>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Prompt C — Comparatif vs mois précédent</h2>
+          <button class="btn-add copy-btn" data-copy="promptC">📋 Copier</button>
+        </div>
+        <pre class="prompt-box" id="promptC"></pre>
+      </div>
+
+      <div class="card">
+        <div class="card-head"><h2>Prompt F — Nuage de mots-clés</h2>
+          <button class="btn-add copy-btn" data-copy="promptF">📋 Copier</button>
+        </div>
+        <pre class="prompt-box" id="promptF"></pre>
+      </div>
+    </section>
+
+    <!-- ============ MOUSSANADA ============ -->
+
+    <!-- TAB: M-DASHBOARD -->
+    <section class="tab-panel" id="tab-m-dashboard">
+      <div class="panel-head panel-head-row">
+        <div>
+          <h1 id="mDashTitle">Dashboard Moussanada</h1>
+          <p>Volume, performance, délais — comparatif automatique vs mois précédent.</p>
+        </div>
+        <div class="dash-actions">
+          <button class="btn btn-outline" id="mXlsxBtn">⬇ Excel consolidé</button>
+          <button class="btn btn-outline" id="mPdfBtn">⬇ PDF</button>
+          <button class="btn btn-outline" id="mOnePagerBtn">🖼 One-pager</button>
+          <button class="btn btn-primary" id="mMailToggleBtn">✉ Envoyer par email</button>
+        </div>
+      </div>
+
+      <div class="card email-panel" id="mEmailPanel" style="display:none;">
+        <h2>Envoi du rapport par email</h2>
+        <div class="email-panel-grid">
+          <div>
+            <div class="mini-label">Destinataires (À)</div>
+            <div class="contact-check-list" id="mToCheckList"></div>
+          </div>
+          <div>
+            <div class="mini-label">Copie (Cc)</div>
+            <div class="contact-check-list" id="mCcCheckList"></div>
+          </div>
+        </div>
+        <div class="mini-label" style="margin-top:12px;">Formule d'appel (bonjour)</div>
+        <textarea id="mGreetingInput" rows="2" placeholder="Bonjour M. Himi,"></textarea>
+        <div class="actions-row" style="margin-top:12px;">
+          <button class="btn btn-outline" id="mPreviewMailBtn">👁 Aperçu</button>
+          <button class="btn btn-primary" id="mConfirmSendBtn">✉ Confirmer et envoyer (Outlook)</button>
+        </div>
+      </div>
+
+      <div class="banner warn" id="mReminderBanner" style="display:none;"></div>
+      <div class="banner danger" id="moussanadaAlertBanner" style="display:none;"></div>
+      <div id="mDashboardContent"></div>
+    </section>
+
+    <!-- TAB: M-SOURCES -->
+    <section class="tab-panel" id="tab-m-sources">
+      <div class="panel-head">
+        <h1>Données sources</h1>
+        <p>Import des exports GLPI (mois sélectionné : <strong id="mSourcesMonthLabel"></strong>).</p>
+      </div>
+
+      <div class="card">
+        <h2>Import consolidé (.xlsx)</h2>
+        <p class="hint">Détection automatique des feuilles : rawData - Tickets, Durée moyenne - Heure, Ticket - Catégories/Services/Demandeur, Technicien Assigné.</p>
+        <label class="btn btn-primary file-btn">
+          ⬆ Importer un fichier Excel GLPI
+          <input type="file" id="mImportXlsx" accept=".xlsx,.xlsm" hidden>
+        </label>
+        <span class="hint autosave-hint" id="mImportHint"></span>
+        <div class="banner info" id="mDetectedMonthBanner" style="display:none;margin-top:10px;"></div>
+      </div>
+
+      <div class="card">
+        <h2>Import séparé (.csv)</h2>
+        <div class="contact-add-row" style="grid-template-columns:1fr 1fr auto;">
+          <select id="mCsvKind">
+            <option value="tickets">Tickets (série mensuelle)</option>
+            <option value="durations">Durée moyenne</option>
+            <option value="categories">Catégories</option>
+            <option value="services">Services</option>
+            <option value="techniciens">Technicien assigné</option>
+            <option value="demandeurs">Demandeurs</option>
+          </select>
+          <input type="file" id="mCsvFile" accept=".csv">
+          <button class="btn-add" id="mCsvImportBtn">Importer</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Aperçu — Tickets &amp; délais du mois</h2>
+        </div>
+        <table class="dash-table" id="mTicketsPreviewTable">
+          <thead><tr><th>Ouverts</th><th>Résolus</th><th>En retard</th><th>Clos</th><th>Délai résolution</th><th>Délai clôture</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Catégories importées</h2>
+          <span class="hint" id="mCatCount"></span>
+        </div>
+        <div class="table-scroll"><table class="dash-table" id="mCategoriesTable">
+          <thead><tr><th>Catégorie</th><th>Ouverts</th><th>Résolus</th><th>En retard</th><th>Fermés</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Services importés</h2>
+          <span class="hint" id="mSrvCount"></span>
+        </div>
+        <div class="table-scroll"><table class="dash-table" id="mServicesTable">
+          <thead><tr><th>Service</th><th>Ouverts</th><th>Résolus</th><th>En retard</th><th>Fermés</th></tr></thead>
+          <tbody></tbody>
+        </table></div>
+      </div>
+
+      <div class="card">
+        <h2>Techniciens</h2>
+        <table class="dash-table" id="mTechTable">
+          <thead><tr><th>Technicien</th><th>Ouverts</th><th>Résolus</th><th>En retard</th><th>Fermés</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="actions-row">
+        <button class="btn btn-outline" id="mCsvCatBtn">⬇ CSV Catégories</button>
+        <button class="btn btn-outline" id="mCsvSrvBtn">⬇ CSV Services</button>
+        <button class="btn btn-outline" id="mCsvTechBtn">⬇ CSV Techniciens</button>
+      </div>
+    </section>
+
+    <!-- TAB: M-ANALYSE & COPILOT -->
+    <section class="tab-panel" id="tab-m-analysis">
+      <div class="panel-head">
+        <h1>Analyse &amp; Prompt Copilot</h1>
+        <p>Générez le prompt, collez l'analyse Copilot dans la case de chaque section — elle sera intégrée telle quelle au rapport final, à l'endroit correspondant.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Prompt Copilot — mois <span id="mPromptMonthLabel"></span></h2>
+          <button class="btn-add copy-btn" data-copy="mPrompt">📋 Copier</button>
+        </div>
+        <pre class="prompt-box" id="mPrompt"></pre>
+      </div>
+
+      <div id="mSectionsContainer"></div>
+
+      <div class="card">
+        <h2>🔑 Constats clés (optionnel)</h2>
+        <textarea id="mConstatsBox" rows="3" placeholder="Un constat par ligne..."></textarea>
+      </div>
+
+      <div class="card">
+        <h2>✅ Recommandations (optionnel)</h2>
+        <textarea id="mRecoBox" rows="3" placeholder="Une recommandation par ligne..."></textarea>
+      </div>
+
+      <div class="actions-row">
+        <button class="btn btn-primary" id="mSaveNotesBtn">Enregistrer l'analyse</button>
+        <span class="hint autosave-hint" id="mAnalysisAutosaveHint"></span>
+      </div>
+    </section>
+
+    <!-- TAB: M-ANNUAL -->
+    <section class="tab-panel" id="tab-m-annual">
+      <div class="panel-head panel-head-row">
+        <div>
+          <h1>Vue annuelle / trimestrielle</h1>
+          <p>Tendance sur la période, évolution du stock en retard.</p>
+        </div>
+        <div class="period-picker">
+          <div class="period-presets" id="mPeriodPresets"></div>
+          <div class="month-picker">
+            <label>Du</label><input type="month" id="mPeriodStart">
+            <label>Au</label><input type="month" id="mPeriodEnd">
+          </div>
+        </div>
+      </div>
+      <div id="mAnnualContent"></div>
+    </section>
+
+    <!-- TAB: M-GUIDE -->
+    <section class="tab-panel" id="tab-m-guide">
+      <div class="panel-head">
+        <h1>Guide de collecte des données GLPI</h1>
+        <p>Chemin, filtre et export recommandé pour chaque indicateur.</p>
+      </div>
+      <div id="mGuideContent"></div>
+    </section>
+
+    <!-- TAB: ADMINISTRATION -->
+    <section class="tab-panel" id="tab-admin">
+      <div class="panel-head">
+        <h1>Administration</h1>
+        <p>Paramètres généraux (partagés), et paramètres propres au volet <strong id="adminModuleLabel">Tarkhiss</strong>.</p>
+      </div>
+
+      <div class="card">
+        <h2>Paramètres généraux (partagés entre volets)</h2>
+        <div class="form-row">
+          <label>Nom de l'agence (affiché sur les rapports)</label>
+          <input type="text" id="agencyNameInput" placeholder="AMMPS — DSID">
+        </div>
+        <div class="form-row">
+          <label>Logo SANAD (identité de la plateforme)</label>
+          <div class="logo-row">
+            <img id="sanadLogoPreview" class="logo-preview" alt="">
+            <input type="file" id="sanadLogoInput" accept=".png,.jpg,.jpeg,.svg">
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Logo AMMPS</label>
+          <div class="logo-row">
+            <img id="logoPreview" class="logo-preview" alt="">
+            <input type="file" id="logoInput" accept=".png,.jpg,.jpeg,.svg">
+          </div>
+        </div>
+        <button class="btn btn-primary" id="saveGlobalSettingsBtn">Enregistrer</button>
+      </div>
+
+      <div class="card">
+        <h2>Salutation &amp; signature — volet <span id="adminModuleLabel2">Tarkhiss</span></h2>
+        <div class="form-row">
+          <label>Formule de salutation par défaut</label>
+          <input type="text" id="defaultGreetingInput" placeholder="Bonjour M. Himi et Mme. Latifa,">
+        </div>
+        <div class="form-row">
+          <label>Nom (signature)</label>
+          <input type="text" id="sigNameInput">
+        </div>
+        <div class="form-row">
+          <label>Fonction (signature)</label>
+          <input type="text" id="sigFunctionInput">
+        </div>
+        <div class="form-row">
+          <label>Téléphone (signature)</label>
+          <input type="text" id="sigPhoneInput">
+        </div>
+        <button class="btn btn-primary" id="saveModuleSettingsBtn">Enregistrer</button>
+      </div>
+
+      <div class="card">
+        <h2>Contacts — volet <span id="adminModuleLabel3">Tarkhiss</span></h2>
+        <div class="contact-add-row">
+          <input type="email" id="contactEmailInput" placeholder="adresse@ammps.ma">
+          <input type="text" id="contactNameInput" placeholder="Nom / civilité (ex: M. Himi)">
+          <select id="contactRoleInput"><option value="to">À (To)</option><option value="cc">Cc</option></select>
+          <button class="btn-add" id="addContactBtn">+ Ajouter</button>
+        </div>
+        <table class="dash-table" id="contactsTable">
+          <thead><tr><th>Email</th><th>Nom</th><th>Rôle</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Sauvegarde / Restauration — volet <span id="adminModuleLabel4">Tarkhiss</span></h2>
+        <p class="hint">Exporte les données de ce volet (appels, emails, analyses, paramètres) dans une archive zip.</p>
+        <div class="actions-row">
+          <button class="btn btn-outline" id="exportAllBtn">⬇ Exporter toutes les données</button>
+          <label class="btn btn-outline file-btn">
+            ⬆ Importer une sauvegarde
+            <input type="file" id="importAllFile" accept=".zip" hidden>
+          </label>
+        </div>
+      </div>
+
+      <div class="card" id="tarkhissCsvCard">
+        <h2>Export CSV brut (mois sélectionné)</h2>
+        <div class="actions-row">
+          <button class="btn btn-outline" id="csvCallsBtn">⬇ CSV Appels</button>
+          <button class="btn btn-outline" id="csvEmailsBtn">⬇ CSV Emails</button>
+        </div>
+      </div>
+      <div id="moussanadaAdminNote" class="banner info" style="display:none;">
+        L'export CSV brut de ce volet se trouve dans l'onglet <strong>Données sources</strong>.
+      </div>
+
+      <div class="card">
+        <h2>Gestion des mois — volet <span id="adminModuleLabel5">Tarkhiss</span></h2>
+        <table class="dash-table" id="monthsTable">
+          <thead><tr><th>Mois</th><th>Appels</th><th>Emails</th><th>Analyse</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Historique des envois — volet <span id="adminModuleLabel6">Tarkhiss</span></h2>
+        <table class="dash-table" id="sendLogTable">
+          <thead><tr><th>Date</th><th>Mois</th><th>Objet</th><th>À</th><th>Cc</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>⚠️ Seuils d'alerte — volet <span id="adminModuleLabel7">Tarkhiss</span></h2>
+        <p class="hint">Laisser vide pour désactiver un seuil. Une bannière apparaît sur le dashboard en cas de dépassement.</p>
+        <div class="form-row"><label>Taux de résolution minimum (%)</label><input type="number" id="thResolutionMin" style="max-width:140px;"></div>
+        <div class="form-row"><label>Stock en retard maximum (tickets/bugs)</label><input type="number" id="thBacklogMax" style="max-width:140px;"></div>
+        <div class="form-row"><label>Délai moyen maximum (heures)</label><input type="number" id="thDelayMax" style="max-width:140px;"></div>
+        <div class="form-row"><label>Variation de volume anormale (%, en valeur absolue)</label><input type="number" id="thVolumeVar" style="max-width:140px;"></div>
+        <div class="form-row"><label>Jour du mois à partir duquel rappeler si le rapport précédent n'est pas envoyé</label><input type="number" id="reminderDayInput" min="1" max="28" style="max-width:100px;"></div>
+        <button class="btn btn-primary" id="saveThresholdsBtn">Enregistrer</button>
+      </div>
+
+      <div class="card">
+        <h2>📜 Historique des seuils déclenchés — volet <span id="adminModuleLabel8">Tarkhiss</span></h2>
+        <table class="dash-table" id="alertHistoryTable">
+          <thead><tr><th>Date</th><th>Mois</th><th>Alertes</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Configuration complète (tous volets)</h2>
+        <p class="hint">Exporte/importe agence, logo, contacts, salutations, signatures, seuils, utilisateurs et base de connaissances — pas les données mensuelles (voir "Sauvegarde / Restauration" ci-dessus pour ça).</p>
+        <div class="actions-row">
+          <button class="btn btn-outline" id="exportConfigBtn">⬇ Exporter la configuration</button>
+          <label class="btn btn-outline file-btn">
+            ⬆ Importer une configuration
+            <input type="file" id="importConfigFile" accept=".json" hidden>
+          </label>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB: UTILISATEURS (admin) -->
+    <section class="tab-panel" id="tab-users">
+      <div class="panel-head">
+        <h1>Utilisateurs</h1>
+        <p>Gestion des comptes et rôles (Administrateur, Hotliner, Superviseur).</p>
+      </div>
+
+      <div class="card">
+        <h2>Créer un compte</h2>
+        <div class="form-row"><label>Nom complet</label><input type="text" id="newUserName"></div>
+        <div class="form-row"><label>Identifiant</label><input type="text" id="newUserUsername"></div>
+        <div class="form-row"><label>Mot de passe</label><input type="text" id="newUserPassword" placeholder="4 caractères min."></div>
+        <div class="form-row">
+          <label>Rôle</label>
+          <select id="newUserRole">
+            <option value="admin">Administrateur / Responsable Helpdesk</option>
+            <option value="superviseur">Superviseur</option>
+            <option value="hotliner">Hotliner</option>
+          </select>
+        </div>
+        <div class="form-row" id="newUserModulesRow">
+          <label>Volets accessibles</label>
+          <div id="newUserModulesList"></div>
+        </div>
+        <button class="btn btn-primary" id="createUserBtn">Créer le compte</button>
+      </div>
+
+      <div class="card">
+        <h2>Comptes existants</h2>
+        <table class="dash-table" id="usersTable">
+          <thead><tr><th>Nom</th><th>Identifiant</th><th>Rôle</th><th>Volets</th><th>Statut</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
+    <!-- TAB: NOTES (admin + hotliner) -->
+    <section class="tab-panel" id="tab-notes">
+      <div class="panel-head">
+        <h1>Notes</h1>
+        <p>Échange de notes entre Hotliner(s) et Responsable Helpdesk.</p>
+      </div>
+
+      <div class="card" id="notesHotlinerSelectCard" style="display:none;">
+        <h2>Choisir un hotliner</h2>
+        <select id="notesHotlinerSelect"></select>
+      </div>
+
+      <div class="card">
+        <div id="notesThread" class="notes-thread"></div>
+        <div class="notes-input-row">
+          <textarea id="notesInput" rows="2" placeholder="Écrire une note..."></textarea>
+          <button class="btn btn-primary" id="notesSendBtn">Envoyer</button>
+        </div>
+      </div>
+    </section>
+
+    <!-- TAB: BASE DE CONNAISSANCES (admin + hotliner) -->
+    <section class="tab-panel" id="tab-knowledge">
+      <div class="panel-head panel-head-row">
+        <div>
+          <h1>Base de connaissances</h1>
+          <p>Procédures et réponses rapides pour l'assistance en appel.</p>
+        </div>
+        <input type="text" id="knowledgeSearch" class="search-box" placeholder="Rechercher..." style="width:220px;">
+      </div>
+
+      <div class="card" id="knowledgeAddCard">
+        <h2>Ajouter / Modifier un article</h2>
+        <input type="hidden" id="knowledgeEditId">
+        <div class="form-row">
+          <label>Volet</label>
+          <select id="knowledgeModule"></select>
+        </div>
+        <div class="form-row"><label>Titre</label><input type="text" id="knowledgeTitle"></div>
+        <div class="form-row"><label>Contenu</label><textarea id="knowledgeContent" rows="5"></textarea></div>
+        <button class="btn btn-primary" id="knowledgeSaveBtn">Enregistrer l'article</button>
+        <button class="btn-add" id="knowledgeCancelBtn" style="display:none;">Annuler la modification</button>
+      </div>
+
+      <div id="knowledgeList"></div>
+    </section>
+
+  </main>
+
+</div>
+
+<!-- MODAL APERÇU EMAIL -->
+<div class="modal-overlay" id="previewModalOverlay" style="display:none;">
+  <div class="modal-box">
+    <div class="modal-head">
+      <div>
+        <div class="mini-label">Objet</div>
+        <div id="previewSubject" style="font-weight:700;color:var(--primary);"></div>
+      </div>
+      <button class="modal-close" id="closePreviewBtn">✕</button>
+    </div>
+    <iframe id="previewFrame" class="modal-frame"></iframe>
+  </div>
+</div>
+
+<div id="toast" class="toast"></div>
+
+<script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>
