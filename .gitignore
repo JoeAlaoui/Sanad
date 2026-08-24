@@ -1,0 +1,61 @@
+# SANAD - fichiers a ne pas envoyer sur GitHub
+
+# Environnements Python
+venv/
+.venv/
+env/
+ENV/
+
+# Cache Python
+__pycache__/
+*.py[cod]
+*$py.class
+
+# Variables d'environnement et secrets
+.env
+.env.*
+!.env.example
+*.key
+*.pem
+
+# Donnees locales et fichiers generes par SANAD
+data/
+exports/
+uploads/
+business_reporting/previews/
+instance/
+*.db
+*.sqlite
+*.sqlite3
+
+# Rapports et fichiers temporaires
+*.eml
+*.log
+~$*.xlsx
+~$*.docx
+~$*.pptx
+
+# IDE et systeme
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Sauvegardes locales
+*.bak
+*.backup
+*.tmp
+
+# Tests et couverture
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Ne pas ignorer les fichiers applicatifs importants
+!requirements.txt
+!README.md
+!templates/
+!templates/**
+!static/
+!static/**
