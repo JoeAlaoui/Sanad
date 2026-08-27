@@ -4,6 +4,10 @@
 const JOURS = ["Dimanche","Lundi","Mardi","Mercredi","Jeudi","Vendredi","Samedi"];
 const MOIS = ["Janvier","Février","Mars","Avril","Mai","Juin","Juillet","Août","Septembre","Octobre","Novembre","Décembre"];
 
+// Palette PCHC — reflète exactement COLOR_HEX défini dans pchc_import.py (source de vérité
+// partagée avec le paramétrage statut→couleur, le PDF et l'export Excel/PPTX).
+const PCHC_PALETTE = {green:"#25935F", blue:"#1794CF", yellow:"#F2C94C", orange:"#F2994A", red:"#DC2828", grey:"#94A3AD"};
+
 function esc(s){
   if(s === null || s === undefined) return "";
   return String(s).replace(/[&<>"']/g, c=>({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -14,11 +18,38 @@ if(window.Chart && window.ChartDataLabels){
   Chart.defaults.set('plugins.datalabels', {display:false});
 }
 
+// ---------- Résilience réseau (Lot 1 — fiabilisation) ----------
+// Intercepte les échecs fetch au niveau réseau (serveur injoignable, coupure Wi-Fi/VPN) pour
+// informer l'utilisateur au lieu d'un échec silencieux. Les erreurs HTTP (4xx/5xx) restent
+// gérées au cas par cas par chaque appelant qui vérifie res.ok ; celles qui ne le font pas
+// (et finissent en promesse rejetée, ex. réponse HTML inattendue passée à .json()) sont
+// rattrapées par le handler global ci-dessous.
+const _nativeFetch = window.fetch.bind(window);
+let _lastNetworkErrorToastAt = 0;
+function notifyNetworkError(msg){
+  const now = Date.now();
+  if(now - _lastNetworkErrorToastAt > 4000){
+    _lastNetworkErrorToastAt = now;
+    toast(msg);
+  }
+}
+window.fetch = function(...args){
+  return _nativeFetch(...args).catch(err=>{
+    notifyNetworkError("⚠️ Connexion au serveur interrompue — vérifiez votre réseau ou relancez l'application.");
+    throw err;
+  });
+};
+window.addEventListener("unhandledrejection", (event)=>{
+  console.error("Erreur non gérée :", event.reason);
+  notifyNetworkError("⚠️ Une erreur est survenue. Réessayez ou rechargez la page.");
+});
+
 let currentModule = "tarkhiss";
 let currentUser = null;
 let modulesInfo = {};
 let state = { ym: null, calls: {}, emails: {}, analysis: {} };
 let prevState = { calls: {}, emails: {}, analysis: {} };
+let yoyState = { calls: {}, emails: {}, analysis: {} };
 let globalSettings = { agency_name: "", logo_filename: null };
 let moduleSettings = { contacts: [], greeting: "Bonjour,", signature_name: "", signature_function: "", signature_phone: "" };
 let charts = {};
@@ -28,7 +59,7 @@ let annualChart = null, dailyLoadChart = null, weeklyEmailsChart = null, channel
 let mState = { ym: null, month: null, timeseries: {}, notes: {} };
 let mCharts = {};
 let mAggMode = "racine"; // "racine" | "leaf"
-let mAnnualChart = null, mBacklogChart = null;
+let mAnnualChart = null, mBacklogChart = null, mCategoryTrendChart = null;
 
 // ---------- API helpers ----------
 function apiM(path){ return `/api/${currentModule}${path}`; }
@@ -54,6 +85,12 @@ function prevYm(ym){
   return `${d.getFullYear()}-${pad(d.getMonth()+1)}`;
 }
 
+// Même mois, année précédente — pour le comparatif N vs N-1 (admin + superviseur)
+function prevYearYm(ym){
+  const [y,m] = ym.split("-").map(Number);
+  return `${y-1}-${pad(m)}`;
+}
+
 function monthLabel(ym){
   const [y,m] = ym.split("-").map(Number);
   return `${MOIS[m-1]} ${y}`;
@@ -71,6 +108,40 @@ function saveIndicatorPulse(){
   el.textContent = "✓ Enregistré";
   el.classList.add("show");
   setTimeout(()=>el.classList.remove("show"), 1800);
+  // Une écriture vient d'avoir lieu : rafraîchir l'indicateur "Dernière synchro" du volet actif
+  refreshLastSync();
+}
+
+function relativeTimeFr(iso){
+  const d = new Date(iso);
+  const diffMin = Math.round((Date.now() - d.getTime()) / 60000);
+  if(diffMin < 1) return "à l'instant";
+  if(diffMin < 60) return `il y a ${diffMin} min`;
+  const diffH = Math.round(diffMin / 60);
+  if(diffH < 24) return `il y a ${diffH} h`;
+  const diffJ = Math.round(diffH / 24);
+  if(diffJ === 1) return "hier";
+  if(diffJ < 7) return `il y a ${diffJ} j`;
+  return d.toLocaleDateString("fr-FR", {day:"2-digit", month:"short"});
+}
+
+async function refreshLastSync(){
+  const el = document.getElementById("lastSyncIndicator");
+  if(!el || currentModule === undefined) return;
+  try{
+    const res = await fetch(`/api/${currentModule}/last-sync`);
+    const data = await res.json();
+    if(!data.last_sync){
+      el.classList.add("empty");
+      return;
+    }
+    el.classList.remove("empty");
+    const diffH = (Date.now() - new Date(data.last_sync).getTime()) / 3600000;
+    el.classList.toggle("stale", diffH > 72);
+    el.textContent = `Synchro ${relativeTimeFr(data.last_sync)}`;
+  } catch(e){
+    el.classList.add("empty");
+  }
 }
 
 function debounce(fn, delay){
@@ -110,25 +181,38 @@ function formatHMS(totalSeconds){
 // ============================================================
 // MODULES (Tarkhiss / Moussanada)
 // ============================================================
+// pchc est un sous-volet de tarkhiss (Reporting Métier, nichée sous Tarkhiss dans la sidebar).
+// parentOf() ramène tout module au "groupe" affiché dans le sélecteur de premier niveau.
+function parentOf(mod){ return mod === "pchc" ? "tarkhiss" : mod; }
+
 async function loadModules(){
   const res = await fetch("/api/modules");
   modulesInfo = await res.json();
   const allowedModules = (currentUser?.modules) || Object.keys(modulesInfo);
+  // Sélecteur de premier niveau : Tarkhiss (englobe pchc) / Moussanada — pchc n'a pas de bouton propre
+  const parentKeys = Object.keys(modulesInfo).filter(k=>k !== "pchc" && (allowedModules.includes(k) || (k === "tarkhiss" && allowedModules.includes("pchc"))));
   const sw = document.getElementById("moduleSwitch");
-  sw.innerHTML = Object.entries(modulesInfo).filter(([key])=>allowedModules.includes(key)).map(([key,info])=>`
-    <button data-module="${key}" class="${key===currentModule?'active':''}">${info.label}</button>
+  sw.innerHTML = parentKeys.map(key=>`
+    <button data-parent="${key}" class="${key===parentOf(currentModule)?'active':''}">${modulesInfo[key].label}</button>
   `).join("");
   sw.querySelectorAll("button").forEach(b=>{
-    b.addEventListener("click", ()=>switchModule(b.dataset.module));
+    b.addEventListener("click", ()=>{
+      if(b.dataset.parent === parentOf(currentModule)) return;
+      switchModule(b.dataset.parent);
+    });
   });
-  if(!allowedModules.includes(currentModule)) currentModule = allowedModules[0] || "tarkhiss";
+  if(!allowedModules.includes(currentModule)){
+    currentModule = allowedModules.includes("tarkhiss") ? "tarkhiss" : (allowedModules[0] || "tarkhiss");
+  }
   applyModuleBrand();
 }
 
 function defaultTabForRole(){
   if(!currentUser) return "dashboard";
   if(currentUser.role === "hotliner") return "knowledge";
-  return currentModule === "moussanada" ? "m-dashboard" : "dashboard";
+  if(currentModule === "moussanada") return "m-dashboard";
+  if(currentModule === "pchc") return "p-dashboard";
+  return "dashboard";
 }
 
 function applyModuleBrand(){
@@ -136,8 +220,9 @@ function applyModuleBrand(){
   document.getElementById("brandMark").textContent = info.label[0];
   document.getElementById("brandTitle").textContent = info.label;
   document.getElementById("brandSub").textContent = info.subtitle;
+  refreshLastSync();
   document.querySelectorAll(".module-switch button").forEach(b=>{
-    b.classList.toggle("active", b.dataset.module === currentModule);
+    b.classList.toggle("active", b.dataset.parent === parentOf(currentModule));
   });
   ["adminModuleLabel","adminModuleLabel2","adminModuleLabel3","adminModuleLabel4","adminModuleLabel5","adminModuleLabel6","adminModuleLabel7","adminModuleLabel8"].forEach(id=>{
     const el = document.getElementById(id);
@@ -146,10 +231,13 @@ function applyModuleBrand(){
   document.getElementById("moduleNotReadyBanner").style.display = info.ready ? "none" : "block";
   document.getElementById("monthPickerWrap").style.display = (currentUser && currentUser.role === "hotliner") ? "none" : "";
 
-  // Filtre les items de nav selon le volet actif ET le rôle de l'utilisateur
-  document.querySelectorAll(".nav-item").forEach(btn=>{
+  // Filtre les items de nav (et titres de sous-groupe) selon le GROUPE de volet actif ET le rôle.
+  // Quand le groupe actif est "tarkhiss", les deux sous-volets (Hotline&Emails + Métier) restent
+  // visibles simultanément dans la sidebar (accordéon ouvert), sans écran intermédiaire.
+  const activeParent = parentOf(currentModule);
+  document.querySelectorAll(".nav-item, .nav-subgroup-title, .nav-subgroup").forEach(btn=>{
     const m = btn.dataset.module;
-    const modOk = (m === "shared" || m === currentModule);
+    const modOk = (m === "shared" || parentOf(m) === activeParent);
     const rolesAttr = btn.dataset.roles;
     const roleOk = !rolesAttr || (currentUser && rolesAttr.split(",").includes(currentUser.role));
     btn.style.display = (modOk && roleOk) ? "" : "none";
@@ -186,6 +274,9 @@ function renderTab(tab){
   if(tab === "users") loadUsers();
   if(tab === "notes") loadNotes();
   if(tab === "knowledge") loadKnowledge();
+  if(tab === "p-dashboard") renderPDashboard();
+  if(tab === "p-import") renderPImport();
+  if(tab === "p-analysis") renderPAnalysis();
 }
 
 async function switchModule(mod){
@@ -199,7 +290,7 @@ async function switchModule(mod){
   if(currentUser && currentUser.role !== "hotliner"){
     if(mod === "tarkhiss"){
       await loadMonth(state.ym || defaultMonth());
-    } else {
+    } else if(mod === "moussanada"){
       await loadMoussanadaMonth(mState.ym || defaultMonth());
     }
   }
@@ -208,8 +299,17 @@ async function switchModule(mod){
 }
 
 // ---------- Navigation ----------
+// Les deux sous-volets de Tarkhiss (Hotline&Emails / Métier) étant visibles en même temps dans
+// la sidebar (accordéon), un clic peut passer de l'un à l'autre sans repasser par le sélecteur
+// de premier niveau : on bascule currentModule (routage /api/<module>/...) avant d'activer l'onglet.
 document.querySelectorAll(".nav-item").forEach(btn=>{
-  btn.addEventListener("click", ()=> activateTab(btn.dataset.tab));
+  btn.addEventListener("click", async ()=>{
+    const mod = btn.dataset.module;
+    if(mod !== "shared" && mod !== currentModule){
+      await switchModule(mod);
+    }
+    activateTab(btn.dataset.tab);
+  });
 });
 
 // ---------- Month handling ----------
@@ -242,10 +342,19 @@ async function loadMonth(ym){
   prevState.emails = prevData.emails || {};
   prevState.analysis = prevData.analysis || { problems:[], demandes:[], weekly:[] };
 
+  // Comparatif N vs N-1 (même mois, année précédente) — réservé admin/superviseur
+  if(currentUser && (currentUser.role === "admin" || currentUser.role === "superviseur")){
+    const yoyData = await fetchMonthData(prevYearYm(ym));
+    yoyState.calls = yoyData.calls || {};
+    yoyState.emails = yoyData.emails || {};
+    yoyState.analysis = yoyData.analysis || { problems:[], demandes:[], weekly:[] };
+  }
+
+  checkReminder();
+
   renderCallsTable();
   renderEmailsTable();
   renderAnalysisForms();
-  checkReminder();
 
   const activeTab = document.querySelector(".nav-item.active")?.dataset.tab;
   if(activeTab === "dashboard") renderDashboard();
@@ -733,6 +842,24 @@ function compareChip(label, current, previous){
   return `<div class="compare-chip">${label} <span class="${cls}">${arrow} ${pct}</span> <span style="color:var(--muted);">vs ${monthLabel(prevYm(state.ym))}</span></div>`;
 }
 
+// Chip générique pour un comparatif à référence libre (utilisé pour N vs N-1)
+function metricCompareChip(label, current, previous, refLabel){
+  let cls = "flat", arrow = "→", pct = "0%";
+  if(previous === 0 && current === 0){ pct = "—"; }
+  else if(previous === 0){ cls="up"; arrow="↑"; pct="nouveau"; }
+  else {
+    const diff = ((current-previous)/previous)*100;
+    if(Math.abs(diff) < 1){ cls="flat"; arrow="→"; pct="stable"; }
+    else if(diff > 0){ cls="up"; arrow="↑"; pct=`+${diff.toFixed(0)}%`; }
+    else { cls="down"; arrow="↓"; pct=`${diff.toFixed(0)}%`; }
+  }
+  return `<div class="yoy-chip">
+    <div class="yoy-chip-label">${label}</div>
+    <div class="yoy-chip-values"><strong>${current}</strong> <span style="color:var(--muted);">(${previous})</span></div>
+    <div class="compare-chip"><span class="${cls}">${arrow} ${pct}</span> <span style="color:var(--muted);">${refLabel}</span></div>
+  </div>`;
+}
+
 function groupDailyIntoWeeks(ym, calls, emails){
   const days = businessDaysOfMonth(ym);
   const buckets = [[],[],[],[],[]]; // jusqu'à 5 semaines de 7 jours calendaires
@@ -758,6 +885,8 @@ function renderDashboard(){
 
   const cur = computeMonthMetrics(state.calls, state.emails, a);
   const prev = computeMonthMetrics(prevState.calls, prevState.emails, prevState.analysis || {});
+  const yoy = computeMonthMetrics(yoyState.calls, yoyState.emails, yoyState.analysis || {});
+  const showYoy = currentUser && (currentUser.role === "admin" || currentUser.role === "superviseur");
   const ratio = cur.demandes ? (cur.bugs/cur.demandes) : 0;
   const avgCallSec = cur.calls ? cur.durationSec/cur.calls : 0;
   const channelTotal = cur.calls + cur.received;
@@ -797,7 +926,7 @@ function renderDashboard(){
   const html = `
     <div class="print-only" style="margin-bottom:10px;">
       ${logoImg}
-      <div style="font-size:11px;color:#67737E;">${globalSettings.agency_name || ""} · ${info.label} · ${monthLabel(state.ym)}</div>
+      <div style="font-size:11px;color:#55616B;">${globalSettings.agency_name || ""} · ${info.label} · ${monthLabel(state.ym)}</div>
     </div>
 
     <div class="kpi-grid">
@@ -817,6 +946,16 @@ function renderDashboard(){
       <div class="kpi-card"><div class="kpi-label">📊 Canal dominant</div><div class="kpi-value" style="font-size:15px;">☎ ${channelCallsPct}% / ✉ ${channelEmailPct}%</div></div>
     </div>
 
+    ${showYoy ? `
+    <div class="dash-table-wrap yoy-card">
+      <h3>📆 Comparatif ${monthLabel(state.ym)} vs ${monthLabel(prevYearYm(state.ym))} (N-1)</h3>
+      <div class="yoy-grid">
+        ${metricCompareChip("Emails reçus", cur.received, yoy.received, "vs N-1")}
+        ${metricCompareChip("Appels", cur.calls, yoy.calls, "vs N-1")}
+        ${metricCompareChip("Problèmes tech.", cur.bugs, yoy.bugs, "vs N-1")}
+        ${metricCompareChip("Demandes info", cur.demandes, yoy.demandes, "vs N-1")}
+      </div>
+    </div>` : ""}
 
     <div class="charts-row">
       <div class="chart-card">
@@ -924,7 +1063,7 @@ function renderDashboard(){
   });
 
   const ctxP = document.getElementById("problemsChart");
-  const palette = ["#0B4965","#DC2828","#F59F0A","#25935F","#67737E","#8E5AA6","#1794CF"];
+  const palette = ["#0B4965","#DC2828","#F59F0A","#25935F","#55616B","#8E5AA6","#1794CF"];
   charts.problems = new Chart(ctxP, {
     type: "doughnut",
     data: {
@@ -1016,14 +1155,14 @@ function buildOnePagerCanvas(title, subtitle, kpis, chartCanvases){
     roundRect(ctx, x, cy, cw, cardH, 8); ctx.fill();
     ctx.strokeStyle = "#DAE0E7"; ctx.lineWidth = 1;
     roundRect(ctx, x, cy, cw, cardH, 8); ctx.stroke();
-    ctx.fillStyle = "#67737E";
+    ctx.fillStyle = "#55616B";
     ctx.font = "11px Arial";
     ctx.fillText(k.label, x+12, cy+22);
     ctx.fillStyle = k.color || "#0B4965";
     ctx.font = "bold 26px Arial";
     ctx.fillText(String(k.value), x+12, cy+56);
     if(k.delta){
-      ctx.fillStyle = k.deltaColor || "#67737E";
+      ctx.fillStyle = k.deltaColor || "#55616B";
       ctx.font = "bold 11px Arial";
       ctx.fillText(k.delta, x+12, cy+76);
     }
@@ -1045,7 +1184,7 @@ function buildOnePagerCanvas(title, subtitle, kpis, chartCanvases){
     ctx.drawImage(c, x + (cw-dw)/2, cy + (ch-dh)/2, dw, dh);
   });
 
-  ctx.fillStyle = "#67737E";
+  ctx.fillStyle = "#55616B";
   ctx.font = "10px Arial";
   ctx.fillText(`Généré le ${new Date().toLocaleDateString('fr-FR')}`, 28, H-16);
 
@@ -1060,7 +1199,39 @@ function downloadCanvas(canvas, filename){
 }
 
 // ---------- PDF / Excel ----------
-document.getElementById("pdfBtn").addEventListener("click", ()=> window.print());
+let _pdfPreviewBlobUrl = null;
+async function downloadPdfFromServer(url, payload, filename){
+  toast("Génération du PDF...");
+  const res = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+  if(!res.ok){ toast("Erreur génération PDF"); return; }
+  const blob = await res.blob();
+  if(_pdfPreviewBlobUrl) URL.revokeObjectURL(_pdfPreviewBlobUrl);
+  _pdfPreviewBlobUrl = URL.createObjectURL(blob);
+  document.getElementById("pdfPreviewFrame").src = _pdfPreviewBlobUrl;
+  document.getElementById("pdfPreviewName").textContent = filename;
+  document.getElementById("pdfPreviewDownloadBtn").onclick = ()=>{
+    const a = document.createElement("a");
+    a.href = _pdfPreviewBlobUrl;
+    a.download = filename;
+    a.click();
+  };
+  document.getElementById("pdfPreviewModalOverlay").style.display = "flex";
+}
+
+document.getElementById("closePdfPreviewBtn").addEventListener("click", ()=>{
+  document.getElementById("pdfPreviewModalOverlay").style.display = "none";
+  document.getElementById("pdfPreviewFrame").src = "";
+});
+document.getElementById("pdfPreviewModalOverlay").addEventListener("click", (e)=>{
+  if(e.target.id === "pdfPreviewModalOverlay"){
+    document.getElementById("pdfPreviewModalOverlay").style.display = "none";
+    document.getElementById("pdfPreviewFrame").src = "";
+  }
+});
+
+document.getElementById("pdfBtn").addEventListener("click", ()=>{
+  downloadPdfFromServer(apiM(`/export-pdf/${state.ym}`), {charts: collectTarkhissChartImages()}, `rapport_tarkhiss_${state.ym}.pdf`);
+});
 document.getElementById("onePagerBtn").addEventListener("click", ()=>{
   const cur = computeMonthMetrics(state.calls, state.emails, state.analysis||{});
   const kpis = [
@@ -1384,9 +1555,54 @@ document.querySelectorAll(".copy-btn").forEach(btn=>{
 // ============================================================
 // ADMINISTRATION
 // ============================================================
+const AUDIT_ACTION_LABELS = {
+  login: "Connexion", login_failed: "Connexion échouée", logout: "Déconnexion",
+  user_create: "Création utilisateur", user_update: "Modification utilisateur", user_delete: "Suppression utilisateur",
+  import: "Import de données",
+};
+
+function auditLogRelativeDate(iso){
+  const d = new Date(iso);
+  return d.toLocaleString("fr-FR", {day:"2-digit", month:"2-digit", year:"numeric", hour:"2-digit", minute:"2-digit"});
+}
+
+async function loadAuditLog(){
+  const tbody = document.querySelector("#auditLogTable tbody");
+  if(!tbody) return;
+  try{
+    const res = await fetch("/api/admin/audit-log?limit=200");
+    if(!res.ok) throw new Error("http " + res.status);
+    const entries = await res.json();
+    tbody.innerHTML = entries.map(e=>`
+      <tr>
+        <td style="white-space:nowrap;">${auditLogRelativeDate(e.ts)}</td>
+        <td>${esc(e.user || "—")}</td>
+        <td>${esc(AUDIT_ACTION_LABELS[e.action] || e.action)}</td>
+        <td>${esc(e.module || "—")}</td>
+        <td style="font-size:11.5px;color:var(--muted);">${esc(JSON.stringify(e.details || {}))}</td>
+      </tr>
+    `).join("") || `<tr><td colspan="5" style="color:var(--muted);">Aucun événement enregistré</td></tr>`;
+  } catch(e){
+    tbody.innerHTML = `<tr><td colspan="5" style="color:var(--danger);">Impossible de charger le journal d'audit.</td></tr>`;
+  }
+}
+
+document.getElementById("refreshAuditLogBtn")?.addEventListener("click", loadAuditLog);
+
 async function loadGlobalSettings(){
   const res = await fetch("/api/global-settings");
   globalSettings = await res.json();
+  applyUiTheme(globalSettings.ui_theme || "flat");
+}
+
+function applyUiTheme(theme){
+  document.documentElement.dataset.theme = theme === "soft" ? "soft" : "flat";
+  const flatInput = document.getElementById("themeFlatInput");
+  const softInput = document.getElementById("themeSoftInput");
+  if(flatInput && softInput){
+    flatInput.checked = theme !== "soft";
+    softInput.checked = theme === "soft";
+  }
 }
 
 async function loadModuleSettings(){
@@ -1430,7 +1646,9 @@ document.getElementById("addContactBtn").addEventListener("click", async ()=>{
 
 document.getElementById("saveGlobalSettingsBtn").addEventListener("click", async ()=>{
   globalSettings.agency_name = document.getElementById("agencyNameInput").value.trim();
-  await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({agency_name: globalSettings.agency_name})});
+  globalSettings.ui_theme = document.querySelector('input[name="uiTheme"]:checked')?.value || "flat";
+  await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({agency_name: globalSettings.agency_name, ui_theme: globalSettings.ui_theme})});
+  applyUiTheme(globalSettings.ui_theme);
   toast("Paramètres généraux enregistrés");
 });
 
@@ -1551,7 +1769,19 @@ async function loadAdmin(){
   document.getElementById("thDelayMax").value = th.delay_max_h ?? "";
   document.getElementById("thVolumeVar").value = th.volume_variation_max ?? "";
   document.getElementById("reminderDayInput").value = moduleSettings.reminder_day ?? 5;
+
+  document.getElementById("pchcThresholdsCard").style.display = currentModule === "pchc" ? "block" : "none";
+  const pth = moduleSettings.pchc_thresholds || {};
+  document.getElementById("pThHaut").value = pth.taux_haut ?? "";
+  document.getElementById("pThBas").value = pth.taux_bas ?? "";
+  document.getElementById("pThBacklog").value = pth.backlog_alert ?? "";
+  document.getElementById("pThOld").value = pth.old_dossiers_alert ?? "";
+
   renderContactsAdmin();
+
+  if(currentUser && currentUser.role === "admin"){
+    await loadAuditLog();
+  }
 
   const monthsRes = await fetch(apiM("/months-list"));
   const monthsData = await monthsRes.json();
@@ -1698,6 +1928,8 @@ function renderMDashboard(){
   if(!mState.month) return;
   const cur = mMetricsFor(mState.ym);
   const prev = mMetricsFor(prevYmM(mState.ym));
+  const yoy = mMetricsFor(prevYearYm(mState.ym));
+  const showYoy = currentUser && (currentUser.role === "admin" || currentUser.role === "superviseur");
   const cat = aggregateItems(mState.month.categories);
   const srv = aggregateItems(mState.month.services);
   const techs = [...mState.month.techniciens].sort((a,b)=>b.ouverts-a.ouverts);
@@ -1727,7 +1959,7 @@ function renderMDashboard(){
   const html = `
     <div class="print-only" style="margin-bottom:10px;">
       ${logoImg}
-      <div style="font-size:11px;color:#67737E;">${globalSettings.agency_name || ""} · ${info.label} · ${monthLabel(mState.ym)}</div>
+      <div style="font-size:11px;color:#55616B;">${globalSettings.agency_name || ""} · ${info.label} · ${monthLabel(mState.ym)}</div>
     </div>
 
     <div class="kpi-grid">
@@ -1742,6 +1974,17 @@ function renderMDashboard(){
       <div class="kpi-card"><div class="kpi-label">⏱️ Délai moy. résolution</div><div class="kpi-value" style="font-size:20px;">${formatDH(cur.resolution_h)}</div>${kpiDelta(cur.resolution_h, prev.resolution_h, "negative")}</div>
       <div class="kpi-card"><div class="kpi-label">⏱️ Délai moy. clôture</div><div class="kpi-value" style="font-size:20px;">${formatDH(cur.cloture_h)}</div>${kpiDelta(cur.cloture_h, prev.cloture_h, "negative")}</div>
     </div>
+
+    ${showYoy ? `
+    <div class="dash-table-wrap yoy-card">
+      <h3>📆 Comparatif ${monthLabel(mState.ym)} vs ${monthLabel(prevYearYm(mState.ym))} (N-1)</h3>
+      <div class="yoy-grid">
+        ${metricCompareChip("Tickets ouverts", cur.ouverts, yoy.ouverts, "vs N-1")}
+        ${metricCompareChip("Tickets résolus", cur.resolus, yoy.resolus, "vs N-1")}
+        ${metricCompareChip("En retard", cur.en_retard, yoy.en_retard, "vs N-1")}
+        ${metricCompareChip("Taux résolution", tauxResolution, (yoy.ouverts ? Math.round(yoy.resolus/yoy.ouverts*100) : 0), "vs N-1")}
+      </div>
+    </div>` : ""}
 
 
     <div class="charts-row">
@@ -1966,7 +2209,9 @@ function renderMDashboard(){
   addPngExportButtons(mCharts);
 }
 
-document.getElementById("mPdfBtn").addEventListener("click", ()=> window.print());
+document.getElementById("mPdfBtn").addEventListener("click", ()=>{
+  downloadPdfFromServer(`/api/moussanada/export-pdf/${mState.ym}`, {charts: collectMoussanadaChartImages()}, `rapport_moussanada_${mState.ym}.pdf`);
+});
 document.getElementById("mOnePagerBtn").addEventListener("click", ()=>{
   const cur = mMetricsFor(mState.ym);
   const kpis = [
@@ -2277,6 +2522,10 @@ async function loadMAnnual(){
       <h3>Évolution du backlog</h3>
       <canvas id="mBacklogAnnualCanvas" height="90"></canvas>
     </div>
+    <div class="chart-card" style="margin-bottom:16px;">
+      <h3>Tendance des catégories (Top 8, sur la période)</h3>
+      <canvas id="mCategoryTrendCanvas" height="100"></canvas>
+    </div>
     <div class="dash-table-wrap">
       <h3>Détail par mois</h3>
       <table class="dash-table">
@@ -2305,7 +2554,21 @@ async function loadMAnnual(){
     data:{ labels: months.map(m=>m.label), datasets:[{label:"En retard", data: months.map(m=>m.en_retard), backgroundColor:"#DC2828", borderRadius:5}] },
     options:{responsive:true, animation:{duration:700}, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true}}}
   });
-  addPngExportButtons({mAnnualChart, mBacklogChart});
+  // Tendance des catégories — endpoint dédié (s'appuie sur les sources mensuelles déjà stockées)
+  const trendRes = await fetch(`/api/moussanada/category-trend?start=${start}&end=${end}`);
+  const trend = await trendRes.json();
+  const trendColors = ["#0B4965","#F59F0A","#25935F","#DC2828","#1794CF","#8B5CF6","#F2994A","#94A3AD"];
+  if(mCategoryTrendChart) mCategoryTrendChart.destroy();
+  mCategoryTrendChart = new Chart(document.getElementById("mCategoryTrendCanvas"), {
+    type:"line",
+    data:{ labels: trend.month_labels, datasets: trend.categories.map((cat,i)=>({
+      label: cat, data: trend.series[cat], borderColor: trendColors[i % trendColors.length],
+      backgroundColor: trendColors[i % trendColors.length] + "18", tension:.3, fill:false,
+    })) },
+    options:{responsive:true, animation:{duration:700}, plugins:{legend:{position:"bottom", labels:{boxWidth:10,font:{size:10.5}}}}, scales:{y:{beginAtZero:true}}}
+  });
+
+  addPngExportButtons({mAnnualChart, mBacklogChart, mCategoryTrendChart});
 }
 
 // ============================================================
@@ -2393,6 +2656,7 @@ async function startApp(){
     await loadModuleSettings();
     setupPeriodPicker("periodPresets", "periodStart", "periodEnd", ()=>{ if(document.getElementById("tab-annual").classList.contains("active")) loadAnnual(); });
     setupPeriodPicker("mPeriodPresets", "mPeriodStart", "mPeriodEnd", ()=>{ if(document.getElementById("tab-m-annual").classList.contains("active")) loadMAnnual(); });
+    setupPeriodPickerDate("pPeriodPresets", "pPeriodStart", "pPeriodEnd", ()=>{ if(document.getElementById("tab-p-dashboard").classList.contains("active")) renderPDashboard(); });
     if(currentModule === "moussanada"){
       await loadMoussanadaMonth(defaultMonth());
     } else {
@@ -2716,6 +2980,425 @@ function renderAlertBanner(containerId, alerts){
     el.style.display = "none";
   }
 }
+
+// ============================================================
+// DOSSIERS PCHC
+// ============================================================
+let pState = { start: null, end: null, data: null };
+let pCharts = {};
+
+function periodPresetRangesDate(){
+  const now = new Date();
+  const y = now.getFullYear(), m = now.getMonth();
+  const todayStr = now.toISOString().slice(0,10);
+  const qStartMonth = Math.floor(m/3)*3;
+  const hStartMonth = Math.floor(m/6)*6;
+  return {
+    month: { start: `${y}-${pad2(m+1)}-01`, end: todayStr, label: "Ce mois-ci" },
+    quarter: { start: `${y}-${pad2(qStartMonth+1)}-01`, end: todayStr, label: "Ce trimestre" },
+    semester: { start: `${y}-${pad2(hStartMonth+1)}-01`, end: todayStr, label: "Ce semestre" },
+    year: { start: `${y}-01-01`, end: todayStr, label: "Cette année" },
+    all: { start: "2000-01-01", end: todayStr, label: "Tout" },
+  };
+}
+
+function setupPeriodPickerDate(presetsId, startId, endId, onChange){
+  const presets = periodPresetRangesDate();
+  const wrap = document.getElementById(presetsId);
+  const startInput = document.getElementById(startId);
+  const endInput = document.getElementById(endId);
+  wrap.innerHTML = Object.entries(presets).map(([key,p])=>`<button data-key="${key}">${p.label}</button>`).join("");
+  function applyPreset(key){
+    const p = presets[key];
+    startInput.value = p.start;
+    endInput.value = p.end;
+    wrap.querySelectorAll("button").forEach(b=>b.classList.toggle("active", b.dataset.key===key));
+    onChange();
+  }
+  wrap.querySelectorAll("button").forEach(b=> b.addEventListener("click", ()=>applyPreset(b.dataset.key)));
+  [startInput, endInput].forEach(inp=>{
+    inp.addEventListener("change", ()=>{
+      wrap.querySelectorAll("button").forEach(b=>b.classList.remove("active"));
+      onChange();
+    });
+  });
+  applyPreset("year");
+}
+
+async function loadPchcData(){
+  const start = document.getElementById("pPeriodStart").value || "2000-01-01";
+  const end = document.getElementById("pPeriodEnd").value || new Date().toISOString().slice(0,10);
+  pState.start = start; pState.end = end;
+  const res = await fetch(`/api/pchc/data?start=${start}&end=${end}`);
+  pState.data = await res.json();
+}
+
+const VOYANT_HEX = PCHC_PALETTE;
+const PCHC_CAT_LABELS = {
+  identification:"Identification Opérateur", declaration:"Déclaration d'Activité",
+  ce:"Certificat d'Enregistrement", clv:"Certificat de Libre Vente",
+  aimp:"Autorisation d'Importation Matières Premières",
+};
+
+async function renderPDashboard(){
+  await loadPchcData();
+  const d = pState.data;
+  const s = d.summary;
+  document.getElementById("pDashTitle").textContent = `Reporting Métier — PCHC — ${pState.start} au ${pState.end}`;
+  renderSpecializationSwitch();
+
+  renderAlertBanner("pAlertBanner", d.alerts);
+
+  const catCards = Object.entries(d.categories).map(([key,cat])=>`
+    <div class="dash-table-wrap pchc-cat-card" style="border-left-color:${VOYANT_HEX[cat.voyant]};">
+      <h3>${cat.voyant==='green'?'🟢':cat.voyant==='yellow'?'🟡':'🔴'} ${esc(cat.label)}</h3>
+      <div class="kpi-grid" style="margin-bottom:0;">
+        <div class="kpi-card"><div class="kpi-label">Total</div><div class="kpi-value" style="font-size:20px;">${cat.total}</div></div>
+        <div class="kpi-card success"><div class="kpi-label">Délivrés</div><div class="kpi-value" style="font-size:20px;">${cat.delivered}</div></div>
+        <div class="kpi-card"><div class="kpi-label">En cours</div><div class="kpi-value" style="font-size:20px;color:var(--info);">${cat.encours}</div></div>
+        <div class="kpi-card danger"><div class="kpi-label">Bloqués</div><div class="kpi-value" style="font-size:20px;">${cat.bloque}</div></div>
+      </div>
+      <div style="margin-top:10px;font-size:13px;color:var(--muted);">Taux de délivrance : <strong style="color:var(--ink);">${cat.taux}%</strong></div>
+    </div>
+  `).join("");
+
+  const logoImg = globalSettings.logo_filename ? `<img src="/static/uploads/${globalSettings.logo_filename}" class="print-only" style="height:34px;margin-bottom:10px;">` : "";
+
+  document.getElementById("pDashboardContent").innerHTML = `
+    <div class="print-only" style="margin-bottom:10px;">
+      ${logoImg}
+      <div style="font-size:11px;color:#5B6472;">${globalSettings.agency_name || ""} · Reporting Métier (PCHC) · ${pState.start} au ${pState.end}</div>
+    </div>
+
+    <div class="kpi-grid">
+      <div class="kpi-card"><div class="kpi-label">📁 Total dossiers</div><div class="kpi-value">${s.total}</div></div>
+      <div class="kpi-card success"><div class="kpi-label">✅ Délivrés / Validés</div><div class="kpi-value">${s.delivered}</div></div>
+      <div class="kpi-card"><div class="kpi-label">⏳ En cours</div><div class="kpi-value" style="color:var(--info);">${s.encours}</div></div>
+      <div class="kpi-card danger"><div class="kpi-label">🔴 Bloqués / Refusés</div><div class="kpi-value">${s.bloque}</div></div>
+    </div>
+    <div class="kpi-grid">
+      <div class="kpi-card"><div class="kpi-label">Taux de délivrance global</div><div class="kpi-value">${s.taux}%</div></div>
+      <div class="kpi-card"><div class="kpi-label">Dossiers &gt;90 jours</div><div class="kpi-value" style="color:var(--danger);">${d.backlog['>90']}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Dernier import</div><div class="kpi-value" style="font-size:14px;">${d.last_import ? new Date(d.last_import).toLocaleString('fr-FR') : '—'}</div></div>
+    </div>
+
+    <div class="charts-row">
+      <div class="chart-card">
+        <h3>Répartition globale des statuts</h3>
+        <canvas id="pSummaryChart" height="150"></canvas>
+      </div>
+      <div class="chart-card">
+        <h3>Ancienneté du backlog (dossiers en cours)</h3>
+        <canvas id="pBacklogChart" height="150"></canvas>
+      </div>
+    </div>
+
+    <div class="chart-card" style="margin-bottom:16px;">
+      <h3>Synthèse par module — volume &amp; taux de délivrance</h3>
+      <canvas id="pCategoriesChart" height="120"></canvas>
+    </div>
+
+    <div class="chart-card" style="margin-bottom:16px;">
+      <h3>Top 10 opérateurs par volume de dossiers</h3>
+      <canvas id="pTop10Chart" height="140"></canvas>
+    </div>
+
+    ${catCards}
+
+    ${pState.notesText ? `<div class="dash-table-wrap synth-card"><h3>📝 Analyse</h3>${pState.notesText.split("\n").filter(p=>p.trim()).map(p=>`<p style="font-size:13px;color:var(--ink);line-height:1.6;">${esc(p)}</p>`).join("")}</div>` : ""}
+  `;
+
+  Object.values(pCharts).forEach(c=>c && c.destroy());
+
+  const voyantColors = PCHC_PALETTE;
+  const globalStatusCounts = {green:0,blue:0,yellow:0,orange:0,red:0};
+  Object.values(d.categories).forEach(cat=>{
+    Object.values(cat.status_counts).forEach(sc=>{ globalStatusCounts[sc.color] = (globalStatusCounts[sc.color]||0) + sc.count; });
+  });
+  pCharts.summary = new Chart(document.getElementById("pSummaryChart"), {
+    type:"doughnut",
+    data:{ labels:["Délivré/Validé","En cours (bleu)","Non conforme","Attente","Irrecevable/Rejeté"],
+      datasets:[{ data:[globalStatusCounts.green,globalStatusCounts.blue,globalStatusCounts.yellow,globalStatusCounts.orange,globalStatusCounts.red],
+        backgroundColor:[voyantColors.green,voyantColors.blue,voyantColors.yellow,voyantColors.orange,voyantColors.red] }] },
+    options:{responsive:true, animation:{duration:700}, plugins:{legend:{position:"bottom",labels:{boxWidth:10,font:{size:10.5}}}}}
+  });
+
+  pCharts.backlog = new Chart(document.getElementById("pBacklogChart"), {
+    type:"bar",
+    data:{ labels:["0-30j","31-60j","61-90j",">90j"], datasets:[{label:"Dossiers en cours", data:[d.backlog["0-30"],d.backlog["31-60"],d.backlog["61-90"],d.backlog[">90"]], backgroundColor:[voyantColors.green,voyantColors.yellow,voyantColors.orange,voyantColors.red], borderRadius:5}] },
+    options:{responsive:true, animation:{duration:700}, plugins:{legend:{display:false}, datalabels:{display:true,anchor:'end',align:'top',font:{weight:'bold',size:11},color:'#0D1926'}}, scales:{y:{beginAtZero:true,grace:'15%'}}}
+  });
+
+  const catEntries = Object.entries(d.categories);
+  pCharts.categories = new Chart(document.getElementById("pCategoriesChart"), {
+    data:{ labels: catEntries.map(([k,c])=>PCHC_CAT_LABELS[k]||k), datasets:[
+      {type:"bar", label:"Délivrés", data: catEntries.map(([k,c])=>c.delivered), backgroundColor:voyantColors.green, borderRadius:4, yAxisID:"y"},
+      {type:"bar", label:"En cours", data: catEntries.map(([k,c])=>c.encours), backgroundColor:voyantColors.blue, borderRadius:4, yAxisID:"y"},
+      {type:"bar", label:"Bloqués", data: catEntries.map(([k,c])=>c.bloque), backgroundColor:voyantColors.red, borderRadius:4, yAxisID:"y"},
+      {type:"line", label:"Taux de délivrance", data: catEntries.map(([k,c])=>c.taux), borderColor:"#F59F0A", backgroundColor:"#F59F0A", borderWidth:2.5, pointRadius:4, pointBackgroundColor:"#F59F0A", tension:.3, yAxisID:"y1"},
+    ]},
+    options:{responsive:true, animation:{duration:700}, plugins:{legend:{position:"bottom"}, datalabels:{display:false}},
+      scales:{
+        y:{beginAtZero:true, position:"left", title:{display:true, text:"Nombre de dossiers"}},
+        y1:{beginAtZero:true, max:100, position:"right", grid:{drawOnChartArea:false}, title:{display:true, text:"Taux (%)"}, ticks:{callback:v=>v+"%"}},
+      }}
+  });
+
+  const top10 = d.top10.total.slice(0,10);
+  pCharts.top10 = new Chart(document.getElementById("pTop10Chart"), {
+    type:"bar",
+    data:{ labels: top10.map(t=>t.entity), datasets:[{label:"Dossiers", data: top10.map(t=>t.count), backgroundColor:"#0B4965", borderRadius:4}] },
+    options:{indexAxis:"y", responsive:true, animation:{duration:700}, plugins:{legend:{display:false}, datalabels:{display:true,anchor:'end',align:'end',font:{weight:'bold',size:10},color:'#0D1926'}}, scales:{x:{beginAtZero:true,grace:'15%'}}}
+  });
+
+  setupEmailPanel("pToCheckList","pCcCheckList","pGreetingInput");
+  addPngExportButtons(pCharts);
+}
+
+document.getElementById("pPdfBtn").addEventListener("click", ()=>{
+  downloadPdfFromServer("/api/pchc/export-pdf", {start: pState.start, end: pState.end, charts: collectPchcChartImages()}, `rapport_pchc_${pState.start}_${pState.end}.pdf`);
+});
+document.getElementById("pXlsxBtn").addEventListener("click", ()=>{
+  window.location.href = `/api/pchc/export-xlsx?start=${pState.start}&end=${pState.end}`;
+});
+
+function collectPchcChartImages(){
+  const map = {summary:"summary", backlog:"backlog", top10:"top10", categories:"categories"};
+  const out = {};
+  Object.entries(map).forEach(([key, chartKey])=>{
+    const chart = pCharts[chartKey];
+    if(chart && chart.toBase64Image){
+      try{ out[key] = chart.toBase64Image('image/png', 1); }catch(e){}
+    }
+  });
+  return out;
+}
+
+document.getElementById("pPptxBtn").addEventListener("click", async ()=>{
+  toast("Génération de la présentation...");
+  const charts = collectPchcChartImages();
+  const res = await fetch("/api/pchc/export-pptx", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({start: pState.start, end: pState.end, charts})
+  });
+  if(!res.ok){ toast("Erreur génération PPTX"); return; }
+  const blob = await res.blob();
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(blob);
+  a.download = `SANAD_PCHC_RevueDirection_${pState.end}.pptx`;
+  a.click();
+});
+
+document.getElementById("pMailToggleBtn").addEventListener("click", ()=>{
+  const panel = document.getElementById("pEmailPanel");
+  panel.style.display = panel.style.display === "none" ? "block" : "none";
+});
+document.getElementById("pPreviewMailBtn").addEventListener("click", async ()=>{
+  const {to, cc} = getSelectedRecipients("pToCheckList","pCcCheckList");
+  const greeting = document.getElementById("pGreetingInput").value.trim();
+  const charts = collectPchcChartImages();
+  const res = await fetch("/api/pchc/preview-email", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({to, cc, greeting, start: pState.start, end: pState.end, charts})
+  });
+  const data = await res.json();
+  openPreviewModal(data.subject, data.html);
+});
+document.getElementById("pConfirmSendBtn").addEventListener("click", async ()=>{
+  const {to, cc} = getSelectedRecipients("pToCheckList","pCcCheckList");
+  if(!to.length){ toast("Sélectionnez au moins un destinataire (À)"); return; }
+  const greeting = document.getElementById("pGreetingInput").value.trim();
+  const charts = collectPchcChartImages();
+  toast("Génération du rapport et de la pièce jointe...");
+  const res = await fetch("/api/pchc/send-email", {
+    method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({to, cc, greeting, start: pState.start, end: pState.end, charts})
+  });
+  const data = await res.json();
+  toast(data.opened ? "Ouverture dans Outlook..." : "Fichier .eml généré : " + data.file);
+  document.getElementById("pEmailPanel").style.display = "none";
+});
+
+// ---------- P-IMPORT ----------
+let pSpecializations = null;
+async function renderSpecializationSwitch(){
+  if(!pSpecializations){
+    const res = await fetch("/api/pchc/specializations");
+    pSpecializations = await res.json();
+  }
+  const html = Object.entries(pSpecializations).map(([key,spec])=>
+    `<button ${spec.ready?'class="active"':'disabled title="Bientôt disponible"'} data-key="${key}">${spec.label}${spec.ready?'':' 🔒'}</button>`
+  ).join("");
+  ["pSpecializationSwitch","pSpecializationSwitchImport"].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.innerHTML = html;
+  });
+}
+
+async function renderPImport(){
+  const res = await fetch("/api/pchc/data?start=2000-01-01&end=2100-01-01");
+  const d = await res.json();
+  document.getElementById("pLastImport").textContent = d.last_import ? new Date(d.last_import).toLocaleString('fr-FR') : "Aucun import";
+  await renderSpecializationSwitch();
+  await renderPStatusColorsTable();
+}
+
+function showDetectedStatuses(data){
+  const banner = document.getElementById("pNewStatusBanner");
+  if(!data.statuses_found || !data.statuses_found.length){
+    banner.style.display = "none";
+    return;
+  }
+  const foundList = data.statuses_found.map(s=>esc(s)).join(", ");
+  if(data.new_statuses && data.new_statuses.length){
+    banner.className = "banner danger";
+    banner.innerHTML = `⚠️ <strong>${data.new_statuses.length} nouveau(x) statut(s) détecté(s)</strong> dans le fichier importé, non encore mappé(s) (affichés en gris par défaut) :
+      <strong>${data.new_statuses.map(s=>esc(s)).join(", ")}</strong>.
+      Rendez-vous dans le tableau "Statut → Couleur" ci-dessous pour les classer.
+      <div class="hint" style="margin-top:6px;">Tous les statuts détectés (${data.statuses_found.length}) : ${foundList}</div>`;
+  } else {
+    banner.className = "banner info";
+    banner.innerHTML = `✓ ${data.statuses_found.length} statut(s) détecté(s), tous déjà mappés : ${foundList}`;
+  }
+  banner.style.display = "block";
+}
+
+document.getElementById("pImportXlsx").addEventListener("change", async (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const fd = new FormData();
+  fd.append("file", file);
+  document.getElementById("pImportHint").textContent = "Import en cours...";
+  document.getElementById("pImportHint").classList.add("show");
+  const res = await fetch("/api/pchc/import", {method:"POST", body: fd});
+  const data = await res.json();
+  if(data.ok){
+    toast("Import réussi");
+    document.getElementById("pImportHint").textContent = "✓ " + Object.entries(data.result).map(([k,v])=>`${PCHC_CAT_LABELS[k]||k}: ${v}`).join(" · ");
+    showDetectedStatuses(data);
+    renderPImport();
+  } else {
+    toast(data.error || "Erreur d'import");
+    document.getElementById("pImportHint").textContent = "";
+  }
+  e.target.value = "";
+});
+
+document.getElementById("pCsvImportBtn").addEventListener("click", async ()=>{
+  const file = document.getElementById("pCsvFile").files[0];
+  const kind = document.getElementById("pCsvKind").value;
+  if(!file){ toast("Choisissez un fichier CSV"); return; }
+  const fd = new FormData();
+  fd.append("file", file);
+  fd.append("kind", kind);
+  const res = await fetch("/api/pchc/import", {method:"POST", body: fd});
+  const data = await res.json();
+  if(data.ok){ toast("Import CSV réussi"); showDetectedStatuses(data); renderPImport(); }
+  else toast(data.error || "Erreur d'import");
+});
+
+async function renderPStatusColorsTable(){
+  const res = await fetch("/api/pchc/status-colors");
+  const data = await res.json();
+  const palette = data.palette;
+  const tbody = document.querySelector("#pStatusColorsTable tbody");
+  tbody.innerHTML = Object.entries(data.mapping).sort().map(([statut,color])=>`
+    <tr>
+      <td>${esc(statut)}</td>
+      <td>
+        <select class="status-color-select" data-statut="${esc(statut)}">
+          ${Object.keys(palette).map(c=>`<option value="${c}" ${c===color?'selected':''} style="color:${palette[c]};">${c}</option>`).join("")}
+        </select>
+      </td>
+    </tr>
+  `).join("") || `<tr><td colspan="2" style="color:var(--muted);">Importez des données pour voir les statuts observés</td></tr>`;
+}
+
+document.getElementById("pSaveStatusColorsBtn").addEventListener("click", async ()=>{
+  const mapping = {};
+  document.querySelectorAll(".status-color-select").forEach(sel=>{ mapping[sel.dataset.statut] = sel.value; });
+  await fetch("/api/pchc/status-colors", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({mapping})});
+  toast("Correspondance enregistrée");
+});
+
+// ---------- P-ANALYSIS ----------
+async function renderPAnalysis(){
+  const periodLabel = `${pState.start||''} — ${pState.end||''}`;
+  document.getElementById("pPromptPeriodLabel").textContent = periodLabel;
+  const d = pState.data || (await (await fetch(`/api/pchc/data?start=${pState.start||'2000-01-01'}&end=${pState.end||new Date().toISOString().slice(0,10)}`)).json());
+  const s = d.summary;
+  const catLines = Object.entries(d.categories).map(([k,c])=>`- ${c.label} : ${c.total} dossiers, ${c.delivered} délivrés (${c.taux}%), ${c.encours} en cours, ${c.bloque} bloqués/refusés`).join("\n");
+  const top10Lines = d.top10.total.slice(0,10).map(t=>`- ${t.entity} : ${t.count} dossiers`).join("\n");
+
+  document.getElementById("pPrompt").textContent =
+`Tu es un analyste réglementaire. Rédige une synthèse exécutive professionnelle pour le
+reporting métier PCHC (AMMPS), à partir des données suivantes :
+
+PÉRIODE : du ${pState.start} au ${pState.end}
+
+SYNTHÈSE GLOBALE
+- Total dossiers : ${s.total}
+- Délivrés/Validés : ${s.delivered}
+- En cours : ${s.encours}
+- Bloqués/Refusés : ${s.bloque}
+- Taux de délivrance global : ${s.taux}%
+- Dossiers en cours depuis plus de 90 jours : ${d.backlog['>90']}
+
+DÉTAIL PAR MODULE
+${catLines}
+
+TOP 10 OPÉRATEURS (volume de dossiers)
+${top10Lines || '- (aucune donnée)'}
+
+ALERTES DÉTECTÉES
+${d.alerts.length ? d.alerts.map(a=>'- '+a).join('\n') : '- Aucune'}
+
+CONSIGNES DE RÉDACTION :
+1. Une introduction (1 paragraphe) présentant la période et le volume global.
+2. Une analyse du taux de délivrance par module, en identifiant les modules en difficulté.
+3. Une analyse du backlog et de son ancienneté — points d'attention prioritaires.
+4. Une lecture des opérateurs les plus actifs.
+5. Une conclusion synthétique orientée Direction (2-3 phrases), avec recommandations.
+
+Format : texte uniquement (pas de tableau, pas de puces), un paragraphe par point, prêt à
+être collé dans l'application. Ton sobre, factuel, orienté pilotage.`;
+
+  const notesRes = await fetch("/api/pchc/notes");
+  const notes = await notesRes.json();
+  document.getElementById("pCopilotText").value = notes.copilot_text || "";
+  pState.notesText = notes.copilot_text || "";
+}
+
+async function savePchcNotes(silent){
+  const text = document.getElementById("pCopilotText").value;
+  pState.notesText = text;
+  await fetch("/api/pchc/notes", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({copilot_text: text})});
+  if(silent) pulseAutosave("pAnalysisAutosaveHint");
+}
+document.getElementById("pCopilotText").addEventListener("input", debounce(()=>savePchcNotes(true), 1800));
+document.getElementById("pSaveNotesBtn").addEventListener("click", async ()=>{
+  await savePchcNotes(false);
+  saveIndicatorPulse();
+  toast("Analyse enregistrée");
+});
+document.querySelectorAll('.copy-btn[data-copy="pPrompt"]').forEach(btn=>{
+  btn.addEventListener("click", ()=>{
+    navigator.clipboard.writeText(document.getElementById("pPrompt").textContent).then(()=>toast("Prompt copié"));
+  });
+});
+
+document.getElementById("pSaveThresholdsBtn").addEventListener("click", async ()=>{
+  const payload = {
+    pchc_thresholds: {
+      taux_haut: document.getElementById("pThHaut").value === "" ? null : Number(document.getElementById("pThHaut").value),
+      taux_bas: document.getElementById("pThBas").value === "" ? null : Number(document.getElementById("pThBas").value),
+      backlog_alert: document.getElementById("pThBacklog").value === "" ? null : Number(document.getElementById("pThBacklog").value),
+      old_dossiers_alert: document.getElementById("pThOld").value === "" ? null : Number(document.getElementById("pThOld").value),
+    }
+  };
+  await fetch("/api/pchc/settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+  toast("Seuils enregistrés");
+});
 
 // ============================================================
 // INIT

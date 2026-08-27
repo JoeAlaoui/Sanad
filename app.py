@@ -10,19 +10,31 @@ import json
 import os
 import platform
 import re
+import shutil
 import html as html_module
 from glpi_import import (
     glpi_cell_to_seconds, decimal_hours_cell, format_dh, normalize_header,
     match_header, parse_glpi_row_sheet, import_moussanada_xlsx as _parse_moussanada_xlsx,
     import_moussanada_csv as _parse_moussanada_csv,
 )
+from pchc_import import (
+    CATEGORIES as PCHC_CATEGORIES, COLOR_HEX as PCHC_COLOR_HEX,
+    status_color as pchc_status_color, import_pchc_xlsx as _parse_pchc_xlsx,
+    import_pchc_csv as _parse_pchc_csv, normalize_key as pchc_normalize_key,
+)
 import base64
 import subprocess
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from email.message import EmailMessage
 
 from functools import wraps
+
+def hex_to_rgbcolor(hex_str):
+    """Convertit une couleur hex '#RRGGBB' en RGBColor python-pptx (import différé, léger)."""
+    from pptx.dml.color import RGBColor as _RGBColor
+    h = hex_str.lstrip("#")
+    return _RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
 from flask import Flask, jsonify, request, render_template, send_file, abort, session
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
@@ -30,8 +42,65 @@ from werkzeug.security import generate_password_hash, check_password_hash
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 DATA_DIR = os.path.join(BASE_DIR, "data")
 UPLOAD_DIR = os.path.join(BASE_DIR, "static", "uploads")
+BACKUP_DIR = os.path.join(DATA_DIR, "_backups")
+AUDIT_LOG_FILE = os.path.join(DATA_DIR, "audit_log.jsonl")
+BACKUP_RETENTION_PER_FILE = 20
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
+os.makedirs(BACKUP_DIR, exist_ok=True)
+
+
+def write_json_safely(path, data):
+    """Écriture JSON sécurisée : sauvegarde horodatée de l'ancien contenu avant écrasement,
+    puis écriture atomique (fichier temporaire + remplacement) pour éviter toute corruption
+    en cas de coupure/crash pendant l'écriture. Purge les anciennes sauvegardes au-delà de
+    BACKUP_RETENTION_PER_FILE par fichier source."""
+    if os.path.exists(path):
+        try:
+            rel = os.path.relpath(path, DATA_DIR).replace(os.sep, "__")
+            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+            backup_path = os.path.join(BACKUP_DIR, f"{rel}.{stamp}.bak")
+            shutil.copy2(path, backup_path)
+            prefix = f"{rel}."
+            existing = sorted(
+                (f for f in os.listdir(BACKUP_DIR) if f.startswith(prefix) and f.endswith(".bak")),
+                reverse=True,
+            )
+            for old in existing[BACKUP_RETENTION_PER_FILE:]:
+                try:
+                    os.remove(os.path.join(BACKUP_DIR, old))
+                except OSError:
+                    pass
+        except OSError:
+            pass  # une sauvegarde ratée ne doit jamais bloquer l'écriture principale
+
+    tmp_path = f"{path}.tmp-{os.getpid()}"
+    with open(tmp_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=2)
+    os.replace(tmp_path, path)
+
+
+def log_audit(action, details=None, module=None):
+    """Journal d'audit append-only (JSONL) : qui a fait quoi et quand. Consulté par
+    l'Administrateur via /api/admin/audit-log."""
+    try:
+        u = current_user()
+        user = u["username"] if u else "system"
+    except Exception:
+        user = "system"
+    entry = {
+        "ts": datetime.now().isoformat(),
+        "user": user,
+        "action": action,
+        "module": module,
+        "details": details or {},
+    }
+    try:
+        with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
+            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    except OSError:
+        pass
+
 
 GLOBAL_SETTINGS_FILE = os.path.join(DATA_DIR, "global_settings.json")
 
@@ -56,6 +125,7 @@ JOURS_FR = ["Lundi", "Mardi", "Mercredi", "Jeudi", "Vendredi", "Samedi", "Dimanc
 MODULES = {
     "tarkhiss": {"label": "Tarkhiss", "subtitle": "Support Email & Hotline", "ready": True},
     "moussanada": {"label": "Moussanada", "subtitle": "Helpdesk GLPI", "ready": True},
+    "pchc": {"label": "Reporting Métier", "subtitle": "PCHC — Produits Cosmétiques et d'Hygiène Corporelle", "ready": True},
 }
 
 # Catégories de la feuille "rawData - Ticket - X" : colonnes fixes GLPI
@@ -81,8 +151,7 @@ def load_users():
 
 
 def save_users(users):
-    with open(USERS_FILE, "w", encoding="utf-8") as f:
-        json.dump(users, f, ensure_ascii=False, indent=2)
+    write_json_safely(USERS_FILE, users)
 
 
 def public_user(u):
@@ -174,13 +243,17 @@ def auth_login():
     payload = request.json or {}
     u = find_user(username=(payload.get("username") or "").strip())
     if not u or not u.get("active", True) or not check_password_hash(u["password_hash"], payload.get("password") or ""):
+        log_audit("login_failed", {"username": payload.get("username")})
         return jsonify({"ok": False, "error": "Identifiants incorrects"}), 401
     session["user_id"] = u["id"]
+    log_audit("login", {"username": u["username"]})
     return jsonify({"ok": True, "user": public_user(u)})
 
 
 @app.route("/api/auth/logout", methods=["POST"])
 def auth_logout():
+    u = current_user()
+    log_audit("logout", {"username": u["username"] if u else None})
     session.clear()
     return jsonify({"ok": True})
 
@@ -227,6 +300,7 @@ def create_user():
             "modules": payload.get("modules") or list(MODULES.keys()), "active": True}
     users.append(user)
     save_users(users)
+    log_audit("user_create", {"username": username, "role": role})
     return jsonify({"ok": True, "user": public_user(user)})
 
 
@@ -251,14 +325,17 @@ def update_user(uid):
     if not found:
         return jsonify({"ok": False, "error": "Utilisateur introuvable"}), 404
     save_users(users)
+    log_audit("user_update", {"username": found["username"], "fields": list(payload.keys())})
     return jsonify({"ok": True, "user": public_user(found)})
 
 
 @app.route("/api/users/<int:uid>", methods=["DELETE"])
 def delete_user(uid):
     users = load_users()
+    deleted = next((u for u in users if u["id"] == uid), None)
     users = [u for u in users if u["id"] != uid]
     save_users(users)
+    log_audit("user_delete", {"username": deleted["username"] if deleted else uid})
     return jsonify({"ok": True})
 
 
@@ -282,8 +359,7 @@ def load_notes_thread(hotliner_id):
 
 
 def save_notes_thread(hotliner_id, thread):
-    with open(notes_thread_path(hotliner_id), "w", encoding="utf-8") as f:
-        json.dump(thread, f, ensure_ascii=False, indent=2)
+    write_json_safely(notes_thread_path(hotliner_id), thread)
 
 
 def append_note(hotliner_id, sender_role, text):
@@ -344,8 +420,7 @@ def load_knowledge():
 
 
 def save_knowledge(items):
-    with open(KNOWLEDGE_FILE, "w", encoding="utf-8") as f:
-        json.dump(items, f, ensure_ascii=False, indent=2)
+    write_json_safely(KNOWLEDGE_FILE, items)
 
 
 @app.route("/api/knowledge")
@@ -397,6 +472,28 @@ def module_dir(module):
     return d
 
 
+@app.route("/api/<module>/last-sync")
+def last_sync(module):
+    """Horodatage de la dernière écriture de données pour un volet (calls/emails/analysis,
+    ou timeseries/sources pour Moussanada, ou records pour PCHC) — utilisé pour l'indicateur
+    'Dernière synchro' du dashboard."""
+    check_module(module)
+    latest = None
+    d = module_dir(module)
+    for root, _, files in os.walk(d):
+        if os.path.basename(root) == "exports":
+            continue
+        for fn in files:
+            if not fn.endswith(".json"):
+                continue
+            mtime = os.path.getmtime(os.path.join(root, fn))
+            if latest is None or mtime > latest:
+                latest = mtime
+    if latest is None:
+        return jsonify({"last_sync": None})
+    return jsonify({"last_sync": datetime.fromtimestamp(latest).isoformat()})
+
+
 # ---------------------------------------------------------------------------
 # Utilitaires stockage JSON (par volet)
 # ---------------------------------------------------------------------------
@@ -413,8 +510,7 @@ def _load(module, kind, ym, default):
 
 
 def _save(module, kind, ym, payload):
-    with open(_path(module, kind, ym), "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    write_json_safely(_path(module, kind, ym), payload)
 
 
 def month_label_fr(ym):
@@ -457,6 +553,7 @@ def load_global_settings():
         "sanad_logo_filename": None,    # logo SANAD (identité plateforme)
         "app_name": "SANAD",
         "app_subtitle": "Plateforme de pilotage du Helpdesk SI",
+        "ui_theme": "flat",             # "flat" ou "soft" (neumorphism doux) — écran uniquement, sans effet sur PDF/Excel
     }
     if os.path.exists(GLOBAL_SETTINGS_FILE):
         with open(GLOBAL_SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -465,8 +562,7 @@ def load_global_settings():
 
 
 def save_global_settings(payload):
-    with open(GLOBAL_SETTINGS_FILE, "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    write_json_safely(GLOBAL_SETTINGS_FILE, payload)
 
 
 # ---------------------------------------------------------------------------
@@ -485,6 +581,8 @@ def load_module_settings(module):
         "signature_phone": "",
         "alert_thresholds": {"resolution_rate_min": None, "backlog_max": None, "delay_max_h": None, "volume_variation_max": None},
         "reminder_day": 5,
+        "status_colors": {},
+        "pchc_thresholds": {"taux_haut": 50, "taux_bas": 20, "backlog_alert": None, "old_dossiers_alert": None},
     }
     p = module_settings_file(module)
     if os.path.exists(p):
@@ -497,8 +595,7 @@ def load_module_settings(module):
 
 
 def save_module_settings(module, payload):
-    with open(module_settings_file(module), "w", encoding="utf-8") as f:
-        json.dump(payload, f, ensure_ascii=False, indent=2)
+    write_json_safely(module_settings_file(module), payload)
 
 
 def send_log_file(module):
@@ -518,8 +615,7 @@ def load_alert_history(module):
 
 
 def save_alert_history(module, history):
-    with open(alert_history_file(module), "w", encoding="utf-8") as f:
-        json.dump(history[:300], f, ensure_ascii=False, indent=2)
+    write_json_safely(alert_history_file(module), history[:300])
 
 
 @app.route("/api/<module>/alert-history", methods=["GET"])
@@ -556,8 +652,7 @@ def load_send_log(module):
 def append_send_log(module, entry):
     log = load_send_log(module)
     log.insert(0, entry)
-    with open(send_log_file(module), "w", encoding="utf-8") as f:
-        json.dump(log[:200], f, ensure_ascii=False, indent=2)
+    write_json_safely(send_log_file(module), log[:200])
 
 
 def empty_analysis(ym):
@@ -585,8 +680,7 @@ def load_timeseries():
 
 
 def save_timeseries(data):
-    with open(timeseries_file(), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    write_json_safely(timeseries_file(), data)
 
 
 def sources_path(ym):
@@ -602,8 +696,7 @@ def load_sources(ym):
 
 
 def save_sources(ym, data):
-    with open(sources_path(ym), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    write_json_safely(sources_path(ym), data)
 
 
 def notes_path(ym):
@@ -643,8 +736,7 @@ def load_notes(ym):
 
 
 def save_notes(ym, data):
-    with open(notes_path(ym), "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
+    write_json_safely(notes_path(ym), data)
 
 
 @app.route("/api/moussanada/import/<ym>", methods=["POST"])
@@ -669,7 +761,11 @@ def moussanada_import(ym):
         return jsonify({"ok": False, "error": f"Erreur d'analyse du fichier : {e}"}), 400
     save_timeseries(ts)
     save_sources(ym, src)
-    return jsonify({"ok": True, "result": result})
+    log_audit("import", {"file": f.filename, "kind": kind, "result": result}, module="moussanada")
+    warnings = []
+    if isinstance(result, dict) and not any(v for k, v in result.items() if k != "detected_month"):
+        warnings.append("Aucune donnée n'a été détectée dans ce fichier — vérifiez qu'il s'agit bien d'un export GLPI avec les feuilles/en-têtes attendus.")
+    return jsonify({"ok": True, "result": result, "warnings": warnings})
 
 
 @app.route("/api/moussanada/data/<ym>")
@@ -792,12 +888,30 @@ def export_xlsx_moussanada(ym):
     write_sheet("Techniciens", m["techniciens"], ["Technicien", "Ouverts", "Résolus", "En retard", "Fermés"])
     write_sheet("Demandeurs", m["demandeurs"], ["Demandeur", "Ouverts", "Résolus", "En retard", "Fermés"])
 
+    cat_sheet = wb["Catégories"]
+    n_cat = len(m["categories"])
+    if n_cat:
+        from openpyxl.chart import BarChart, Reference
+        bar = BarChart()
+        bar.type = "bar"
+        bar.title = "Top catégories — Ouverts / Résolus"
+        cats = Reference(cat_sheet, min_col=1, min_row=2, max_row=min(1 + n_cat, 11))
+        bar_data = Reference(cat_sheet, min_col=2, max_col=3, min_row=1, max_row=min(1 + n_cat, 11))
+        bar.add_data(bar_data, titles_from_data=True)
+        bar.set_categories(cats)
+        bar.height = 9
+        bar.width = 16
+        bar.legend.position = "b"
+        bar.legend.overlay = False
+        cat_sheet.add_chart(bar, "G2")
+
     ws3 = wb.create_sheet("Évolution mensuelle")
     for i, h in enumerate(["Mois", "Ouverts", "Résolus", "En retard", "Clos", "Délai résolution (h)", "Délai clôture (h)"]):
         c = ws3.cell(row=1, column=i + 1, value=h)
         c.fill = header_fill
         c.font = header_font
-    for r, key in enumerate(sorted(ts.keys()), start=2):
+    sorted_keys = sorted(ts.keys())
+    for r, key in enumerate(sorted_keys, start=2):
         row = ts[key]
         ws3.cell(row=r, column=1, value=key)
         ws3.cell(row=r, column=2, value=row.get("ouverts", 0))
@@ -809,6 +923,22 @@ def export_xlsx_moussanada(ym):
     for col in "ABCDEFG":
         ws3.column_dimensions[col].width = 14
 
+    if sorted_keys:
+        from openpyxl.chart import LineChart, Reference
+        line = LineChart()
+        line.title = "Évolution mensuelle — Ouverts / Résolus / Clos"
+        line.y_axis.title = "Nombre"
+        last_row = 1 + len(sorted_keys)
+        cats = Reference(ws3, min_col=1, min_row=2, max_row=last_row)
+        line_data = Reference(ws3, min_col=2, max_col=5, min_row=1, max_row=last_row)
+        line.add_data(line_data, titles_from_data=True)
+        line.set_categories(cats)
+        line.height = 9
+        line.width = 18
+        line.legend.position = "b"
+        line.legend.overlay = False
+        ws3.add_chart(line, "I2")
+
     write_alerts_sheet(wb, "moussanada", header_fill, header_font)
 
     buf = io.BytesIO()
@@ -819,9 +949,799 @@ def export_xlsx_moussanada(ym):
 
 
 # ---------------------------------------------------------------------------
+# DOSSIERS PCHC — stockage, import, KPI, rapports
+# ---------------------------------------------------------------------------
+def pchc_records_file():
+    return os.path.join(module_dir("pchc"), "records.json")
+
+
+def load_pchc_records():
+    p = pchc_records_file()
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"categories": {k: [] for k in PCHC_CATEGORIES}, "last_import": None}
+
+
+def save_pchc_records(data):
+    write_json_safely(pchc_records_file(), data)
+
+
+def pchc_status_colors_map():
+    settings = load_module_settings("pchc")
+    return settings.get("status_colors", {})
+
+
+def pchc_notes_file():
+    return os.path.join(module_dir("pchc"), "notes.json")
+
+
+def load_pchc_notes():
+    p = pchc_notes_file()
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return {"copilot_text": ""}
+
+
+def save_pchc_notes(data):
+    write_json_safely(pchc_notes_file(), data)
+
+
+@app.route("/api/pchc/notes", methods=["GET"])
+def pchc_get_notes():
+    return jsonify(load_pchc_notes())
+
+
+@app.route("/api/pchc/notes", methods=["POST"])
+def pchc_save_notes():
+    payload = request.json or {}
+    save_pchc_notes({"copilot_text": payload.get("copilot_text", "")})
+    return jsonify({"ok": True})
+
+
+SPECIALIZATIONS = {
+    "pchc": {"label": "PCHC", "full_label": "Produits Cosmétiques et d'Hygiène Corporelle", "ready": True},
+    "ca": {"label": "CA", "full_label": "Compléments Alimentaires", "ready": False},
+    "dm": {"label": "DM", "full_label": "Dispositifs Médicaux et Puériculture", "ready": False},
+}
+
+
+@app.route("/api/pchc/specializations")
+def pchc_specializations():
+    return jsonify(SPECIALIZATIONS)
+
+
+def pchc_default_period():
+    today = datetime.now()
+    return f"{today.year}-01-01", today.strftime("%Y-%m-%d")
+
+
+def filter_by_period(records, start, end):
+    return [r for r in records if r.get("date_depot") and start <= r["date_depot"] <= end]
+
+
+def backlog_bucket(date_depot, today):
+    try:
+        d = datetime.strptime(date_depot, "%Y-%m-%d")
+    except (ValueError, TypeError):
+        return None
+    age = (today - d).days
+    if age <= 30:
+        return "0-30"
+    if age <= 60:
+        return "31-60"
+    if age <= 90:
+        return "61-90"
+    return ">90"
+
+
+def compute_pchc_dashboard(start, end):
+    data = load_pchc_records()
+    cmap = pchc_status_colors_map()
+    settings = load_module_settings("pchc")
+    th = settings.get("pchc_thresholds", {"taux_haut": 50, "taux_bas": 20, "backlog_alert": None, "old_dossiers_alert": None})
+    today = datetime.now()
+
+    categories_out = {}
+    global_total = global_delivered = global_encours = global_bloque = 0
+    entity_totals = {}
+    entity_delivered = {}
+    entity_encours = {}
+    entity_refuse = {}
+    backlog_global = {"0-30": 0, "31-60": 0, "61-90": 0, ">90": 0}
+    alerts = []
+
+    for cat_key, cfg in PCHC_CATEGORIES.items():
+        all_recs = data["categories"].get(cat_key, [])
+        recs = filter_by_period(all_recs, start, end)
+        total = len(recs)
+        delivered = encours = bloque = 0
+        status_counts = {}
+        backlog_cat = {"0-30": 0, "31-60": 0, "61-90": 0, ">90": 0}
+
+        for r in recs:
+            color = pchc_status_color(r.get("statut", ""), cmap)
+            status_counts.setdefault(r.get("statut", "?"), {"count": 0, "color": color})
+            status_counts[r.get("statut", "?")]["count"] += 1
+
+            entity = r.get("entity") or "—"
+            entity_totals[entity] = entity_totals.get(entity, 0) + 1
+
+            if color == "green":
+                delivered += 1
+                entity_delivered[entity] = entity_delivered.get(entity, 0) + 1
+            elif color == "red":
+                bloque += 1
+                entity_refuse[entity] = entity_refuse.get(entity, 0) + 1
+            else:
+                encours += 1
+                entity_encours[entity] = entity_encours.get(entity, 0) + 1
+                b = backlog_bucket(r.get("date_depot"), today)
+                if b:
+                    backlog_cat[b] += 1
+                    backlog_global[b] += 1
+
+        taux = round(delivered / total * 100, 1) if total else 0
+        if taux >= th.get("taux_haut", 50):
+            voyant = "green"
+        elif taux >= th.get("taux_bas", 20):
+            voyant = "yellow"
+        else:
+            voyant = "red"
+
+        categories_out[cat_key] = {
+            "label": cfg["label"], "total": total, "delivered": delivered,
+            "encours": encours, "bloque": bloque, "taux": taux, "voyant": voyant,
+            "status_counts": status_counts, "backlog": backlog_cat,
+        }
+        global_total += total
+        global_delivered += delivered
+        global_encours += encours
+        global_bloque += bloque
+
+        if total and th.get("taux_bas") is not None and taux < th.get("taux_bas"):
+            alerts.append(f"{cfg['label']} : taux de délivrance critique ({taux}%)")
+
+    global_taux = round(global_delivered / global_total * 100, 1) if global_total else 0
+    old_dossiers = backlog_global.get(">90", 0)
+    if th.get("old_dossiers_alert") is not None and old_dossiers > th.get("old_dossiers_alert"):
+        alerts.append(f"{old_dossiers} dossiers en cours depuis plus de 90 jours")
+    if th.get("backlog_alert") is not None and global_encours > th.get("backlog_alert"):
+        alerts.append(f"Stock de dossiers en cours élevé ({global_encours})")
+
+    def top10(d):
+        return sorted(d.items(), key=lambda x: x[1], reverse=True)[:10]
+
+    return {
+        "start": start, "end": end,
+        "categories": categories_out,
+        "summary": {
+            "total": global_total, "delivered": global_delivered, "encours": global_encours,
+            "bloque": global_bloque, "taux": global_taux,
+        },
+        "backlog": backlog_global,
+        "top10": {
+            "total": [{"entity": k, "count": v} for k, v in top10(entity_totals)],
+            "delivered": [{"entity": k, "count": v} for k, v in top10(entity_delivered)],
+            "encours": [{"entity": k, "count": v} for k, v in top10(entity_encours)],
+            "refuse": [{"entity": k, "count": v} for k, v in top10(entity_refuse)],
+        },
+        "alerts": alerts,
+        "last_import": data.get("last_import"),
+    }
+
+
+@app.route("/api/pchc/import", methods=["POST"])
+def pchc_import():
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"ok": False, "error": "Aucun fichier reçu"}), 400
+    kind = request.form.get("kind", "auto")
+    ext = os.path.splitext(f.filename)[1].lower()
+    data = load_pchc_records()
+    result = {}
+    try:
+        if ext == ".xlsx":
+            parsed = _parse_pchc_xlsx(f)
+            if not parsed:
+                return jsonify({"ok": False, "error": "Aucune feuille reconnue dans ce fichier"}), 400
+            for cat_key, recs in parsed.items():
+                data["categories"][cat_key] = recs
+                result[cat_key] = len(recs)
+        elif ext == ".csv":
+            if kind == "auto" or kind not in PCHC_CATEGORIES:
+                return jsonify({"ok": False, "error": "Précisez la catégorie pour un CSV"}), 400
+            recs = _parse_pchc_csv(f, kind)
+            data["categories"][kind] = recs
+            result[kind] = len(recs)
+        else:
+            return jsonify({"ok": False, "error": "Format non supporté (.xlsx, .csv)"}), 400
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Erreur d'analyse du fichier : {e}"}), 400
+    data["last_import"] = datetime.now().isoformat(timespec="seconds")
+    save_pchc_records(data)
+    log_audit("import", {"file": f.filename, "kind": kind, "result": result}, module="pchc")
+
+    warnings = []
+    if not any(result.values()):
+        warnings.append("0 ligne importée — vérifiez le nom des feuilles/colonnes attendues pour cette catégorie.")
+
+    from pchc_import import DEFAULT_STATUS_COLORS
+    custom_map = pchc_status_colors_map()
+    known = set(pchc_normalize_key(k) for k in custom_map.keys()) | set(DEFAULT_STATUS_COLORS.keys())
+    all_statuses = set()
+    new_statuses = set()
+    for cat_key in result.keys():
+        for r in data["categories"].get(cat_key, []):
+            if r.get("statut"):
+                all_statuses.add(r["statut"])
+                if pchc_normalize_key(r["statut"]) not in known:
+                    new_statuses.add(r["statut"])
+
+    return jsonify({
+        "ok": True, "result": result, "last_import": data["last_import"],
+        "statuses_found": sorted(all_statuses), "new_statuses": sorted(new_statuses),
+        "warnings": warnings,
+    })
+
+
+@app.route("/api/pchc/data")
+def pchc_data():
+    start = request.args.get("start") or pchc_default_period()[0]
+    end = request.args.get("end") or pchc_default_period()[1]
+    return jsonify(compute_pchc_dashboard(start, end))
+
+
+@app.route("/api/pchc/records/<category>")
+def pchc_records_endpoint(category):
+    if category not in PCHC_CATEGORIES:
+        return jsonify({"error": "catégorie invalide"}), 400
+    start = request.args.get("start") or pchc_default_period()[0]
+    end = request.args.get("end") or pchc_default_period()[1]
+    data = load_pchc_records()
+    recs = filter_by_period(data["categories"].get(category, []), start, end)
+    cmap = pchc_status_colors_map()
+    for r in recs:
+        r["color"] = pchc_status_color(r.get("statut", ""), cmap)
+    return jsonify(recs)
+
+
+@app.route("/api/pchc/status-colors", methods=["GET"])
+def pchc_get_status_colors():
+    from pchc_import import DEFAULT_STATUS_COLORS
+    settings = load_module_settings("pchc")
+    custom = settings.get("status_colors", {})
+    data = load_pchc_records()
+    observed = set()
+    for recs in data["categories"].values():
+        for r in recs:
+            if r.get("statut"):
+                observed.add(r["statut"])
+    merged = {}
+    for s in observed:
+        merged[s] = custom.get(s) or DEFAULT_STATUS_COLORS.get(normalize_header(s).replace(" ", ""), None) or pchc_status_color(s, custom)
+    return jsonify({"mapping": merged, "palette": PCHC_COLOR_HEX})
+
+
+@app.route("/api/pchc/status-colors", methods=["POST"])
+def pchc_save_status_colors():
+    payload = request.json or {}
+    settings = load_module_settings("pchc")
+    settings["status_colors"] = payload.get("mapping", {})
+    save_module_settings("pchc", settings)
+    return jsonify({"ok": True})
+
+
+def pchc_report_filename(end_date_str=None):
+    ref = datetime.now()
+    first_of_month = ref.replace(day=1)
+    last_day_prev_month = first_of_month - timedelta(days=1)
+    return f"Tarkhiss_Rapport_{last_day_prev_month.strftime('%Y%m%d')}.xlsx"
+
+
+@app.route("/api/pchc/export-xlsx")
+def pchc_export_xlsx():
+    start = request.args.get("start") or pchc_default_period()[0]
+    end = request.args.get("end") or pchc_default_period()[1]
+    buf = build_pchc_xlsx(start, end)
+    return send_file(buf, as_attachment=True, download_name=pchc_report_filename(),
+                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def build_pchc_xlsx(start, end):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill
+
+    d = compute_pchc_dashboard(start, end)
+    data = load_pchc_records()
+    header_fill = PatternFill("solid", fgColor="0B4965")
+    header_font = Font(color="FFFFFF", bold=True)
+    title_font = Font(size=14, bold=True, color="0B4965")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Dashboard Exécutif"
+    ws["A1"] = f"Reporting Métier PCHC — {start} au {end}"
+    ws["A1"].font = title_font
+    ws.merge_cells("A1:E1")
+    rows = [
+        ("Total dossiers", d["summary"]["total"]),
+        ("Délivrés / Validés", d["summary"]["delivered"]),
+        ("En cours", d["summary"]["encours"]),
+        ("Bloqués / Refusés", d["summary"]["bloque"]),
+        ("Taux de délivrance global", f"{d['summary']['taux']}%"),
+    ]
+    for i, (label, val) in enumerate(rows, start=3):
+        ws.cell(row=i, column=1, value=label).font = Font(bold=True)
+        ws.cell(row=i, column=2, value=val)
+    row = len(rows) + 5
+    ws.cell(row=row, column=1, value="Backlog par ancienneté").font = title_font
+    row += 1
+    backlog_header_row = row
+    for i, h in enumerate(["Ancienneté", "Nombre"]):
+        c = ws.cell(row=row, column=i + 1, value=h)
+        c.fill = header_fill
+        c.font = header_font
+    row += 1
+    backlog_data_start = row
+    for key, label in [("0-30", "0-30j"), ("31-60", "31-60j"), ("61-90", "61-90j"), (">90", ">90j")]:
+        ws.cell(row=row, column=1, value=label)
+        ws.cell(row=row, column=2, value=d["backlog"][key])
+        row += 1
+    backlog_data_end = row - 1
+
+    summary_row = row + 1
+    ws.cell(row=summary_row, column=1, value="Synthèse globale").font = title_font
+    summary_header_row = summary_row + 1
+    for i, h in enumerate(["Statut", "Nombre"]):
+        c = ws.cell(row=summary_header_row, column=i + 1, value=h)
+        c.fill = header_fill
+        c.font = header_font
+    summary_data_start = summary_header_row + 1
+    for i, (label, val) in enumerate([("Délivrés", d["summary"]["delivered"]), ("En cours", d["summary"]["encours"]), ("Bloqués/Refusés", d["summary"]["bloque"])]):
+        ws.cell(row=summary_data_start + i, column=1, value=label)
+        ws.cell(row=summary_data_start + i, column=2, value=val)
+    summary_data_end = summary_data_start + 2
+
+    from openpyxl.chart import BarChart, PieChart, LineChart, Reference
+    from openpyxl.chart.label import DataLabelList
+    bar = BarChart()
+    bar.type = "col"
+    bar.title = "Backlog par ancienneté"
+    cats = Reference(ws, min_col=1, min_row=backlog_data_start, max_row=backlog_data_end)
+    bar_data = Reference(ws, min_col=2, min_row=backlog_header_row, max_row=backlog_data_end)
+    bar.add_data(bar_data, titles_from_data=True)
+    bar.set_categories(cats)
+    bar.height = 8
+    bar.width = 14
+    bar.legend.position = "b"
+    bar.legend.overlay = False
+    bar.dataLabels = DataLabelList()
+    bar.dataLabels.showVal = True
+    ws.add_chart(bar, "D3")
+
+    pie = PieChart()
+    pie.title = "Synthèse globale des dossiers"
+    labels = Reference(ws, min_col=1, min_row=summary_data_start, max_row=summary_data_end)
+    pie_data = Reference(ws, min_col=2, min_row=summary_data_start, max_row=summary_data_end)
+    pie.add_data(pie_data)
+    pie.set_categories(labels)
+    pie.height = 8
+    pie.width = 12
+    pie.legend.position = "b"
+    pie.legend.overlay = False
+    pie.dataLabels = DataLabelList()
+    pie.dataLabels.showPercent = True
+    ws.add_chart(pie, "D18")
+
+    # Synthèse par module — table + graphique combo (barres empilées + ligne taux de délivrance),
+    # même logique que le combo affiché à l'écran (dashboard PCHC) et dans le PDF.
+    synth_row = summary_data_end + 3
+    ws.cell(row=synth_row, column=1, value="Synthèse par module").font = title_font
+    synth_header_row = synth_row + 1
+    for i, h in enumerate(["Module", "Délivrés", "En cours", "Bloqués", "Taux (%)"]):
+        c = ws.cell(row=synth_header_row, column=i + 1, value=h)
+        c.fill = header_fill
+        c.font = header_font
+    synth_data_start = synth_header_row + 1
+    for i, (cat_key, cfg) in enumerate(PCHC_CATEGORIES.items()):
+        cat = d["categories"][cat_key]
+        r = synth_data_start + i
+        ws.cell(row=r, column=1, value=cfg["label"])
+        ws.cell(row=r, column=2, value=cat["delivered"])
+        ws.cell(row=r, column=3, value=cat["encours"])
+        ws.cell(row=r, column=4, value=cat["bloque"])
+        ws.cell(row=r, column=5, value=cat["taux"])
+    synth_data_end = synth_data_start + len(PCHC_CATEGORIES) - 1
+
+    if synth_data_end >= synth_data_start:
+        combo_bar = BarChart()
+        combo_bar.type = "col"
+        combo_bar.grouping = "stacked"
+        combo_bar.overlap = 100
+        combo_bar.title = "Synthèse par module — volume & taux de délivrance"
+        combo_cats = Reference(ws, min_col=1, min_row=synth_data_start, max_row=synth_data_end)
+        combo_bar_data = Reference(ws, min_col=2, max_col=4, min_row=synth_header_row, max_row=synth_data_end)
+        combo_bar.add_data(combo_bar_data, titles_from_data=True)
+        combo_bar.set_categories(combo_cats)
+        combo_bar.y_axis.title = "Nombre de dossiers"
+        combo_bar.legend.position = "b"
+        combo_bar.legend.overlay = False
+        combo_bar.height = 10
+        combo_bar.width = 20
+
+        combo_line = LineChart()
+        combo_line_data = Reference(ws, min_col=5, min_row=synth_header_row, max_row=synth_data_end)
+        combo_line.add_data(combo_line_data, titles_from_data=True)
+        combo_line.set_categories(combo_cats)
+        combo_line.y_axis.axId = 200
+        combo_line.y_axis.title = "Taux (%)"
+        combo_line.y_axis.crosses = "max"
+
+        combo_bar += combo_line
+        ws.add_chart(combo_bar, "D33")
+
+    for cat_key, cfg in PCHC_CATEGORIES.items():
+        cat = d["categories"][cat_key]
+        ws2 = wb.create_sheet(f"KPI {cfg['label'][:22]}")
+        ws2["A1"] = cfg["label"]
+        ws2["A1"].font = title_font
+        stats = [("Total", cat["total"]), ("Délivrés", cat["delivered"]), ("En cours", cat["encours"]),
+                 ("Bloqués/Refusés", cat["bloque"]), ("Taux de délivrance", f"{cat['taux']}%")]
+        for i, (label, val) in enumerate(stats, start=3):
+            ws2.cell(row=i, column=1, value=label).font = Font(bold=True)
+            ws2.cell(row=i, column=2, value=val)
+        row = len(stats) + 5
+        status_header_row = row
+        for i, h in enumerate(["Statut", "Nombre"]):
+            c = ws2.cell(row=row, column=i + 1, value=h)
+            c.fill = header_fill
+            c.font = header_font
+        row += 1
+        status_data_start = row
+        for statut, info in sorted(cat["status_counts"].items(), key=lambda x: -x[1]["count"]):
+            ws2.cell(row=row, column=1, value=statut)
+            ws2.cell(row=row, column=2, value=info["count"])
+            row += 1
+        status_data_end = row - 1
+        ws2.column_dimensions["A"].width = 40
+        ws2.column_dimensions["B"].width = 14
+
+        if status_data_end >= status_data_start:
+            pie2 = PieChart()
+            pie2.title = f"Répartition des statuts — {cfg['label']}"
+            labels2 = Reference(ws2, min_col=1, min_row=status_data_start, max_row=status_data_end)
+            pie2_data = Reference(ws2, min_col=2, min_row=status_data_start, max_row=status_data_end)
+            pie2.add_data(pie2_data)
+            pie2.set_categories(labels2)
+            pie2.height = 9
+            pie2.width = 14
+            pie2.legend.position = "b"
+            pie2.legend.overlay = False
+            pie2.dataLabels = DataLabelList()
+            pie2.dataLabels.showPercent = True
+            ws2.add_chart(pie2, "D3")
+
+    for cat_key, cfg in PCHC_CATEGORIES.items():
+        recs = filter_by_period(data["categories"].get(cat_key, []), start, end)
+        ws3 = wb.create_sheet(f"Brut {cat_key}"[:31])
+        headers = ["Référence", "Entité", "Détails", "Date dépôt", "Statut"]
+        for i, h in enumerate(headers):
+            c = ws3.cell(row=1, column=i + 1, value=h)
+            c.fill = header_fill
+            c.font = header_font
+        for r, rec in enumerate(recs, start=2):
+            ws3.cell(row=r, column=1, value=rec.get("ref", ""))
+            ws3.cell(row=r, column=2, value=rec.get("entity", ""))
+            ws3.cell(row=r, column=3, value=rec.get("details", ""))
+            ws3.cell(row=r, column=4, value=rec.get("date_depot", ""))
+            ws3.cell(row=r, column=5, value=rec.get("statut", ""))
+        for col, width in zip("ABCDE", [22, 30, 40, 14, 22]):
+            ws3.column_dimensions[col].width = width
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    return buf
+
+
+def build_report_html_pchc(start, end, charts=None):
+    charts = charts or {}
+    d = compute_pchc_dashboard(start, end)
+    s = d["summary"]
+    notes = load_pchc_notes()
+    global_settings = load_global_settings()
+
+    def esc(x):
+        return html_module.escape(str(x), quote=True) if x is not None else ""
+
+    def kpi_card(label, value, bg="#F5F7F9", color="#0B4965"):
+        return f"""<td style="width:20%;padding:10px;text-align:center;background:{bg};border:1px solid #DAE0E7;">
+          <div style="font-size:10.5px;color:#55616B;">{esc(label)}</div>
+          <div style="font-size:17px;font-weight:bold;color:{color};">{esc(value)}</div>
+        </td>"""
+
+    def img_tag(key, title=""):
+        b64 = charts.get(key)
+        if not b64:
+            return ""
+        caption = f'<div style="font-size:11.5px;color:#55616B;text-align:center;margin:4px 0 14px;">{esc(title)}</div>' if title else ""
+        return f'<img src="{b64}" style="max-width:100%;border-radius:8px;margin:14px 0 0;border:1px solid #DAE0E7;display:block;">{caption}'
+
+    voyant_emoji = {"green": "🟢", "yellow": "🟡", "red": "🔴"}
+
+    cat_rows = ""
+    for cat_key, cfg in PCHC_CATEGORIES.items():
+        cat = d["categories"][cat_key]
+        cat_rows += f"""<tr>
+          <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-size:12.5px;">{voyant_emoji.get(cat['voyant'],'')} {esc(cfg['label'])}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;text-align:center;font-weight:bold;">{cat['total']}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;text-align:center;color:#25935F;">{cat['delivered']}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;text-align:center;color:#1794CF;">{cat['encours']}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;text-align:center;color:#DC2828;">{cat['bloque']}</td>
+          <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;text-align:center;font-weight:bold;">{cat['taux']}%</td>
+        </tr>"""
+
+    alerts_html = ""
+    if d["alerts"]:
+        items = "".join(f"<li style='margin-bottom:5px;font-size:13px;color:#8A2A32;'>{esc(a)}</li>" for a in d["alerts"])
+        alerts_html = f"""<div style="background:#FCE9E9;border-left:4px solid #DC2828;border-radius:0 8px 8px 0;padding:12px 16px;margin:16px 0;">
+          <div style="font-weight:bold;color:#8A2A32;font-size:13px;margin-bottom:6px;">⚠️ Alertes</div>
+          <ul style="margin:0;padding-left:18px;">{items}</ul>
+        </div>"""
+
+    html = f"""
+    <div style="max-width:760px;margin:0 auto;font-family:Arial,sans-serif;background:#FFFFFF;">
+      <div style="background:#0B4965;padding:22px 24px;border-radius:6px 6px 0 0;">
+        <div style="color:#FFFFFF;font-size:20px;font-weight:bold;">Reporting Métier — PCHC</div>
+        <div style="color:#B9D3E0;font-size:13px;margin-top:4px;">{esc(global_settings.get('agency_name',''))} — Gestion des dossiers réglementaires — du {esc(start)} au {esc(end)}</div>
+      </div>
+      <div style="padding:20px 24px;border:1px solid #DAE0E7;border-top:none;">
+
+        <table style="width:100%;border-collapse:collapse;margin-bottom:16px;"><tr>
+          {kpi_card("TOTAL DOSSIERS", s["total"])}
+          {kpi_card("DÉLIVRÉS", s["delivered"], bg="#E7F5EE", color="#25935F")}
+          {kpi_card("EN COURS", s["encours"], bg="#E6F5FB", color="#1794CF")}
+          {kpi_card("BLOQUÉS/REFUSÉS", s["bloque"], bg="#FCE9E9", color="#DC2828")}
+          {kpi_card("TAUX DE DÉLIVRANCE", f"{s['taux']}%")}
+        </tr></table>
+
+        {alerts_html}
+
+        <div style="margin:6px 0 4px;padding:10px 14px;background:#F5F7F9;border:1px solid #DAE0E7;border-radius:6px;">
+          <div style="font-size:10.5px;font-weight:800;color:#0B4965;letter-spacing:.4px;text-transform:uppercase;margin-bottom:6px;">Sommaire</div>
+          <a href="#sec-graphs" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">1. Analyse graphique</a>
+          <a href="#sec-synth" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">2. Synthèse par module</a>
+          {'<a href="#sec-analysis" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">3. Analyse</a>' if notes.get("copilot_text") else ""}
+        </div>
+
+        <a name="sec-graphs"></a>
+        <div class="pdf-break"></div>
+        <div style="font-size:15px;font-weight:800;color:#0B4965;margin:4px 0 4px;">Analyse graphique</div>
+        {img_tag("summary", "Répartition globale des statuts")}
+        {img_tag("backlog", "Ancienneté du backlog")}
+
+        <a name="sec-synth"></a>
+        <div class="pdf-break"></div>
+        <div style="font-size:14px;font-weight:bold;color:#0B4965;margin:4px 0 8px;">Synthèse par module</div>
+        <table style="width:100%;border-collapse:collapse;border:1px solid #DAE0E7;">
+          <tr style="background:#0B4965;">
+            <td style="padding:8px 10px;color:#fff;font-size:12px;font-weight:bold;">Module</td>
+            <td style="padding:8px 10px;color:#fff;font-size:12px;font-weight:bold;text-align:center;">Total</td>
+            <td style="padding:8px 10px;color:#fff;font-size:12px;font-weight:bold;text-align:center;">Délivrés</td>
+            <td style="padding:8px 10px;color:#fff;font-size:12px;font-weight:bold;text-align:center;">En cours</td>
+            <td style="padding:8px 10px;color:#fff;font-size:12px;font-weight:bold;text-align:center;">Bloqués</td>
+            <td style="padding:8px 10px;color:#fff;font-size:12px;font-weight:bold;text-align:center;">Taux</td>
+          </tr>
+          {cat_rows}
+        </table>
+
+        {img_tag("top10", "Top 10 opérateurs par volume de dossiers")}
+
+        {'<a name="sec-analysis"></a><div class="pdf-break"></div><div style="font-size:14px;font-weight:bold;color:#0B4965;margin:4px 0 8px;">Analyse</div>' + "".join(f"<p style='font-size:13px;color:#0D1926;line-height:1.6;'>{esc(p)}</p>" for p in notes.get("copilot_text","").split(chr(10)) if p.strip()) if notes.get("copilot_text") else ""}
+
+      </div>
+    </div>
+    """
+    return html
+
+
+@app.route("/api/pchc/preview-email", methods=["POST"])
+def pchc_preview_email():
+    payload = request.json or {}
+    start = payload.get("start") or pchc_default_period()[0]
+    end = payload.get("end") or pchc_default_period()[1]
+    module_settings = load_module_settings("pchc")
+    greeting = payload.get("greeting") or module_settings.get("greeting", "Bonjour,")
+    report_html = build_report_html_pchc(start, end, payload.get("charts"))
+    body_html = build_email_body(f"{start} au {end}", report_html, greeting, module_settings, "Reporting Métier (PCHC)")
+    subject = f"Rapport de Synthèse Reporting Métier PCHC - du {start} au {end}"
+    return jsonify({"subject": subject, "html": body_html})
+
+
+@app.route("/api/pchc/send-email", methods=["POST"])
+def pchc_send_email():
+    payload = request.json or {}
+    start = payload.get("start") or pchc_default_period()[0]
+    end = payload.get("end") or pchc_default_period()[1]
+    module_settings = load_module_settings("pchc")
+    greeting = payload.get("greeting") or module_settings.get("greeting", "Bonjour,")
+    to_list = payload.get("to") or [c["email"] for c in module_settings.get("contacts", []) if c.get("role") == "to"]
+    cc_list = payload.get("cc") or [c["email"] for c in module_settings.get("contacts", []) if c.get("role") == "cc"]
+
+    report_html = build_report_html_pchc(start, end, payload.get("charts"))
+    body_html = build_email_body(f"{start} au {end}", report_html, greeting, module_settings, "Reporting Métier (PCHC)")
+    subject = f"Rapport de Synthèse Reporting Métier PCHC - du {start} au {end}"
+
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["To"] = "; ".join(to_list)
+    if cc_list:
+        msg["Cc"] = "; ".join(cc_list)
+    msg.set_content("Ce message nécessite un client compatible HTML.")
+    msg.add_alternative(body_html, subtype="html")
+
+    xlsx_buf = build_pchc_xlsx(start, end)
+    fname_xlsx = pchc_report_filename()
+    msg.add_attachment(xlsx_buf.read(), maintype="application", subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=fname_xlsx)
+
+    fname = f"rapport_pchc_{start}_{end}.eml"
+    fpath = os.path.join(module_dir("pchc"), "exports", fname)
+    with open(fpath, "wb") as f:
+        f.write(bytes(msg))
+
+    opened = False
+    error = None
+    try:
+        system = platform.system()
+        if system == "Windows":
+            os.startfile(fpath)  # noqa
+            opened = True
+        elif system == "Darwin":
+            subprocess.run(["open", fpath], check=True)
+            opened = True
+        else:
+            subprocess.run(["xdg-open", fpath], check=True)
+            opened = True
+    except Exception as e:
+        error = str(e)
+
+    append_send_log("pchc", {
+        "date": datetime.now().isoformat(timespec="seconds"),
+        "ym": f"{start}_{end}", "subject": subject, "to": to_list, "cc": cc_list, "opened": opened,
+    })
+    return jsonify({"ok": True, "file": fpath, "opened": opened, "error": error, "subject": subject})
+
+
+@app.route("/api/pchc/export-pptx", methods=["POST"])
+def pchc_export_pptx():
+    from pptx import Presentation
+    from pptx.util import Inches, Pt
+    from pptx.dml.color import RGBColor
+    from pptx.enum.text import PP_ALIGN
+    import base64
+
+    payload = request.json or {}
+    start = payload.get("start") or pchc_default_period()[0]
+    end = payload.get("end") or pchc_default_period()[1]
+    charts = payload.get("charts") or {}
+    d = compute_pchc_dashboard(start, end)
+    s = d["summary"]
+    global_settings = load_global_settings()
+    NAVY = RGBColor(0x0B, 0x49, 0x65)
+    AMBER = RGBColor(0xF5, 0x9F, 0x0A)
+    WHITE = RGBColor(0xFF, 0xFF, 0xFF)
+    GREY = RGBColor(0x55, 0x61, 0x6B)
+
+    prs = Presentation()
+    prs.slide_width = Inches(13.33)
+    prs.slide_height = Inches(7.5)
+    blank = prs.slide_layouts[6]
+
+    def add_bg(slide, color=WHITE):
+        rect = slide.shapes.add_shape(1, 0, 0, prs.slide_width, prs.slide_height)
+        rect.fill.solid()
+        rect.fill.fore_color.rgb = color
+        rect.line.fill.background()
+        slide.shapes._spTree.remove(rect._element)
+        slide.shapes._spTree.insert(2, rect._element)
+        return rect
+
+    def add_text(slide, text, left, top, width, height, size=18, bold=False, color=NAVY, align=PP_ALIGN.LEFT):
+        box = slide.shapes.add_textbox(left, top, width, height)
+        tf = box.text_frame
+        tf.word_wrap = True
+        p = tf.paragraphs[0]
+        p.alignment = align
+        run = p.add_run()
+        run.text = text
+        run.font.size = Pt(size)
+        run.font.bold = bold
+        run.font.color.rgb = color
+        run.font.name = "Arial"
+        return box
+
+    # Slide 1 — page de garde
+    slide = prs.slides.add_slide(blank)
+    add_bg(slide, NAVY)
+    add_text(slide, "SANAD", Inches(0.8), Inches(2.6), Inches(6), Inches(0.8), size=40, bold=True, color=WHITE)
+    add_text(slide, "Reporting Métier — PCHC", Inches(0.8), Inches(3.4), Inches(8), Inches(0.7), size=26, bold=True, color=AMBER)
+    add_text(slide, f"Période du {start} au {end}", Inches(0.8), Inches(4.1), Inches(8), Inches(0.5), size=15, color=WHITE)
+    add_text(slide, global_settings.get("agency_name", ""), Inches(0.8), Inches(6.7), Inches(8), Inches(0.4), size=12, color=WHITE)
+
+    # Slide 2 — synthèse exécutive
+    slide = prs.slides.add_slide(blank)
+    add_text(slide, "Synthèse exécutive", Inches(0.6), Inches(0.35), Inches(8), Inches(0.6), size=26, bold=True, color=NAVY)
+    kpis = [("Total dossiers", s["total"], NAVY), ("Délivrés", s["delivered"], hex_to_rgbcolor(PCHC_COLOR_HEX["green"])),
+            ("En cours", s["encours"], hex_to_rgbcolor(PCHC_COLOR_HEX["blue"])), ("Bloqués/Refusés", s["bloque"], hex_to_rgbcolor(PCHC_COLOR_HEX["red"])),
+            ("Taux délivrance", f"{s['taux']}%", NAVY)]
+    x = Inches(0.6)
+    for label, val, color in kpis:
+        box = slide.shapes.add_shape(1, x, Inches(1.2), Inches(2.3), Inches(1.3))
+        box.fill.solid(); box.fill.fore_color.rgb = RGBColor(0xF5, 0xF7, 0xF9)
+        box.line.color.rgb = RGBColor(0xDA, 0xE0, 0xE7)
+        add_text(slide, label, x + Inches(0.15), Inches(1.3), Inches(2.0), Inches(0.4), size=11, color=GREY)
+        add_text(slide, str(val), x + Inches(0.15), Inches(1.7), Inches(2.0), Inches(0.7), size=26, bold=True, color=color)
+        x += Inches(2.5)
+    if d["alerts"]:
+        add_text(slide, "⚠️ Alertes", Inches(0.6), Inches(2.9), Inches(4), Inches(0.4), size=15, bold=True, color=hex_to_rgbcolor(PCHC_COLOR_HEX["red"]))
+        alert_text = "\n".join(f"• {a}" for a in d["alerts"][:6])
+        add_text(slide, alert_text, Inches(0.6), Inches(3.35), Inches(11), Inches(1.8), size=13, color=NAVY)
+
+    # Slide 3 — KPI par module
+    slide = prs.slides.add_slide(blank)
+    add_text(slide, "KPI par module", Inches(0.6), Inches(0.35), Inches(8), Inches(0.6), size=26, bold=True, color=NAVY)
+    y = Inches(1.2)
+    voyant_color = {
+        "green": hex_to_rgbcolor(PCHC_COLOR_HEX["green"]),
+        "yellow": hex_to_rgbcolor(PCHC_COLOR_HEX["yellow"]),
+        "red": hex_to_rgbcolor(PCHC_COLOR_HEX["red"]),
+    }
+    for cat_key, cfg in PCHC_CATEGORIES.items():
+        cat = d["categories"][cat_key]
+        dot = slide.shapes.add_shape(9, Inches(0.7), y + Inches(0.12), Inches(0.18), Inches(0.18))
+        dot.fill.solid(); dot.fill.fore_color.rgb = voyant_color.get(cat["voyant"], GREY)
+        dot.line.fill.background()
+        add_text(slide, cfg["label"], Inches(1.0), y, Inches(4.2), Inches(0.4), size=13, bold=True, color=NAVY)
+        add_text(slide, f"Total: {cat['total']}  ·  Délivrés: {cat['delivered']}  ·  En cours: {cat['encours']}  ·  Bloqués: {cat['bloque']}  ·  Taux: {cat['taux']}%",
+                  Inches(5.3), y, Inches(7.2), Inches(0.4), size=12, color=GREY)
+        y += Inches(0.55)
+
+    # Slides graphiques (si fournis)
+    for key, title in [("summary","Répartition globale des statuts"), ("backlog","Ancienneté du backlog"), ("top10","Top 10 opérateurs")]:
+        b64 = charts.get(key)
+        if not b64:
+            continue
+        slide = prs.slides.add_slide(blank)
+        add_text(slide, title, Inches(0.6), Inches(0.35), Inches(10), Inches(0.6), size=24, bold=True, color=NAVY)
+        try:
+            img_data = base64.b64decode(b64.split(",")[1])
+            img_stream = io.BytesIO(img_data)
+            slide.shapes.add_picture(img_stream, Inches(1.2), Inches(1.2), height=Inches(5.6))
+        except Exception:
+            pass
+
+    # Slide finale — conclusions
+    slide = prs.slides.add_slide(blank)
+    add_bg(slide, NAVY)
+    add_text(slide, "Conclusions", Inches(0.8), Inches(0.6), Inches(6), Inches(0.7), size=28, bold=True, color=WHITE)
+    concl = f"Taux de délivrance global : {s['taux']}%\nDossiers en cours : {s['encours']}\nDossiers bloqués/refusés : {s['bloque']}"
+    add_text(slide, concl, Inches(0.8), Inches(1.6), Inches(10), Inches(2), size=16, color=AMBER)
+
+    buf = io.BytesIO()
+    prs.save(buf)
+    buf.seek(0)
+    stamp = datetime.now().strftime("%Y%m%d")
+    return send_file(buf, as_attachment=True, download_name=f"SANAD_PCHC_RevueDirection_{stamp}.pptx",
+                      mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+
+
+# ---------------------------------------------------------------------------
 # Pages
 # ---------------------------------------------------------------------------
 @app.route("/")
+
 def index():
     return render_template("index.html")
 
@@ -864,6 +1784,27 @@ def save_analysis(module, ym):
     payload.setdefault("month_label", month_label_fr(ym))
     _save(module, "analysis", ym, payload)
     return jsonify({"ok": True})
+
+
+# ---------------------------------------------------------------------------
+# API - Journal d'audit (Administrateur uniquement, cf. auth_gate)
+# ---------------------------------------------------------------------------
+@app.route("/api/admin/audit-log")
+def get_audit_log():
+    limit = min(int(request.args.get("limit", 200)), 1000)
+    entries = []
+    if os.path.exists(AUDIT_LOG_FILE):
+        with open(AUDIT_LOG_FILE, "r", encoding="utf-8") as f:
+            for line in f:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    entries.append(json.loads(line))
+                except json.JSONDecodeError:
+                    continue
+    entries.reverse()
+    return jsonify(entries[:limit])
 
 
 # ---------------------------------------------------------------------------
@@ -1103,6 +2044,42 @@ def month_range(start_ym, end_ym):
     return out
 
 
+@app.route("/api/moussanada/category-trend")
+def moussanada_category_trend():
+    """Évolution du volume des catégories de tickets sur plusieurs mois (contrairement au Pareto
+    du dashboard, figé sur le mois courant). S'appuie sur les fichiers sources_<mois>.json déjà
+    conservés à chaque import — aucune donnée supplémentaire à collecter côté GLPI."""
+    start_ym = request.args.get("start")
+    end_ym = request.args.get("end")
+    if not start_ym or not end_ym:
+        ts = load_timeseries()
+        known_months = sorted(ts.keys())
+        if not known_months:
+            return jsonify({"months": [], "categories": [], "series": {}})
+        end_ym = known_months[-1]
+        start_idx = max(0, len(known_months) - 6)
+        start_ym = known_months[start_idx]
+    months = month_range(start_ym, end_ym)
+
+    per_month = {}
+    all_labels = set()
+    for ym in months:
+        src = load_sources(ym)
+        cats = {c["label"]: c.get("ouverts", 0) for c in src.get("categories", [])}
+        per_month[ym] = cats
+        all_labels.update(cats.keys())
+
+    # Ne garder que le Top 8 des catégories (en volume cumulé) pour un graphique lisible
+    totals = {label: sum(per_month[ym].get(label, 0) for ym in months) for label in all_labels}
+    top_labels = [l for l, _ in sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:8]]
+
+    series = {label: [per_month[ym].get(label, 0) for ym in months] for label in top_labels}
+    return jsonify({
+        "months": months, "month_labels": [month_label_fr(ym) for ym in months],
+        "categories": top_labels, "series": series,
+    })
+
+
 @app.route("/api/<module>/annual/<int:year>")
 def annual(module, year):
     check_module(module)
@@ -1263,11 +2240,11 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
         if not prev_v and not cur:
             return ""
         if not prev_v:
-            return "<div style='font-size:11px;font-weight:700;color:#67737E;margin-top:2px;'>nouveau</div>"
+            return "<div style='font-size:11px;font-weight:700;color:#55616B;margin-top:2px;'>nouveau</div>"
         diff = ((cur - prev_v) / prev_v) * 100
         sign = "+" if diff >= 0 else ""
         if abs(diff) < 1 or polarity == "neutral":
-            color = "#67737E"
+            color = "#55616B"
         else:
             is_up = diff > 0
             is_good = is_up if polarity == "positive" else not is_up
@@ -1276,7 +2253,7 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
 
     def kpi_card(label, value, delta_html="", bg="#F5F7F9", color="#0B4965"):
         return f"""<td style="width:25%;padding:10px;text-align:center;background:{bg};border:1px solid #DAE0E7;">
-          <div style="font-size:11px;color:#67737E;">{esc(label)}</div>
+          <div style="font-size:11px;color:#55616B;">{esc(label)}</div>
           <div style="font-size:18px;font-weight:bold;color:{color};">{esc(value)}</div>
           {delta_html}
         </td>"""
@@ -1285,7 +2262,7 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
         b64 = charts.get(key)
         if not b64:
             return ""
-        caption = f'<div style="font-size:11.5px;color:#67737E;text-align:center;margin:4px 0 14px;">{esc(title)}</div>' if title else ""
+        caption = f'<div style="font-size:11.5px;color:#55616B;text-align:center;margin:4px 0 14px;">{esc(title)}</div>' if title else ""
         return f'<img src="{b64}" style="max-width:100%;border-radius:8px;margin:14px 0 0;border:1px solid #DAE0E7;display:block;">{caption}'
 
     def rows_cat_problems(items, total):
@@ -1298,7 +2275,7 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
               <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:13px;color:#0D1926;">{esc(it.get('label',''))}</td>
               <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:13px;color:#0D1926;text-align:center;font-weight:bold;">{it.get('count',0)}</td>
               <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:13px;color:#DC2828;text-align:center;">{p}%</td>
-              <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12px;color:#67737E;">{esc(it.get('desc',''))}{f'<br><em>Action : {esc(action)}</em>' if action else ''}</td>
+              <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12px;color:#55616B;">{esc(it.get('desc',''))}{f'<br><em>Action : {esc(action)}</em>' if action else ''}</td>
             </tr>"""
         return out
 
@@ -1311,7 +2288,7 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
               <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:13px;color:#0D1926;">{esc(it.get('label',''))}</td>
               <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:13px;color:#0D1926;text-align:center;font-weight:bold;">{it.get('count',0)}</td>
               <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:13px;color:#25935F;text-align:center;">{p}%</td>
-              <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12px;color:#67737E;">{esc(it.get('desc',''))}</td>
+              <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12px;color:#55616B;">{esc(it.get('desc',''))}</td>
             </tr>"""
         return out
 
@@ -1325,7 +2302,7 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
               <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:13px;font-weight:{'bold' if is_crit else 'normal'};color:#0D1926;">{esc(w.get('week',''))}{' ⚠️' if is_crit else ''}</td>
               <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:13px;text-align:center;color:#DC2828;font-weight:bold;">{w.get('bugs',0)}</td>
               <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:13px;text-align:center;color:#25935F;font-weight:bold;">{w.get('demandes',0)}</td>
-              <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12px;color:#67737E;">{esc(w.get('obs',''))}</td>
+              <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12px;color:#55616B;">{esc(w.get('obs',''))}</td>
             </tr>"""
         return out
 
@@ -1374,10 +2351,24 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
           </tr>
         </table>
 
+        <div style="margin:6px 0 4px;padding:10px 14px;background:#F5F7F9;border:1px solid #DAE0E7;border-radius:6px;">
+          <div style="font-size:10.5px;font-weight:800;color:#0B4965;letter-spacing:.4px;text-transform:uppercase;margin-bottom:6px;">Sommaire</div>
+          <a href="#sec-graphs" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">1. Analyse graphique</a>
+          <a href="#sec-problems" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">2. Problèmes techniques</a>
+          <a href="#sec-demandes" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">3. Demandes d'information</a>
+          <a href="#sec-weekly" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">4. Évolution hebdomadaire</a>
+          <a href="#sec-synth" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">5. Constats &amp; recommandations</a>
+        </div>
+
+        <a name="sec-graphs"></a>
+        <div class="pdf-break"></div>
+        <div style="font-size:15px;font-weight:800;color:#0B4965;margin:4px 0 4px;">Analyse graphique</div>
         {img_tag("weekly", "Évolution hebdomadaire — Bugs vs Demandes")}
         {img_tag("problems", "Répartition des problèmes techniques")}
 
-        <div style="font-size:14px;font-weight:bold;color:#0B4965;margin:20px 0 8px;">Problèmes techniques signalés ({total_problems})</div>
+        <a name="sec-problems"></a>
+        <div class="pdf-break"></div>
+        <div style="font-size:14px;font-weight:bold;color:#0B4965;margin:4px 0 8px;">Problèmes techniques signalés ({total_problems})</div>
         <table style="width:100%;border-collapse:collapse;border:1px solid #DAE0E7;">
           <tr style="background:#0B4965;">
             <td style="padding:8px 10px;color:#fff;font-size:12px;font-weight:bold;">Type</td>
@@ -1388,7 +2379,9 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
           {rows_cat_problems(problems, total_problems)}
         </table>
 
-        <div style="font-size:14px;font-weight:bold;color:#0B4965;margin:20px 0 8px;">Demandes d'information reçues ({total_demandes})</div>
+        <a name="sec-demandes"></a>
+        <div class="pdf-break"></div>
+        <div style="font-size:14px;font-weight:bold;color:#0B4965;margin:4px 0 8px;">Demandes d'information reçues ({total_demandes})</div>
         <table style="width:100%;border-collapse:collapse;border:1px solid #DAE0E7;">
           <tr style="background:#0B4965;">
             <td style="padding:8px 10px;color:#fff;font-size:12px;font-weight:bold;">Type</td>
@@ -1399,7 +2392,9 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
           {rows_cat_demandes(demandes, total_demandes)}
         </table>
 
-        <div style="font-size:14px;font-weight:bold;color:#0B4965;margin:20px 0 8px;">Évolution hebdomadaire</div>
+        <a name="sec-weekly"></a>
+        <div class="pdf-break"></div>
+        <div style="font-size:14px;font-weight:bold;color:#0B4965;margin:4px 0 8px;">Évolution hebdomadaire</div>
         <table style="width:100%;border-collapse:collapse;border:1px solid #DAE0E7;">
           <tr style="background:#0B4965;">
             <td style="padding:8px 10px;color:#fff;font-size:12px;font-weight:bold;">Semaine</td>
@@ -1410,9 +2405,11 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
           {rows_weekly()}
         </table>
 
-        {"<div style='font-size:14px;font-weight:bold;color:#0B4965;margin:20px 0 8px;'>Mots-clés fréquents</div><div style='font-size:12.5px;color:#67737E;margin-bottom:16px;'>" + keywords_line + "</div>" if keywords_line else ""}
+        {"<div style='font-size:14px;font-weight:bold;color:#0B4965;margin:20px 0 8px;'>Mots-clés fréquents</div><div style='font-size:12.5px;color:#55616B;margin-bottom:16px;'>" + keywords_line + "</div>" if keywords_line else ""}
 
-        <div style="font-size:14px;font-weight:bold;color:#0B4965;margin:20px 0 8px;">Constats clés</div>
+        <a name="sec-synth"></a>
+        <div class="pdf-break"></div>
+        <div style="font-size:14px;font-weight:bold;color:#0B4965;margin:4px 0 8px;">Constats clés</div>
         <ul style="padding-left:18px;margin:0 0 16px;">{list_html(constats)}</ul>
 
         <div style="font-size:14px;font-weight:bold;color:#0B4965;margin:16px 0 8px;">Recommandations</div>
@@ -1479,11 +2476,11 @@ def build_report_html_moussanada(ym, month_label, charts=None):
         if not prev_v and not cur:
             return ""
         if not prev_v:
-            return "<div style='font-size:11px;font-weight:700;color:#67737E;margin-top:2px;'>nouveau</div>"
+            return "<div style='font-size:11px;font-weight:700;color:#55616B;margin-top:2px;'>nouveau</div>"
         diff = ((cur - prev_v) / prev_v) * 100
         sign = "+" if diff >= 0 else ""
         if abs(diff) < 1 or polarity == "neutral":
-            color = "#67737E"
+            color = "#55616B"
         else:
             is_up = diff > 0
             is_good = is_up if polarity == "positive" else not is_up
@@ -1492,7 +2489,7 @@ def build_report_html_moussanada(ym, month_label, charts=None):
 
     def kpi_card(label, value, delta_html="", bg="#F5F7F9", color="#0B4965"):
         return f"""<td style="width:25%;padding:10px;text-align:center;background:{bg};border:1px solid #DAE0E7;">
-          <div style="font-size:11px;color:#67737E;">{esc(label)}</div>
+          <div style="font-size:11px;color:#55616B;">{esc(label)}</div>
           <div style="font-size:18px;font-weight:bold;color:{color};">{esc(value)}</div>
           {delta_html}
         </td>"""
@@ -1506,7 +2503,7 @@ def build_report_html_moussanada(ym, month_label, charts=None):
               <td style="padding:7px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12.5px;color:#0D1926;">{esc(it.get('label',''))}</td>
               <td style="padding:7px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12.5px;text-align:center;font-weight:bold;">{it.get('ouverts',0)}</td>
               <td style="padding:7px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12.5px;text-align:center;color:#25935F;">{it.get('resolus',0)}</td>
-              <td style="padding:7px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12px;color:#67737E;text-align:center;">{p}%</td>
+              <td style="padding:7px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12px;color:#55616B;text-align:center;">{p}%</td>
             </tr>"""
         return out
 
@@ -1544,15 +2541,27 @@ def build_report_html_moussanada(ym, month_label, charts=None):
 
     def copilot_box(text):
         if not text or not text.strip():
-            return "<div style='font-size:12px;color:#67737E;font-style:italic;margin:6px 0 6px;'>— Analyse Copilot non renseignée pour cette section —</div>"
+            return "<div style='font-size:12px;color:#55616B;font-style:italic;margin:6px 0 6px;'>— Analyse Copilot non renseignée pour cette section —</div>"
         paras = "".join(f"<p style='margin:0 0 8px;'>{esc(p)}</p>" for p in text.split("\n") if p.strip())
         return f"""<div style="background:#E7EEF2;border-left:4px solid #0B4965;border-radius:0 8px 8px 0;padding:12px 16px;margin:10px 0 4px;font-size:13px;color:#0D1926;line-height:1.6;">{paras}</div>"""
 
     def section_title(n, title):
-        return f"""<div style="margin:28px 0 10px;padding-bottom:6px;border-bottom:2px solid #0B4965;">
+        break_div = '<div class="pdf-break"></div>' if n > 1 else ""
+        return f"""<a name="sec-{n}"></a>{break_div}<div style="margin:4px 0 10px;padding-bottom:6px;border-bottom:2px solid #0B4965;">
           <span style="font-size:10.5px;font-weight:800;color:#F59F0A;letter-spacing:.6px;">SECTION {n}</span>
           <div style="font-size:17px;font-weight:800;color:#0B4965;">{esc(title)}</div>
         </div>"""
+
+    moussanada_toc_titles = [
+        "Volume global des tickets", "Évolution des délais de traitement",
+        f"Principales catégories de demandes en {month_label}", "Services les plus demandeurs",
+        "Charge et mobilisation de l'équipe SI", f"Analyse comparative {prev_month_label} / {month_label}",
+        "Synthèse finale et conclusion",
+    ]
+    moussanada_toc_html = f"""<div style="margin:10px 0 4px;padding:10px 14px;background:#F5F7F9;border:1px solid #DAE0E7;border-radius:6px;">
+      <div style="font-size:10.5px;font-weight:800;color:#0B4965;letter-spacing:.4px;text-transform:uppercase;margin-bottom:6px;">Sommaire</div>
+      {"".join(f'<a href="#sec-{i+1}" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">{i+1}. {esc(t)}</a>' for i, t in enumerate(moussanada_toc_titles))}
+    </div>"""
 
     sections = notes.get("sections", {})
     global_settings = load_global_settings()
@@ -1565,6 +2574,8 @@ def build_report_html_moussanada(ym, month_label, charts=None):
         <div style="color:#B9D3E0;font-size:13px;margin-top:4px;">{esc(global_settings.get('agency_name',''))} — Helpdesk GLPI — {esc(month_label)}</div>
       </div>
       <div style="padding:20px 24px;border:1px solid #DAE0E7;border-top:none;">
+
+        {moussanada_toc_html}
 
         {section_title(1, "Volume global des tickets")}
         <table style="width:100%;border-collapse:collapse;margin-bottom:6px;"><tr>
@@ -1630,7 +2641,7 @@ def build_report_html_moussanada(ym, month_label, charts=None):
         {copilot_box(sections.get("team", ""))}
 
         {section_title(6, f"Analyse comparative {prev_month_label} / {month_label}")}
-        <p style="font-size:12.5px;color:#67737E;margin:0 0 4px;">Comparatif des volumes et des délais moyens entre les deux mois.</p>
+        <p style="font-size:12.5px;color:#55616B;margin:0 0 4px;">Comparatif des volumes et des délais moyens entre les deux mois.</p>
         {img_tag("volume")}
         {img_tag("delay")}
         {copilot_box(sections.get("comparative", ""))}
@@ -1733,6 +2744,56 @@ def send_email(module, ym):
 # ---------------------------------------------------------------------------
 # API - Export Excel du dashboard (par volet)
 # ---------------------------------------------------------------------------
+def render_pdf_bytes(inner_html, landscape=False, header_label=None):
+    from xhtml2pdf import pisa
+    size = "A4 landscape" if landscape else "A4"
+    header_block = ""
+    frame_rule = ""
+    if header_label:
+        header_block = f"""<div id="pdfRunningHeader" style="font-size:9px;color:#55616B;
+          border-bottom:1px solid #DAE0E7;padding-bottom:4px;">
+          <strong style="color:#0B4965;">SANAD — AMMPS/DSID</strong> &nbsp;·&nbsp; {header_label}
+        </div>"""
+        frame_rule = """
+          @frame header_frame {
+            -pdf-frame-content: pdfRunningHeader;
+            top: 0.6cm; left: 1.4cm; width: 18cm; height: 0.9cm;
+          }"""
+    doc = f"""<html><head><meta charset="utf-8">
+    <style>
+      @page {{ size: {size}; margin: {"2.1cm" if header_label else "1.4cm"} 1.4cm 1.4cm 1.4cm;{frame_rule} }}
+      body {{ font-family: Arial, sans-serif; }}
+      img {{ max-width: 100%; }}
+      .pdf-break {{ page-break-before: always; }}
+    </style>
+    </head><body>{header_block}{inner_html}</body></html>"""
+    buf = io.BytesIO()
+    pisa.CreatePDF(src=doc, dest=buf, encoding="utf-8")
+    buf.seek(0)
+    return buf
+
+
+@app.route("/api/<module>/export-pdf/<ym>", methods=["POST"])
+def export_pdf(module, ym):
+    check_module(module)
+    payload = request.json or {}
+    report_html, month_label = get_report_html_and_label(module, ym, payload.get("charts"))
+    header_label = f"{MODULES.get(module,{}).get('label', module)} — {month_label}"
+    buf = render_pdf_bytes(report_html, header_label=header_label)
+    return send_file(buf, as_attachment=True, download_name=f"rapport_{module}_{ym}.pdf", mimetype="application/pdf")
+
+
+@app.route("/api/pchc/export-pdf", methods=["POST"])
+def pchc_export_pdf():
+    payload = request.json or {}
+    start = payload.get("start") or pchc_default_period()[0]
+    end = payload.get("end") or pchc_default_period()[1]
+    report_html = build_report_html_pchc(start, end, payload.get("charts"))
+    header_label = f"Reporting Métier — du {start} au {end}"
+    buf = render_pdf_bytes(report_html, header_label=header_label)
+    return send_file(buf, as_attachment=True, download_name=f"rapport_pchc_{start}_{end}.pdf", mimetype="application/pdf")
+
+
 @app.route("/api/<module>/export-xlsx/<ym>")
 def export_xlsx(module, ym):
     check_module(module)
@@ -1783,6 +2844,7 @@ def export_xlsx(module, ym):
         c.font = header_font
     total_p = sum(p.get("count", 0) for p in problems)
     row += 1
+    problems_data_start = row
     for p in problems:
         pct = round(p.get("count", 0) / total_p * 100, 1) if total_p else 0
         ws.cell(row=row, column=1, value=p.get("label", ""))
@@ -1791,6 +2853,7 @@ def export_xlsx(module, ym):
         ws.cell(row=row, column=4, value=p.get("desc", ""))
         ws.cell(row=row, column=5, value=p.get("action", ""))
         row += 1
+    problems_data_end = row - 1
 
     row += 1
     ws.cell(row=row, column=1, value="Demandes d'information").font = title_font
@@ -1812,20 +2875,59 @@ def export_xlsx(module, ym):
     row += 1
     ws.cell(row=row, column=1, value="Évolution hebdomadaire").font = title_font
     row += 1
+    weekly_header_row = row
     for i, h in enumerate(["Semaine", "Bugs", "Demandes", "Observations"]):
         c = ws.cell(row=row, column=i + 1, value=h)
         c.fill = header_fill
         c.font = header_font
     row += 1
+    weekly_data_start = row
     for w in weekly:
         ws.cell(row=row, column=1, value=w.get("week", ""))
         ws.cell(row=row, column=2, value=w.get("bugs", 0))
         ws.cell(row=row, column=3, value=w.get("demandes", 0))
         ws.cell(row=row, column=4, value=w.get("obs", ""))
         row += 1
+    weekly_data_end = row - 1
 
     for col, width in zip("ABCDE", [26, 12, 10, 40, 26]):
         ws.column_dimensions[col].width = width
+
+    if weekly and weekly_data_end >= weekly_data_start:
+        from openpyxl.chart import BarChart, Reference
+        from openpyxl.chart.label import DataLabelList
+        bar = BarChart()
+        bar.type = "col"
+        bar.title = "Évolution hebdomadaire — Bugs vs Demandes"
+        bar.y_axis.title = "Nombre"
+        cats = Reference(ws, min_col=1, min_row=weekly_data_start, max_row=weekly_data_end)
+        bar_data = Reference(ws, min_col=2, max_col=3, min_row=weekly_header_row, max_row=weekly_data_end)
+        bar.add_data(bar_data, titles_from_data=True)
+        bar.set_categories(cats)
+        bar.height = 8
+        bar.width = 16
+        bar.legend.position = "b"
+        bar.legend.overlay = False
+        bar.dataLabels = DataLabelList()
+        bar.dataLabels.showVal = True
+        ws.add_chart(bar, "H3")
+
+    if problems and problems_data_end >= problems_data_start:
+        from openpyxl.chart import PieChart, Reference
+        from openpyxl.chart.label import DataLabelList
+        pie = PieChart()
+        pie.title = "Répartition des problèmes techniques"
+        labels = Reference(ws, min_col=1, min_row=problems_data_start, max_row=problems_data_end)
+        pie_data = Reference(ws, min_col=2, min_row=problems_data_start, max_row=problems_data_end)
+        pie.add_data(pie_data)
+        pie.set_categories(labels)
+        pie.height = 8
+        pie.width = 12
+        pie.legend.position = "b"
+        pie.legend.overlay = False
+        pie.dataLabels = DataLabelList()
+        pie.dataLabels.showPercent = True
+        ws.add_chart(pie, "H20")
 
     write_alerts_sheet(wb, module, header_fill, header_font)
 

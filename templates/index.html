@@ -57,25 +57,46 @@
     </div>
 
     <nav class="nav">
-      <!-- Tarkhiss -->
-      <button class="nav-item active" data-tab="dashboard" data-module="tarkhiss" data-roles="admin,superviseur">
-        <span class="nav-ico">▦</span> Dashboard
-      </button>
-      <button class="nav-item" data-tab="calls" data-module="tarkhiss" data-roles="admin,superviseur">
-        <span class="nav-ico">☎</span> Appels <span class="nav-badge" id="badgeCalls"></span>
-      </button>
-      <button class="nav-item" data-tab="emails" data-module="tarkhiss" data-roles="admin,superviseur">
-        <span class="nav-ico">✉</span> Emails <span class="nav-badge" id="badgeEmails"></span>
-      </button>
-      <button class="nav-item" data-tab="analysis" data-module="tarkhiss" data-roles="admin,superviseur">
-        <span class="nav-ico">◇</span> Analyse mensuelle
-      </button>
-      <button class="nav-item" data-tab="annual" data-module="tarkhiss" data-roles="admin,superviseur">
-        <span class="nav-ico">📈</span> Vue annuelle
-      </button>
-      <button class="nav-item" data-tab="prompts" data-module="tarkhiss" data-roles="admin,superviseur">
-        <span class="nav-ico">✦</span> Prompts Copilot
-      </button>
+      <!-- Sous-groupe Tarkhiss : Reporting Hotline & Emails -->
+      <div class="nav-subgroup-title" data-module="tarkhiss" data-roles="admin,superviseur">
+        <span class="nav-subgroup-ico">🎧</span> Reporting Hotline &amp; Emails
+      </div>
+      <div class="nav-subgroup" data-module="tarkhiss" data-roles="admin,superviseur">
+        <button class="nav-item active" data-tab="dashboard" data-module="tarkhiss" data-roles="admin,superviseur">
+          <span class="nav-ico">▦</span> Dashboard
+        </button>
+        <button class="nav-item" data-tab="calls" data-module="tarkhiss" data-roles="admin,superviseur">
+          <span class="nav-ico">☎</span> Appels <span class="nav-badge" id="badgeCalls"></span>
+        </button>
+        <button class="nav-item" data-tab="emails" data-module="tarkhiss" data-roles="admin,superviseur">
+          <span class="nav-ico">✉</span> Emails <span class="nav-badge" id="badgeEmails"></span>
+        </button>
+        <button class="nav-item" data-tab="analysis" data-module="tarkhiss" data-roles="admin,superviseur">
+          <span class="nav-ico">◇</span> Analyse mensuelle
+        </button>
+        <button class="nav-item" data-tab="annual" data-module="tarkhiss" data-roles="admin,superviseur">
+          <span class="nav-ico">📈</span> Vue annuelle
+        </button>
+        <button class="nav-item" data-tab="prompts" data-module="tarkhiss" data-roles="admin,superviseur">
+          <span class="nav-ico">✦</span> Prompts Copilot
+        </button>
+      </div>
+
+      <!-- Sous-groupe Tarkhiss : Reporting Métier (PCHC) -->
+      <div class="nav-subgroup-title" data-module="pchc" data-roles="admin,superviseur">
+        <span class="nav-subgroup-ico">🗂️</span> Reporting Métier
+      </div>
+      <div class="nav-subgroup" data-module="pchc" data-roles="admin,superviseur">
+        <button class="nav-item" data-tab="p-dashboard" data-module="pchc" data-roles="admin,superviseur">
+          <span class="nav-ico">▦</span> Dashboard
+        </button>
+        <button class="nav-item" data-tab="p-import" data-module="pchc" data-roles="admin,superviseur">
+          <span class="nav-ico">📥</span> Import données
+        </button>
+        <button class="nav-item" data-tab="p-analysis" data-module="pchc" data-roles="admin,superviseur">
+          <span class="nav-ico">◇</span> Analyse &amp; Copilot
+        </button>
+      </div>
 
       <!-- Moussanada -->
       <button class="nav-item" data-tab="m-dashboard" data-module="moussanada" data-roles="admin,superviseur">
@@ -125,6 +146,7 @@
         <div class="global-search-results" id="globalSearchResults"></div>
       </div>
       <div id="saveIndicator" class="save-indicator"></div>
+      <div id="lastSyncIndicator" class="last-sync-indicator" title="Horodatage de la dernière écriture de données pour ce volet"></div>
       <div class="user-menu">
         <span id="userMenuName"></span>
         <span class="role-pill" id="userMenuRole"></span>
@@ -550,6 +572,132 @@
       <div id="mGuideContent"></div>
     </section>
 
+    <!-- ============ DOSSIERS PCHC ============ -->
+
+    <!-- TAB: P-DASHBOARD -->
+    <section class="tab-panel" id="tab-p-dashboard">
+      <div class="panel-head panel-head-row">
+        <div>
+          <h1 id="pDashTitle">Dashboard Reporting Métier</h1>
+          <p>Synthèse exécutive, KPI par module, alertes — période libre.</p>
+        </div>
+        <div class="period-picker">
+          <div class="period-presets" id="pPeriodPresets"></div>
+          <div class="month-picker">
+            <label>Du</label><input type="date" id="pPeriodStart">
+            <label>Au</label><input type="date" id="pPeriodEnd">
+          </div>
+        </div>
+      </div>
+
+      <div class="agg-toggle" id="pSpecializationSwitch" style="margin-bottom:16px;"></div>
+
+      <div class="dash-actions" style="margin-bottom:16px;">
+        <button class="btn btn-outline" id="pXlsxBtn">⬇ Excel consolidé</button>
+        <button class="btn btn-outline" id="pPdfBtn">⬇ PDF</button>
+        <button class="btn btn-outline" id="pPptxBtn">📊 PPTX Revue Direction</button>
+        <button class="btn btn-primary" id="pMailToggleBtn">✉ Envoyer par email</button>
+      </div>
+
+      <div class="card email-panel" id="pEmailPanel" style="display:none;">
+        <h2>Envoi du rapport par email</h2>
+        <p class="hint">Le fichier Excel consolidé sera automatiquement joint au message.</p>
+        <div class="email-panel-grid">
+          <div>
+            <div class="mini-label">Destinataires (À)</div>
+            <div class="contact-check-list" id="pToCheckList"></div>
+          </div>
+          <div>
+            <div class="mini-label">Copie (Cc)</div>
+            <div class="contact-check-list" id="pCcCheckList"></div>
+          </div>
+        </div>
+        <div class="mini-label" style="margin-top:12px;">Formule d'appel (bonjour)</div>
+        <textarea id="pGreetingInput" rows="2" placeholder="Bonjour,"></textarea>
+        <div class="actions-row" style="margin-top:12px;">
+          <button class="btn btn-outline" id="pPreviewMailBtn">👁 Aperçu</button>
+          <button class="btn btn-primary" id="pConfirmSendBtn">✉ Confirmer et envoyer (Outlook)</button>
+        </div>
+      </div>
+
+      <div class="banner danger" id="pAlertBanner" style="display:none;"></div>
+      <div id="pDashboardContent"></div>
+    </section>
+
+    <!-- TAB: P-IMPORT -->
+    <section class="tab-panel" id="tab-p-import">
+      <div class="panel-head">
+        <h1>Import des données</h1>
+        <p>Dernier import : <strong id="pLastImport">—</strong></p>
+      </div>
+
+      <div class="agg-toggle" id="pSpecializationSwitchImport" style="margin-bottom:16px;"></div>
+
+      <div class="banner info" id="pNewStatusBanner" style="display:none;"></div>
+
+      <div class="card">
+        <h2>Import consolidé (.xlsx)</h2>
+        <p class="hint">Détection automatique des 5 feuilles : Identification Opérateur, Déclaration d'Activité, Certificat d'Enregistrement, Certificat de Libre Vente, Autorisation d'Importation Matières Premières.</p>
+        <label class="btn btn-primary file-btn">
+          ⬆ Importer un fichier Excel
+          <input type="file" id="pImportXlsx" accept=".xlsx" hidden>
+        </label>
+        <span class="hint autosave-hint" id="pImportHint"></span>
+      </div>
+
+      <div class="card">
+        <h2>Import séparé (.csv)</h2>
+        <div class="contact-add-row" style="grid-template-columns:1fr 1fr auto;">
+          <select id="pCsvKind">
+            <option value="identification">Identification Opérateur</option>
+            <option value="declaration">Déclaration d'Activité</option>
+            <option value="ce">Certificat d'Enregistrement</option>
+            <option value="clv">Certificat de Libre Vente</option>
+            <option value="aimp">Autorisation d'Importation Matières Premières</option>
+          </select>
+          <input type="file" id="pCsvFile" accept=".csv">
+          <button class="btn-add" id="pCsvImportBtn">Importer</button>
+        </div>
+      </div>
+
+      <div class="card">
+        <h2>Table de correspondance Statut → Couleur</h2>
+        <p class="hint">Paramétrable — les statuts non reconnus s'affichent en gris par défaut.</p>
+        <table class="dash-table" id="pStatusColorsTable">
+          <thead><tr><th>Statut observé</th><th>Couleur</th></tr></thead>
+          <tbody></tbody>
+        </table>
+        <button class="btn btn-primary" id="pSaveStatusColorsBtn" style="margin-top:10px;">Enregistrer la correspondance</button>
+      </div>
+    </section>
+
+    <!-- TAB: P-ANALYSE & COPILOT -->
+    <section class="tab-panel" id="tab-p-analysis">
+      <div class="panel-head">
+        <h1>Analyse &amp; Prompt Copilot</h1>
+        <p>Générez le prompt, collez l'analyse Copilot — intégrée au rapport final.</p>
+      </div>
+
+      <div class="card">
+        <div class="card-head">
+          <h2>Prompt Copilot — période <span id="pPromptPeriodLabel"></span></h2>
+          <button class="btn-add copy-btn" data-copy="pPrompt">📋 Copier</button>
+        </div>
+        <pre class="prompt-box" id="pPrompt"></pre>
+      </div>
+
+      <div class="card">
+        <h2>Analyse générée par Copilot</h2>
+        <p class="hint">Collez ici le texte rédigé par Copilot (synthèse exécutive, lecture des KPI, conclusions).</p>
+        <textarea id="pCopilotText" rows="10" placeholder="Collez ici l'analyse générée par Copilot..."></textarea>
+      </div>
+
+      <div class="actions-row">
+        <button class="btn btn-primary" id="pSaveNotesBtn">Enregistrer l'analyse</button>
+        <span class="hint autosave-hint" id="pAnalysisAutosaveHint"></span>
+      </div>
+    </section>
+
     <!-- TAB: ADMINISTRATION -->
     <section class="tab-panel" id="tab-admin">
       <div class="panel-head">
@@ -575,6 +723,21 @@
           <div class="logo-row">
             <img id="logoPreview" class="logo-preview" alt="">
             <input type="file" id="logoInput" accept=".png,.jpg,.jpeg,.svg">
+          </div>
+        </div>
+        <div class="form-row">
+          <label>Thème visuel de l'écran (n'affecte pas les PDF/Excel/PPTX)</label>
+          <div class="theme-choice">
+            <label class="theme-option">
+              <input type="radio" name="uiTheme" value="flat" id="themeFlatInput">
+              <span class="theme-swatch theme-swatch--flat"></span>
+              <span>Flat (actuel)</span>
+            </label>
+            <label class="theme-option">
+              <input type="radio" name="uiTheme" value="soft" id="themeSoftInput">
+              <span class="theme-swatch theme-swatch--soft"></span>
+              <span>Neumorphism doux</span>
+            </label>
           </div>
         </div>
         <button class="btn btn-primary" id="saveGlobalSettingsBtn">Enregistrer</button>
@@ -665,6 +828,15 @@
         <button class="btn btn-primary" id="saveThresholdsBtn">Enregistrer</button>
       </div>
 
+      <div class="card" id="pchcThresholdsCard">
+        <h2>⚠️ Seuils Reporting Métier (PCHC) — voyants et alertes</h2>
+        <div class="form-row"><label>Taux de délivrance — seuil 🟢 (%)</label><input type="number" id="pThHaut" style="max-width:140px;"></div>
+        <div class="form-row"><label>Taux de délivrance — seuil 🟡 (%, en dessous = 🔴)</label><input type="number" id="pThBas" style="max-width:140px;"></div>
+        <div class="form-row"><label>Alerte si stock "en cours" dépasse</label><input type="number" id="pThBacklog" style="max-width:140px;"></div>
+        <div class="form-row"><label>Alerte si dossiers &gt;90j dépassent</label><input type="number" id="pThOld" style="max-width:140px;"></div>
+        <button class="btn btn-primary" id="pSaveThresholdsBtn">Enregistrer</button>
+      </div>
+
       <div class="card">
         <h2>📜 Historique des seuils déclenchés — volet <span id="adminModuleLabel8">Tarkhiss</span></h2>
         <table class="dash-table" id="alertHistoryTable">
@@ -683,6 +855,18 @@
             <input type="file" id="importConfigFile" accept=".json" hidden>
           </label>
         </div>
+      </div>
+
+      <div class="card">
+        <h2>🔍 Journal d'audit</h2>
+        <p class="hint">Connexions, imports, et gestion des comptes — les 200 événements les plus récents (tous volets confondus).</p>
+        <div class="actions-row" style="margin-bottom:10px;">
+          <button class="btn btn-outline" id="refreshAuditLogBtn">↻ Actualiser</button>
+        </div>
+        <table class="dash-table" id="auditLogTable">
+          <thead><tr><th>Date/heure</th><th>Utilisateur</th><th>Action</th><th>Volet</th><th>Détails</th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
     </section>
 
@@ -784,6 +968,23 @@
       <button class="modal-close" id="closePreviewBtn">✕</button>
     </div>
     <iframe id="previewFrame" class="modal-frame"></iframe>
+  </div>
+</div>
+
+<!-- MODAL APERÇU PDF -->
+<div class="modal-overlay" id="pdfPreviewModalOverlay" style="display:none;">
+  <div class="modal-box modal-box--wide">
+    <div class="modal-head">
+      <div>
+        <div class="mini-label">Aperçu du rapport PDF</div>
+        <div id="pdfPreviewName" style="font-weight:700;color:var(--primary);"></div>
+      </div>
+      <div style="display:flex;align-items:center;gap:10px;">
+        <button class="btn btn-primary" id="pdfPreviewDownloadBtn">⬇ Télécharger</button>
+        <button class="modal-close" id="closePdfPreviewBtn">✕</button>
+      </div>
+    </div>
+    <iframe id="pdfPreviewFrame" class="modal-frame"></iframe>
   </div>
 </div>
 
