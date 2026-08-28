@@ -1593,6 +1593,19 @@ async function loadGlobalSettings(){
   const res = await fetch("/api/global-settings");
   globalSettings = await res.json();
   applyUiTheme(globalSettings.ui_theme || "flat");
+  applyAppBranding();
+}
+
+function applyAppBranding(){
+  const appName = globalSettings.app_name || "SANAD";
+  const appSubtitle = globalSettings.app_subtitle || "Plateforme de pilotage du Helpdesk SI";
+  document.title = `${appName} — ${appSubtitle}`;
+  const authTitle = document.getElementById("authBrandTitle");
+  const authSubtitle = document.getElementById("authBrandSubtitle");
+  if(authTitle) authTitle.textContent = appName;
+  if(authSubtitle) authSubtitle.textContent = appSubtitle;
+  const logoText = document.getElementById("sanadLogoText");
+  if(logoText) logoText.textContent = appName;
 }
 
 function applyUiTheme(theme){
@@ -1650,6 +1663,20 @@ document.getElementById("saveGlobalSettingsBtn").addEventListener("click", async
   await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({agency_name: globalSettings.agency_name, ui_theme: globalSettings.ui_theme})});
   applyUiTheme(globalSettings.ui_theme);
   toast("Paramètres généraux enregistrés");
+});
+
+document.getElementById("saveAdvancedEditingBtn").addEventListener("click", async ()=>{
+  const payload = {
+    app_name: document.getElementById("appNameInput").value.trim(),
+    app_subtitle: document.getElementById("appSubtitleInput").value.trim(),
+    report_title_tarkhiss: document.getElementById("reportTitleTarkhissInput").value.trim(),
+    report_title_moussanada: document.getElementById("reportTitleMoussanadaInput").value.trim(),
+    report_title_pchc: document.getElementById("reportTitlePchcInput").value.trim(),
+  };
+  Object.assign(globalSettings, payload);
+  await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+  applyAppBranding();
+  toast("Identité et grands titres enregistrés");
 });
 
 document.getElementById("saveModuleSettingsBtn").addEventListener("click", async ()=>{
@@ -1758,6 +1785,11 @@ async function loadAdmin(){
   await loadGlobalSettings();
   await loadModuleSettings();
   document.getElementById("agencyNameInput").value = globalSettings.agency_name || "";
+  document.getElementById("appNameInput").value = globalSettings.app_name || "";
+  document.getElementById("appSubtitleInput").value = globalSettings.app_subtitle || "";
+  document.getElementById("reportTitleTarkhissInput").value = globalSettings.report_title_tarkhiss || "";
+  document.getElementById("reportTitleMoussanadaInput").value = globalSettings.report_title_moussanada || "";
+  document.getElementById("reportTitlePchcInput").value = globalSettings.report_title_pchc || "";
   updateLogoPreview();
   document.getElementById("defaultGreetingInput").value = moduleSettings.greeting || "";
   document.getElementById("sigNameInput").value = moduleSettings.signature_name || "";
@@ -3404,6 +3436,7 @@ document.getElementById("pSaveThresholdsBtn").addEventListener("click", async ()
 // INIT
 // ============================================================
 (async function init(){
+  await loadGlobalSettings();
   const res = await fetch("/api/auth/me");
   const data = await res.json();
   if(data.setup_required){ showAuthOverlay(true); return; }

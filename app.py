@@ -186,6 +186,8 @@ def auth_gate():
         return
     if path == "/api/modules":
         return
+    if path == "/api/global-settings" and request.method == "GET":
+        return  # branding (nom d'app, agence, thème) : lisible avant connexion pour l'écran de login
     user = current_user()
     if not user:
         return jsonify({"error": "auth_required"}), 401
@@ -554,6 +556,10 @@ def load_global_settings():
         "app_name": "SANAD",
         "app_subtitle": "Plateforme de pilotage du Helpdesk SI",
         "ui_theme": "flat",             # "flat" ou "soft" (neumorphism doux) — écran uniquement, sans effet sur PDF/Excel
+        # Grands titres des rapports (email/PDF/Excel/PPTX) — édition avancée, Administration
+        "report_title_tarkhiss": "Rapport Support Tarkhiss",
+        "report_title_moussanada": "Rapport Support Moussanada",
+        "report_title_pchc": "Reporting Métier — PCHC",
     }
     if os.path.exists(GLOBAL_SETTINGS_FILE):
         with open(GLOBAL_SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -822,127 +828,240 @@ def moussanada_export_csv_source(kind, ym):
     return send_file(mem, as_attachment=True, download_name=f"moussanada_{kind}_{ym}.csv", mimetype="text/csv")
 
 
-def write_alerts_sheet(wb, module, header_fill, header_font):
-    ws = wb.create_sheet("Alertes")
+# ---------------------------------------------------------------------------
+# EXCEL — moteur xlsxwriter + graphiques seaborn (rendus en image, style "moderne")
+# ---------------------------------------------------------------------------
+SEABORN_PALETTE = ["#0B4965", "#F59F0A", "#25935F", "#DC2828", "#1794CF", "#8B5CF6", "#F2994A", "#94A3AD"]
+
+
+def _seaborn_setup():
+    import matplotlib
+    matplotlib.use("Agg")
+    import seaborn as sns
+    sns.set_theme(style="whitegrid", font="DejaVu Sans")
+    sns.set_palette(SEABORN_PALETTE)
+
+
+def _fig_to_png_buf(fig):
+    import matplotlib.pyplot as plt
+    buf = io.BytesIO()
+    fig.savefig(buf, format="png", dpi=150, bbox_inches="tight")
+    plt.close(fig)
+    buf.seek(0)
+    return buf
+
+
+def chart_bar_png(categories, series, title, ylabel="", figsize=(7.5, 4.2)):
+    """series: dict {libellé_série: [valeurs...]} — barres groupées."""
+    import numpy as np
+    import matplotlib.pyplot as plt
+    _seaborn_setup()
+    fig, ax = plt.subplots(figsize=figsize)
+    x = np.arange(len(categories))
+    n = max(len(series), 1)
+    width = 0.8 / n
+    for i, (label, values) in enumerate(series.items()):
+        ax.bar(x + i * width - 0.4 + width / 2, values, width=width, label=label, color=SEABORN_PALETTE[i % len(SEABORN_PALETTE)])
+    ax.set_xticks(x)
+    ax.set_xticklabels(categories, rotation=30, ha="right", fontsize=9)
+    ax.set_title(title, fontsize=13, fontweight="bold", color="#0B4965", pad=12)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=10)
+    if n > 1:
+        ax.legend(frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.28), ncol=min(n, 4), fontsize=9)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.tight_layout()
+    return _fig_to_png_buf(fig)
+
+
+def chart_pie_png(labels, values, title, figsize=(6.2, 4.6)):
+    import matplotlib.pyplot as plt
+    _seaborn_setup()
+    fig, ax = plt.subplots(figsize=figsize)
+    total = sum(values)
+    if not total:
+        ax.text(0.5, 0.5, "Aucune donnée pour cette période", ha="center", va="center", fontsize=11, color="#94A3AD", transform=ax.transAxes)
+        ax.set_title(title, fontsize=13, fontweight="bold", color="#0B4965", pad=12)
+        ax.axis("off")
+        fig.tight_layout()
+        return _fig_to_png_buf(fig)
+    colors = [SEABORN_PALETTE[i % len(SEABORN_PALETTE)] for i in range(len(values))]
+    wedges, _texts, _autotexts = ax.pie(
+        values, autopct=lambda p: f"{p:.0f}%" if p > 0 else "", colors=colors,
+        startangle=90, pctdistance=0.78,
+        wedgeprops=dict(width=0.55, edgecolor="white", linewidth=1.5),
+        textprops=dict(color="#0D1926", fontsize=9, fontweight="bold"),
+    )
+    ax.set_title(title, fontsize=13, fontweight="bold", color="#0B4965", pad=12)
+    ax.legend(wedges, labels, loc="center left", bbox_to_anchor=(1.02, 0.5), frameon=False, fontsize=9)
+    fig.tight_layout()
+    return _fig_to_png_buf(fig)
+
+
+def chart_line_png(categories, series, title, ylabel="", figsize=(8, 4.2)):
+    import matplotlib.pyplot as plt
+    _seaborn_setup()
+    fig, ax = plt.subplots(figsize=figsize)
+    for i, (label, values) in enumerate(series.items()):
+        ax.plot(categories, values, marker="o", linewidth=2.4, markersize=5, label=label, color=SEABORN_PALETTE[i % len(SEABORN_PALETTE)])
+    ax.set_title(title, fontsize=13, fontweight="bold", color="#0B4965", pad=12)
+    if ylabel:
+        ax.set_ylabel(ylabel, fontsize=10)
+    plt.setp(ax.get_xticklabels(), rotation=30, ha="right", fontsize=9)
+    ax.legend(frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.28), ncol=min(len(series), 4), fontsize=9)
+    ax.spines["top"].set_visible(False)
+    ax.spines["right"].set_visible(False)
+    fig.tight_layout()
+    return _fig_to_png_buf(fig)
+
+
+def chart_combo_png(categories, bar_series, line_series, bar_ylabel="", line_ylabel="", title="", figsize=(9, 6.2)):
+    """Barres empilées (bar_series) + ligne sur axe secondaire (line_series, une seule série)."""
+    import numpy as np
+    import matplotlib.pyplot as plt
+    _seaborn_setup()
+    fig, ax1 = plt.subplots(figsize=figsize)
+    bottom = np.zeros(len(categories))
+    for i, (label, values) in enumerate(bar_series.items()):
+        values = np.array(values, dtype=float)
+        ax1.bar(categories, values, bottom=bottom, label=label, color=SEABORN_PALETTE[i % len(SEABORN_PALETTE)])
+        bottom += values
+    ax1.set_ylabel(bar_ylabel, fontsize=10)
+    ax1.tick_params(axis="x", labelrotation=40)
+    for lbl in ax1.get_xticklabels():
+        lbl.set_ha("right")
+        lbl.set_fontsize(9)
+    ax1.spines["top"].set_visible(False)
+
+    ax2 = ax1.twinx()
+    line_label, line_values = next(iter(line_series.items()))
+    ax2.plot(categories, line_values, marker="o", linewidth=2.6, markersize=6, color="#F59F0A", label=line_label)
+    ax2.set_ylabel(line_ylabel, fontsize=10)
+    ax2.set_ylim(0, max(100, max(line_values, default=0) * 1.15))
+    ax2.grid(False)
+
+    lines1, labels1 = ax1.get_legend_handles_labels()
+    lines2, labels2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines1 + lines2, labels1 + labels2, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.5), ncol=2, fontsize=9)
+    ax1.set_title(title, fontsize=13, fontweight="bold", color="#0B4965", pad=12)
+    fig.subplots_adjust(bottom=0.38)
+    return _fig_to_png_buf(fig)
+
+
+def xlsx_formats(workbook):
+    """Formats xlsxwriter partagés par tous les exports Excel (remplace les styles openpyxl)."""
+    return {
+        "title": workbook.add_format({"font_size": 14, "bold": True, "font_color": "#0B4965"}),
+        "header": workbook.add_format({"bold": True, "bg_color": "#0B4965", "font_color": "#FFFFFF", "border": 1}),
+        "bold": workbook.add_format({"bold": True}),
+        "default": workbook.add_format({}),
+        "pct": workbook.add_format({"num_format": "0.0%"}),
+    }
+
+
+def xlsx_insert_png(worksheet, row, col, png_buf, scale=0.72):
+    worksheet.insert_image(row, col, "chart.png", {"image_data": png_buf, "x_scale": scale, "y_scale": scale})
+
+
+def write_alerts_sheet_xw(workbook, fmts, module):
+    ws = workbook.add_worksheet("Alertes")
     for i, h in enumerate(["Date", "Mois", "Alerte(s) déclenchée(s)"]):
-        c = ws.cell(row=1, column=i + 1, value=h)
-        c.fill = header_fill
-        c.font = header_font
-    row = 2
+        ws.write(0, i, h, fmts["header"])
+    row = 1
     for entry in load_alert_history(module):
         for alert in entry.get("alerts", []):
-            ws.cell(row=row, column=1, value=entry.get("date", ""))
-            ws.cell(row=row, column=2, value=month_label_fr(entry.get("ym", "")) if entry.get("ym") else "")
-            ws.cell(row=row, column=3, value=alert)
+            ws.write(row, 0, entry.get("date", ""))
+            ws.write(row, 1, month_label_fr(entry.get("ym", "")) if entry.get("ym") else "")
+            ws.write(row, 2, alert)
             row += 1
-    ws.column_dimensions["A"].width = 14
-    ws.column_dimensions["B"].width = 18
-    ws.column_dimensions["C"].width = 70
+    ws.set_column("A:A", 14)
+    ws.set_column("B:B", 18)
+    ws.set_column("C:C", 70)
 
 
 def export_xlsx_moussanada(ym):
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill
+    import xlsxwriter
 
     data = moussanada_data(ym).get_json()
     m = data["month"]
     ts = data["timeseries"]
     month_label = month_label_fr(ym)
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "KPI"
-    header_fill = PatternFill("solid", fgColor="0B3D3A")
-    header_font = Font(color="FFFFFF", bold=True)
-    title_font = Font(size=14, bold=True, color="0B3D3A")
+    buf = io.BytesIO()
+    wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+    fmts = xlsx_formats(wb)
 
-    ws["A1"] = f"Rapport Moussanada — {month_label}"
-    ws["A1"].font = title_font
-    ws.merge_cells("A1:D1")
+    ws = wb.add_worksheet("KPI")
+    ws.merge_range("A1:D1", f"{load_global_settings().get('report_title_moussanada') or 'Rapport Moussanada'} — {month_label}", fmts["title"])
     labels = [("Tickets ouverts", m["tickets"]["ouverts"]), ("Tickets résolus", m["tickets"]["resolus"]),
               ("Tickets en retard", m["tickets"]["en_retard"]), ("Tickets clos", m["tickets"]["clos"]),
               ("Délai moyen résolution (h)", m["durations"]["resolution_h"]),
               ("Délai moyen clôture (h)", m["durations"]["cloture_h"])]
     for i, (lbl, val) in enumerate(labels):
-        ws.cell(row=3 + i, column=1, value=lbl).font = Font(bold=True)
-        ws.cell(row=3 + i, column=2, value=val)
+        ws.write(2 + i, 0, lbl, fmts["bold"])
+        ws.write(2 + i, 1, val)
+    ws.set_column("A:A", 30)
+    ws.set_column("B:B", 14)
 
     def write_sheet(name, items, cols):
-        ws2 = wb.create_sheet(name)
+        ws2 = wb.add_worksheet(name)
         for i, h in enumerate(cols):
-            c = ws2.cell(row=1, column=i + 1, value=h)
-            c.fill = header_fill
-            c.font = header_font
-        for r, it in enumerate(items, start=2):
-            ws2.cell(row=r, column=1, value=it.get("label", ""))
-            ws2.cell(row=r, column=2, value=it.get("ouverts", 0))
-            ws2.cell(row=r, column=3, value=it.get("resolus", 0))
-            ws2.cell(row=r, column=4, value=it.get("en_retard", 0))
-            ws2.cell(row=r, column=5, value=it.get("fermes", 0))
-        ws2.column_dimensions["A"].width = 42
-        for col in "BCDE":
-            ws2.column_dimensions[col].width = 12
+            ws2.write(0, i, h, fmts["header"])
+        for r, it in enumerate(items, start=1):
+            ws2.write(r, 0, it.get("label", ""))
+            ws2.write(r, 1, it.get("ouverts", 0))
+            ws2.write(r, 2, it.get("resolus", 0))
+            ws2.write(r, 3, it.get("en_retard", 0))
+            ws2.write(r, 4, it.get("fermes", 0))
+        ws2.set_column("A:A", 42)
+        ws2.set_column("B:E", 12)
+        return ws2
 
-    write_sheet("Catégories", m["categories"], ["Catégorie", "Ouverts", "Résolus", "En retard", "Fermés"])
+    cat_sheet = write_sheet("Catégories", m["categories"], ["Catégorie", "Ouverts", "Résolus", "En retard", "Fermés"])
     write_sheet("Services", m["services"], ["Service", "Ouverts", "Résolus", "En retard", "Fermés"])
     write_sheet("Techniciens", m["techniciens"], ["Technicien", "Ouverts", "Résolus", "En retard", "Fermés"])
     write_sheet("Demandeurs", m["demandeurs"], ["Demandeur", "Ouverts", "Résolus", "En retard", "Fermés"])
 
-    cat_sheet = wb["Catégories"]
-    n_cat = len(m["categories"])
-    if n_cat:
-        from openpyxl.chart import BarChart, Reference
-        bar = BarChart()
-        bar.type = "bar"
-        bar.title = "Top catégories — Ouverts / Résolus"
-        cats = Reference(cat_sheet, min_col=1, min_row=2, max_row=min(1 + n_cat, 11))
-        bar_data = Reference(cat_sheet, min_col=2, max_col=3, min_row=1, max_row=min(1 + n_cat, 11))
-        bar.add_data(bar_data, titles_from_data=True)
-        bar.set_categories(cats)
-        bar.height = 9
-        bar.width = 16
-        bar.legend.position = "b"
-        bar.legend.overlay = False
-        cat_sheet.add_chart(bar, "G2")
+    top_cats = sorted(m["categories"], key=lambda c: -(c.get("ouverts", 0)))[:10]
+    if top_cats:
+        png = chart_bar_png(
+            [c["label"] for c in top_cats],
+            {"Ouverts": [c.get("ouverts", 0) for c in top_cats], "Résolus": [c.get("resolus", 0) for c in top_cats]},
+            "Top catégories — Ouverts / Résolus",
+        )
+        xlsx_insert_png(cat_sheet, 1, 7, png)
 
-    ws3 = wb.create_sheet("Évolution mensuelle")
+    ws3 = wb.add_worksheet("Évolution mensuelle")
     for i, h in enumerate(["Mois", "Ouverts", "Résolus", "En retard", "Clos", "Délai résolution (h)", "Délai clôture (h)"]):
-        c = ws3.cell(row=1, column=i + 1, value=h)
-        c.fill = header_fill
-        c.font = header_font
+        ws3.write(0, i, h, fmts["header"])
     sorted_keys = sorted(ts.keys())
-    for r, key in enumerate(sorted_keys, start=2):
+    for r, key in enumerate(sorted_keys, start=1):
         row = ts[key]
-        ws3.cell(row=r, column=1, value=key)
-        ws3.cell(row=r, column=2, value=row.get("ouverts", 0))
-        ws3.cell(row=r, column=3, value=row.get("resolus", 0))
-        ws3.cell(row=r, column=4, value=row.get("en_retard", 0))
-        ws3.cell(row=r, column=5, value=row.get("clos", 0))
-        ws3.cell(row=r, column=6, value=row.get("resolution_h", 0))
-        ws3.cell(row=r, column=7, value=row.get("cloture_h", 0))
-    for col in "ABCDEFG":
-        ws3.column_dimensions[col].width = 14
+        ws3.write(r, 0, key)
+        ws3.write(r, 1, row.get("ouverts", 0))
+        ws3.write(r, 2, row.get("resolus", 0))
+        ws3.write(r, 3, row.get("en_retard", 0))
+        ws3.write(r, 4, row.get("clos", 0))
+        ws3.write(r, 5, row.get("resolution_h", 0))
+        ws3.write(r, 6, row.get("cloture_h", 0))
+    ws3.set_column("A:G", 14)
 
     if sorted_keys:
-        from openpyxl.chart import LineChart, Reference
-        line = LineChart()
-        line.title = "Évolution mensuelle — Ouverts / Résolus / Clos"
-        line.y_axis.title = "Nombre"
-        last_row = 1 + len(sorted_keys)
-        cats = Reference(ws3, min_col=1, min_row=2, max_row=last_row)
-        line_data = Reference(ws3, min_col=2, max_col=5, min_row=1, max_row=last_row)
-        line.add_data(line_data, titles_from_data=True)
-        line.set_categories(cats)
-        line.height = 9
-        line.width = 18
-        line.legend.position = "b"
-        line.legend.overlay = False
-        ws3.add_chart(line, "I2")
+        png = chart_line_png(
+            sorted_keys,
+            {
+                "Ouverts": [ts[k].get("ouverts", 0) for k in sorted_keys],
+                "Résolus": [ts[k].get("resolus", 0) for k in sorted_keys],
+                "Clos": [ts[k].get("clos", 0) for k in sorted_keys],
+            },
+            "Évolution mensuelle — Ouverts / Résolus / Clos", ylabel="Nombre",
+        )
+        xlsx_insert_png(ws3, 1, 8, png)
 
-    write_alerts_sheet(wb, "moussanada", header_fill, header_font)
+    write_alerts_sheet_xw(wb, fmts, "moussanada")
 
-    buf = io.BytesIO()
-    wb.save(buf)
+    wb.close()
     buf.seek(0)
     return send_file(buf, as_attachment=True, download_name=f"dashboard_moussanada_{ym}.xlsx",
                       mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
@@ -1250,21 +1369,17 @@ def pchc_export_xlsx():
 
 
 def build_pchc_xlsx(start, end):
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill
+    import xlsxwriter
 
     d = compute_pchc_dashboard(start, end)
     data = load_pchc_records()
-    header_fill = PatternFill("solid", fgColor="0B4965")
-    header_font = Font(color="FFFFFF", bold=True)
-    title_font = Font(size=14, bold=True, color="0B4965")
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Dashboard Exécutif"
-    ws["A1"] = f"Reporting Métier PCHC — {start} au {end}"
-    ws["A1"].font = title_font
-    ws.merge_cells("A1:E1")
+    buf = io.BytesIO()
+    wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+    fmts = xlsx_formats(wb)
+
+    ws = wb.add_worksheet("Dashboard Exécutif")
+    ws.merge_range("A1:E1", f"{load_global_settings().get('report_title_pchc') or 'Reporting Métier PCHC'} — {start} au {end}", fmts["title"])
     rows = [
         ("Total dossiers", d["summary"]["total"]),
         ("Délivrés / Validés", d["summary"]["delivered"]),
@@ -1272,181 +1387,115 @@ def build_pchc_xlsx(start, end):
         ("Bloqués / Refusés", d["summary"]["bloque"]),
         ("Taux de délivrance global", f"{d['summary']['taux']}%"),
     ]
-    for i, (label, val) in enumerate(rows, start=3):
-        ws.cell(row=i, column=1, value=label).font = Font(bold=True)
-        ws.cell(row=i, column=2, value=val)
-    row = len(rows) + 5
-    ws.cell(row=row, column=1, value="Backlog par ancienneté").font = title_font
+    for i, (label, val) in enumerate(rows, start=2):
+        ws.write(i, 0, label, fmts["bold"])
+        ws.write(i, 1, val)
+    row = len(rows) + 4
+
+    ws.write(row, 0, "Backlog par ancienneté", fmts["title"])
     row += 1
-    backlog_header_row = row
     for i, h in enumerate(["Ancienneté", "Nombre"]):
-        c = ws.cell(row=row, column=i + 1, value=h)
-        c.fill = header_fill
-        c.font = header_font
+        ws.write(row, i, h, fmts["header"])
     row += 1
-    backlog_data_start = row
-    for key, label in [("0-30", "0-30j"), ("31-60", "31-60j"), ("61-90", "61-90j"), (">90", ">90j")]:
-        ws.cell(row=row, column=1, value=label)
-        ws.cell(row=row, column=2, value=d["backlog"][key])
+    backlog_labels = ["0-30j", "31-60j", "61-90j", ">90j"]
+    backlog_values = [d["backlog"]["0-30"], d["backlog"]["31-60"], d["backlog"]["61-90"], d["backlog"][">90"]]
+    for label, val in zip(backlog_labels, backlog_values):
+        ws.write(row, 0, label)
+        ws.write(row, 1, val)
         row += 1
-    backlog_data_end = row - 1
 
     summary_row = row + 1
-    ws.cell(row=summary_row, column=1, value="Synthèse globale").font = title_font
+    ws.write(summary_row, 0, "Synthèse globale", fmts["title"])
     summary_header_row = summary_row + 1
     for i, h in enumerate(["Statut", "Nombre"]):
-        c = ws.cell(row=summary_header_row, column=i + 1, value=h)
-        c.fill = header_fill
-        c.font = header_font
-    summary_data_start = summary_header_row + 1
-    for i, (label, val) in enumerate([("Délivrés", d["summary"]["delivered"]), ("En cours", d["summary"]["encours"]), ("Bloqués/Refusés", d["summary"]["bloque"])]):
-        ws.cell(row=summary_data_start + i, column=1, value=label)
-        ws.cell(row=summary_data_start + i, column=2, value=val)
-    summary_data_end = summary_data_start + 2
+        ws.write(summary_header_row, i, h, fmts["header"])
+    summary_labels = ["Délivrés", "En cours", "Bloqués/Refusés"]
+    summary_values = [d["summary"]["delivered"], d["summary"]["encours"], d["summary"]["bloque"]]
+    for i, (label, val) in enumerate(zip(summary_labels, summary_values)):
+        ws.write(summary_header_row + 1 + i, 0, label)
+        ws.write(summary_header_row + 1 + i, 1, val)
 
-    from openpyxl.chart import BarChart, PieChart, LineChart, Reference
-    from openpyxl.chart.label import DataLabelList
-    bar = BarChart()
-    bar.type = "col"
-    bar.title = "Backlog par ancienneté"
-    cats = Reference(ws, min_col=1, min_row=backlog_data_start, max_row=backlog_data_end)
-    bar_data = Reference(ws, min_col=2, min_row=backlog_header_row, max_row=backlog_data_end)
-    bar.add_data(bar_data, titles_from_data=True)
-    bar.set_categories(cats)
-    bar.height = 8
-    bar.width = 14
-    bar.legend.position = "b"
-    bar.legend.overlay = False
-    bar.dataLabels = DataLabelList()
-    bar.dataLabels.showVal = True
-    ws.add_chart(bar, "D3")
+    ws.set_column("A:A", 32)
+    ws.set_column("B:E", 14)
 
-    pie = PieChart()
-    pie.title = "Synthèse globale des dossiers"
-    labels = Reference(ws, min_col=1, min_row=summary_data_start, max_row=summary_data_end)
-    pie_data = Reference(ws, min_col=2, min_row=summary_data_start, max_row=summary_data_end)
-    pie.add_data(pie_data)
-    pie.set_categories(labels)
-    pie.height = 8
-    pie.width = 12
-    pie.legend.position = "b"
-    pie.legend.overlay = False
-    pie.dataLabels = DataLabelList()
-    pie.dataLabels.showPercent = True
-    ws.add_chart(pie, "D18")
+    xlsx_insert_png(ws, 2, 3, chart_bar_png(backlog_labels, {"Dossiers": backlog_values}, "Backlog par ancienneté", ylabel="Nombre", figsize=(6, 3.8)))
+    xlsx_insert_png(ws, 20, 3, chart_pie_png(summary_labels, summary_values, "Synthèse globale des dossiers"))
 
-    # Synthèse par module — table + graphique combo (barres empilées + ligne taux de délivrance),
-    # même logique que le combo affiché à l'écran (dashboard PCHC) et dans le PDF.
-    synth_row = summary_data_end + 3
-    ws.cell(row=synth_row, column=1, value="Synthèse par module").font = title_font
+    # Synthèse par module — table + graphique combo (barres empilées + ligne taux de délivrance)
+    synth_row = summary_header_row + 6
+    ws.write(synth_row, 0, "Synthèse par module", fmts["title"])
     synth_header_row = synth_row + 1
     for i, h in enumerate(["Module", "Délivrés", "En cours", "Bloqués", "Taux (%)"]):
-        c = ws.cell(row=synth_header_row, column=i + 1, value=h)
-        c.fill = header_fill
-        c.font = header_font
-    synth_data_start = synth_header_row + 1
+        ws.write(synth_header_row, i, h, fmts["header"])
+    synth_labels, synth_delivered, synth_encours, synth_bloque, synth_taux = [], [], [], [], []
     for i, (cat_key, cfg) in enumerate(PCHC_CATEGORIES.items()):
         cat = d["categories"][cat_key]
-        r = synth_data_start + i
-        ws.cell(row=r, column=1, value=cfg["label"])
-        ws.cell(row=r, column=2, value=cat["delivered"])
-        ws.cell(row=r, column=3, value=cat["encours"])
-        ws.cell(row=r, column=4, value=cat["bloque"])
-        ws.cell(row=r, column=5, value=cat["taux"])
-    synth_data_end = synth_data_start + len(PCHC_CATEGORIES) - 1
+        r = synth_header_row + 1 + i
+        ws.write(r, 0, cfg["label"])
+        ws.write(r, 1, cat["delivered"])
+        ws.write(r, 2, cat["encours"])
+        ws.write(r, 3, cat["bloque"])
+        ws.write(r, 4, cat["taux"])
+        synth_labels.append(cfg["label"]); synth_delivered.append(cat["delivered"])
+        synth_encours.append(cat["encours"]); synth_bloque.append(cat["bloque"]); synth_taux.append(cat["taux"])
 
-    if synth_data_end >= synth_data_start:
-        combo_bar = BarChart()
-        combo_bar.type = "col"
-        combo_bar.grouping = "stacked"
-        combo_bar.overlap = 100
-        combo_bar.title = "Synthèse par module — volume & taux de délivrance"
-        combo_cats = Reference(ws, min_col=1, min_row=synth_data_start, max_row=synth_data_end)
-        combo_bar_data = Reference(ws, min_col=2, max_col=4, min_row=synth_header_row, max_row=synth_data_end)
-        combo_bar.add_data(combo_bar_data, titles_from_data=True)
-        combo_bar.set_categories(combo_cats)
-        combo_bar.y_axis.title = "Nombre de dossiers"
-        combo_bar.legend.position = "b"
-        combo_bar.legend.overlay = False
-        combo_bar.height = 10
-        combo_bar.width = 20
-
-        combo_line = LineChart()
-        combo_line_data = Reference(ws, min_col=5, min_row=synth_header_row, max_row=synth_data_end)
-        combo_line.add_data(combo_line_data, titles_from_data=True)
-        combo_line.set_categories(combo_cats)
-        combo_line.y_axis.axId = 200
-        combo_line.y_axis.title = "Taux (%)"
-        combo_line.y_axis.crosses = "max"
-
-        combo_bar += combo_line
-        ws.add_chart(combo_bar, "D33")
+    if synth_labels:
+        png = chart_combo_png(
+            synth_labels,
+            {"Délivrés": synth_delivered, "En cours": synth_encours, "Bloqués": synth_bloque},
+            {"Taux de délivrance": synth_taux},
+            bar_ylabel="Nombre de dossiers", line_ylabel="Taux (%)",
+            title="Synthèse par module — volume & taux de délivrance",
+        )
+        xlsx_insert_png(ws, synth_header_row + len(synth_labels) + 3, 0, png, scale=0.85)
 
     for cat_key, cfg in PCHC_CATEGORIES.items():
         cat = d["categories"][cat_key]
-        ws2 = wb.create_sheet(f"KPI {cfg['label'][:22]}")
-        ws2["A1"] = cfg["label"]
-        ws2["A1"].font = title_font
+        ws2 = wb.add_worksheet(f"KPI {cfg['label'][:22]}")
+        ws2.write(0, 0, cfg["label"], fmts["title"])
         stats = [("Total", cat["total"]), ("Délivrés", cat["delivered"]), ("En cours", cat["encours"]),
                  ("Bloqués/Refusés", cat["bloque"]), ("Taux de délivrance", f"{cat['taux']}%")]
-        for i, (label, val) in enumerate(stats, start=3):
-            ws2.cell(row=i, column=1, value=label).font = Font(bold=True)
-            ws2.cell(row=i, column=2, value=val)
-        row = len(stats) + 5
-        status_header_row = row
+        for i, (label, val) in enumerate(stats, start=2):
+            ws2.write(i, 0, label, fmts["bold"])
+            ws2.write(i, 1, val)
+        row2 = len(stats) + 4
         for i, h in enumerate(["Statut", "Nombre"]):
-            c = ws2.cell(row=row, column=i + 1, value=h)
-            c.fill = header_fill
-            c.font = header_font
-        row += 1
-        status_data_start = row
+            ws2.write(row2, i, h, fmts["header"])
+        row2 += 1
+        status_labels, status_values = [], []
         for statut, info in sorted(cat["status_counts"].items(), key=lambda x: -x[1]["count"]):
-            ws2.cell(row=row, column=1, value=statut)
-            ws2.cell(row=row, column=2, value=info["count"])
-            row += 1
-        status_data_end = row - 1
-        ws2.column_dimensions["A"].width = 40
-        ws2.column_dimensions["B"].width = 14
+            ws2.write(row2, 0, statut)
+            ws2.write(row2, 1, info["count"])
+            status_labels.append(statut); status_values.append(info["count"])
+            row2 += 1
+        ws2.set_column("A:A", 40)
+        ws2.set_column("B:B", 14)
 
-        if status_data_end >= status_data_start:
-            pie2 = PieChart()
-            pie2.title = f"Répartition des statuts — {cfg['label']}"
-            labels2 = Reference(ws2, min_col=1, min_row=status_data_start, max_row=status_data_end)
-            pie2_data = Reference(ws2, min_col=2, min_row=status_data_start, max_row=status_data_end)
-            pie2.add_data(pie2_data)
-            pie2.set_categories(labels2)
-            pie2.height = 9
-            pie2.width = 14
-            pie2.legend.position = "b"
-            pie2.legend.overlay = False
-            pie2.dataLabels = DataLabelList()
-            pie2.dataLabels.showPercent = True
-            ws2.add_chart(pie2, "D3")
+        if status_labels:
+            png = chart_pie_png(status_labels, status_values, f"Répartition des statuts — {cfg['label']}")
+            xlsx_insert_png(ws2, 2, 3, png)
 
     for cat_key, cfg in PCHC_CATEGORIES.items():
         recs = filter_by_period(data["categories"].get(cat_key, []), start, end)
-        ws3 = wb.create_sheet(f"Brut {cat_key}"[:31])
+        ws3 = wb.add_worksheet(f"Brut {cat_key}"[:31])
         headers = ["Référence", "Entité", "Détails", "Date dépôt", "Statut"]
         for i, h in enumerate(headers):
-            c = ws3.cell(row=1, column=i + 1, value=h)
-            c.fill = header_fill
-            c.font = header_font
-        for r, rec in enumerate(recs, start=2):
-            ws3.cell(row=r, column=1, value=rec.get("ref", ""))
-            ws3.cell(row=r, column=2, value=rec.get("entity", ""))
-            ws3.cell(row=r, column=3, value=rec.get("details", ""))
-            ws3.cell(row=r, column=4, value=rec.get("date_depot", ""))
-            ws3.cell(row=r, column=5, value=rec.get("statut", ""))
+            ws3.write(0, i, h, fmts["header"])
+        for r, rec in enumerate(recs, start=1):
+            ws3.write(r, 0, rec.get("ref", ""))
+            ws3.write(r, 1, rec.get("entity", ""))
+            ws3.write(r, 2, rec.get("details", ""))
+            ws3.write(r, 3, rec.get("date_depot", ""))
+            ws3.write(r, 4, rec.get("statut", ""))
         for col, width in zip("ABCDE", [22, 30, 40, 14, 22]):
-            ws3.column_dimensions[col].width = width
+            ws3.set_column(f"{col}:{col}", width)
 
-    buf = io.BytesIO()
-    wb.save(buf)
+    wb.close()
     buf.seek(0)
     return buf
 
 
-def build_report_html_pchc(start, end, charts=None):
+def build_report_html_pchc(start, end, charts=None, for_pdf=False):
     charts = charts or {}
     d = compute_pchc_dashboard(start, end)
     s = d["summary"]
@@ -1494,7 +1543,7 @@ def build_report_html_pchc(start, end, charts=None):
     html = f"""
     <div style="max-width:760px;margin:0 auto;font-family:Arial,sans-serif;background:#FFFFFF;">
       <div style="background:#0B4965;padding:22px 24px;border-radius:6px 6px 0 0;">
-        <div style="color:#FFFFFF;font-size:20px;font-weight:bold;">Reporting Métier — PCHC</div>
+        <div style="color:#FFFFFF;font-size:20px;font-weight:bold;">{esc(global_settings.get('report_title_pchc') or 'Reporting Métier — PCHC')}</div>
         <div style="color:#B9D3E0;font-size:13px;margin-top:4px;">{esc(global_settings.get('agency_name',''))} — Gestion des dossiers réglementaires — du {esc(start)} au {esc(end)}</div>
       </div>
       <div style="padding:20px 24px;border:1px solid #DAE0E7;border-top:none;">
@@ -1509,12 +1558,13 @@ def build_report_html_pchc(start, end, charts=None):
 
         {alerts_html}
 
+        {f'''<div class="pdf-break"></div>
         <div style="margin:6px 0 4px;padding:10px 14px;background:#F5F7F9;border:1px solid #DAE0E7;border-radius:6px;">
           <div style="font-size:10.5px;font-weight:800;color:#0B4965;letter-spacing:.4px;text-transform:uppercase;margin-bottom:6px;">Sommaire</div>
           <a href="#sec-graphs" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">1. Analyse graphique</a>
           <a href="#sec-synth" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">2. Synthèse par module</a>
           {'<a href="#sec-analysis" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">3. Analyse</a>' if notes.get("copilot_text") else ""}
-        </div>
+        </div>''' if for_pdf else ""}
 
         <a name="sec-graphs"></a>
         <div class="pdf-break"></div>
@@ -1665,8 +1715,8 @@ def pchc_export_pptx():
     # Slide 1 — page de garde
     slide = prs.slides.add_slide(blank)
     add_bg(slide, NAVY)
-    add_text(slide, "SANAD", Inches(0.8), Inches(2.6), Inches(6), Inches(0.8), size=40, bold=True, color=WHITE)
-    add_text(slide, "Reporting Métier — PCHC", Inches(0.8), Inches(3.4), Inches(8), Inches(0.7), size=26, bold=True, color=AMBER)
+    add_text(slide, global_settings.get("app_name") or "SANAD", Inches(0.8), Inches(2.6), Inches(6), Inches(0.8), size=40, bold=True, color=WHITE)
+    add_text(slide, global_settings.get("report_title_pchc") or "Reporting Métier — PCHC", Inches(0.8), Inches(3.4), Inches(8), Inches(0.7), size=26, bold=True, color=AMBER)
     add_text(slide, f"Période du {start} au {end}", Inches(0.8), Inches(4.1), Inches(8), Inches(0.5), size=15, color=WHITE)
     add_text(slide, global_settings.get("agency_name", ""), Inches(0.8), Inches(6.7), Inches(8), Inches(0.4), size=12, color=WHITE)
 
@@ -2188,7 +2238,7 @@ def report_logos_html(global_settings):
     return f'<div style="margin-bottom:8px;">{imgs}</div>'
 
 
-def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev_emails=None, prev_analysis=None, charts=None):
+def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev_emails=None, prev_analysis=None, charts=None, for_pdf=False):
     charts = charts or {}
     prev_calls = prev_calls or {}
     prev_emails = prev_emails or {}
@@ -2316,12 +2366,13 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
 
     global_settings = load_global_settings()
     module_label = MODULES[module]["label"]
+    report_title = global_settings.get(f"report_title_{module}") or f"Rapport Support {module_label}"
 
     html = f"""
     <div style="max-width:760px;margin:0 auto;font-family:Arial,sans-serif;background:#FFFFFF;">
       <div style="background:#0B4965;padding:22px 24px;border-radius:6px 6px 0 0;">
         {report_logos_html(global_settings)}
-        <div style="color:#FFFFFF;font-size:20px;font-weight:bold;">Rapport Support {esc(module_label)}</div>
+        <div style="color:#FFFFFF;font-size:20px;font-weight:bold;">{esc(report_title)}</div>
         <div style="color:#B9D3E0;font-size:13px;margin-top:4px;">{esc(global_settings.get('agency_name',''))} — {esc(MODULES[module]['subtitle'])} — {esc(month_label)}</div>
       </div>
 
@@ -2351,6 +2402,7 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
           </tr>
         </table>
 
+        {f'''<div class="pdf-break"></div>
         <div style="margin:6px 0 4px;padding:10px 14px;background:#F5F7F9;border:1px solid #DAE0E7;border-radius:6px;">
           <div style="font-size:10.5px;font-weight:800;color:#0B4965;letter-spacing:.4px;text-transform:uppercase;margin-bottom:6px;">Sommaire</div>
           <a href="#sec-graphs" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">1. Analyse graphique</a>
@@ -2358,7 +2410,7 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
           <a href="#sec-demandes" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">3. Demandes d'information</a>
           <a href="#sec-weekly" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">4. Évolution hebdomadaire</a>
           <a href="#sec-synth" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">5. Constats &amp; recommandations</a>
-        </div>
+        </div>''' if for_pdf else ""}
 
         <a name="sec-graphs"></a>
         <div class="pdf-break"></div>
@@ -2447,7 +2499,7 @@ def top_n(items, n=10, key="ouverts"):
     return sorted(items, key=lambda x: x.get(key, 0), reverse=True)[:n]
 
 
-def build_report_html_moussanada(ym, month_label, charts=None):
+def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
     charts = charts or {}
     data = moussanada_data(ym).get_json()
     m = data["month"]
@@ -2546,7 +2598,9 @@ def build_report_html_moussanada(ym, month_label, charts=None):
         return f"""<div style="background:#E7EEF2;border-left:4px solid #0B4965;border-radius:0 8px 8px 0;padding:12px 16px;margin:10px 0 4px;font-size:13px;color:#0D1926;line-height:1.6;">{paras}</div>"""
 
     def section_title(n, title):
-        break_div = '<div class="pdf-break"></div>' if n > 1 else ""
+        # En PDF, la section 1 doit démarrer sur sa propre page (après le sommaire, sur sa page
+        # dédiée) ; sans sommaire (email), la section 1 reste à la suite de l'en-tête.
+        break_div = '<div class="pdf-break"></div>' if (n > 1 or for_pdf) else ""
         return f"""<a name="sec-{n}"></a>{break_div}<div style="margin:4px 0 10px;padding-bottom:6px;border-bottom:2px solid #0B4965;">
           <span style="font-size:10.5px;font-weight:800;color:#F59F0A;letter-spacing:.6px;">SECTION {n}</span>
           <div style="font-size:17px;font-weight:800;color:#0B4965;">{esc(title)}</div>
@@ -2558,19 +2612,20 @@ def build_report_html_moussanada(ym, month_label, charts=None):
         "Charge et mobilisation de l'équipe SI", f"Analyse comparative {prev_month_label} / {month_label}",
         "Synthèse finale et conclusion",
     ]
-    moussanada_toc_html = f"""<div style="margin:10px 0 4px;padding:10px 14px;background:#F5F7F9;border:1px solid #DAE0E7;border-radius:6px;">
+    moussanada_toc_html = f"""<div class="pdf-break"></div><div style="margin:10px 0 4px;padding:10px 14px;background:#F5F7F9;border:1px solid #DAE0E7;border-radius:6px;">
       <div style="font-size:10.5px;font-weight:800;color:#0B4965;letter-spacing:.4px;text-transform:uppercase;margin-bottom:6px;">Sommaire</div>
       {"".join(f'<a href="#sec-{i+1}" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">{i+1}. {esc(t)}</a>' for i, t in enumerate(moussanada_toc_titles))}
-    </div>"""
+    </div>""" if for_pdf else ""
 
     sections = notes.get("sections", {})
     global_settings = load_global_settings()
+    report_title = global_settings.get("report_title_moussanada") or "Rapport Support Moussanada"
 
     html = f"""
     <div style="max-width:760px;margin:0 auto;font-family:Arial,sans-serif;background:#FFFFFF;">
       <div style="background:#0B4965;padding:22px 24px;border-radius:6px 6px 0 0;">
         {report_logos_html(global_settings)}
-        <div style="color:#FFFFFF;font-size:20px;font-weight:bold;">Rapport Support Moussanada</div>
+        <div style="color:#FFFFFF;font-size:20px;font-weight:bold;">{esc(report_title)}</div>
         <div style="color:#B9D3E0;font-size:13px;margin-top:4px;">{esc(global_settings.get('agency_name',''))} — Helpdesk GLPI — {esc(month_label)}</div>
       </div>
       <div style="padding:20px 24px;border:1px solid #DAE0E7;border-top:none;">
@@ -2657,10 +2712,10 @@ def build_report_html_moussanada(ym, month_label, charts=None):
     return html
 
 
-def get_report_html_and_label(module, ym, charts=None):
+def get_report_html_and_label(module, ym, charts=None, for_pdf=False):
     if module == "moussanada":
         month_label = month_label_fr(ym)
-        return build_report_html_moussanada(ym, month_label, charts), month_label
+        return build_report_html_moussanada(ym, month_label, charts, for_pdf=for_pdf), month_label
     calls = _load(module, "calls", ym, {})
     emails = _load(module, "emails", ym, {})
     analysis = _load(module, "analysis", ym, empty_analysis(ym))
@@ -2669,7 +2724,7 @@ def get_report_html_and_label(module, ym, charts=None):
     prev_emails = _load(module, "emails", py, {})
     prev_analysis = _load(module, "analysis", py, empty_analysis(py))
     month_label = analysis.get("month_label") or month_label_fr(ym)
-    return build_report_html(module, ym, calls, emails, analysis, prev_calls, prev_emails, prev_analysis, charts), month_label
+    return build_report_html(module, ym, calls, emails, analysis, prev_calls, prev_emails, prev_analysis, charts, for_pdf=for_pdf), month_label
 
 
 @app.route("/api/<module>/preview-email/<ym>", methods=["POST"])
@@ -2777,7 +2832,7 @@ def render_pdf_bytes(inner_html, landscape=False, header_label=None):
 def export_pdf(module, ym):
     check_module(module)
     payload = request.json or {}
-    report_html, month_label = get_report_html_and_label(module, ym, payload.get("charts"))
+    report_html, month_label = get_report_html_and_label(module, ym, payload.get("charts"), for_pdf=True)
     header_label = f"{MODULES.get(module,{}).get('label', module)} — {month_label}"
     buf = render_pdf_bytes(report_html, header_label=header_label)
     return send_file(buf, as_attachment=True, download_name=f"rapport_{module}_{ym}.pdf", mimetype="application/pdf")
@@ -2788,7 +2843,7 @@ def pchc_export_pdf():
     payload = request.json or {}
     start = payload.get("start") or pchc_default_period()[0]
     end = payload.get("end") or pchc_default_period()[1]
-    report_html = build_report_html_pchc(start, end, payload.get("charts"))
+    report_html = build_report_html_pchc(start, end, payload.get("charts"), for_pdf=True)
     header_label = f"Reporting Métier — du {start} au {end}"
     buf = render_pdf_bytes(report_html, header_label=header_label)
     return send_file(buf, as_attachment=True, download_name=f"rapport_pchc_{start}_{end}.pdf", mimetype="application/pdf")
@@ -2797,8 +2852,7 @@ def pchc_export_pdf():
 @app.route("/api/<module>/export-xlsx/<ym>")
 def export_xlsx(module, ym):
     check_module(module)
-    from openpyxl import Workbook
-    from openpyxl.styles import Font, PatternFill
+    import xlsxwriter
 
     if module == "moussanada":
         return export_xlsx_moussanada(ym)
@@ -2816,123 +2870,78 @@ def export_xlsx(module, ym):
     demandes = analysis.get("demandes", [])
     weekly = analysis.get("weekly", [])
 
-    wb = Workbook()
-    ws = wb.active
-    ws.title = "Dashboard"
+    buf = io.BytesIO()
+    wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+    fmts = xlsx_formats(wb)
+    ws = wb.add_worksheet("Dashboard")
 
-    header_fill = PatternFill("solid", fgColor="0B3D3A")
-    header_font = Font(color="FFFFFF", bold=True)
-    title_font = Font(size=14, bold=True, color="0B3D3A")
+    _gs = load_global_settings()
+    _report_title = _gs.get(f"report_title_{module}") or f"Rapport Support {MODULES[module]['label']}"
+    ws.merge_range("A1:F1", f"{_report_title} — {month_label}", fmts["title"])
 
-    ws["A1"] = f"Rapport Support {MODULES[module]['label']} — {month_label}"
-    ws["A1"].font = title_font
-    ws.merge_cells("A1:F1")
+    ws.write(2, 0, "Emails reçus", fmts["bold"]); ws.write(2, 1, total_received)
+    ws.write(3, 0, "Emails envoyés", fmts["bold"]); ws.write(3, 1, total_sent)
+    ws.write(4, 0, "Total appels", fmts["bold"]); ws.write(4, 1, total_calls)
+    ws.write(5, 0, "Temps comm. (hh:mm:ss)", fmts["bold"]); ws.write(5, 1, format_hms(total_duration_sec))
 
-    ws["A3"] = "Emails reçus"; ws["B3"] = total_received
-    ws["A4"] = "Emails envoyés"; ws["B4"] = total_sent
-    ws["A5"] = "Total appels"; ws["B5"] = total_calls
-    ws["A6"] = "Temps comm. (hh:mm:ss)"; ws["B6"] = format_hms(total_duration_sec)
-    for r in range(3, 7):
-        ws[f"A{r}"].font = Font(bold=True)
-
-    row = 8
-    ws.cell(row=row, column=1, value="Problèmes techniques").font = title_font
+    row = 7
+    ws.write(row, 0, "Problèmes techniques", fmts["title"])
     row += 1
     for i, h in enumerate(["Type", "Nombre", "%", "Description", "Action corrective"]):
-        c = ws.cell(row=row, column=i + 1, value=h)
-        c.fill = header_fill
-        c.font = header_font
+        ws.write(row, i, h, fmts["header"])
     total_p = sum(p.get("count", 0) for p in problems)
     row += 1
-    problems_data_start = row
+    problem_labels, problem_values = [], []
     for p in problems:
         pct = round(p.get("count", 0) / total_p * 100, 1) if total_p else 0
-        ws.cell(row=row, column=1, value=p.get("label", ""))
-        ws.cell(row=row, column=2, value=p.get("count", 0))
-        ws.cell(row=row, column=3, value=f"{pct}%")
-        ws.cell(row=row, column=4, value=p.get("desc", ""))
-        ws.cell(row=row, column=5, value=p.get("action", ""))
+        ws.write(row, 0, p.get("label", "")); ws.write(row, 1, p.get("count", 0))
+        ws.write(row, 2, f"{pct}%"); ws.write(row, 3, p.get("desc", "")); ws.write(row, 4, p.get("action", ""))
+        problem_labels.append(p.get("label", "")); problem_values.append(p.get("count", 0))
         row += 1
-    problems_data_end = row - 1
 
     row += 1
-    ws.cell(row=row, column=1, value="Demandes d'information").font = title_font
+    ws.write(row, 0, "Demandes d'information", fmts["title"])
     row += 1
     for i, h in enumerate(["Type", "Nombre", "%", "Description"]):
-        c = ws.cell(row=row, column=i + 1, value=h)
-        c.fill = header_fill
-        c.font = header_font
+        ws.write(row, i, h, fmts["header"])
     total_d = sum(d.get("count", 0) for d in demandes)
     row += 1
     for d in demandes:
         pct = round(d.get("count", 0) / total_d * 100, 1) if total_d else 0
-        ws.cell(row=row, column=1, value=d.get("label", ""))
-        ws.cell(row=row, column=2, value=d.get("count", 0))
-        ws.cell(row=row, column=3, value=f"{pct}%")
-        ws.cell(row=row, column=4, value=d.get("desc", ""))
+        ws.write(row, 0, d.get("label", "")); ws.write(row, 1, d.get("count", 0))
+        ws.write(row, 2, f"{pct}%"); ws.write(row, 3, d.get("desc", ""))
         row += 1
 
     row += 1
-    ws.cell(row=row, column=1, value="Évolution hebdomadaire").font = title_font
+    ws.write(row, 0, "Évolution hebdomadaire", fmts["title"])
     row += 1
-    weekly_header_row = row
     for i, h in enumerate(["Semaine", "Bugs", "Demandes", "Observations"]):
-        c = ws.cell(row=row, column=i + 1, value=h)
-        c.fill = header_fill
-        c.font = header_font
+        ws.write(row, i, h, fmts["header"])
     row += 1
-    weekly_data_start = row
+    weekly_labels, weekly_bugs, weekly_demandes = [], [], []
     for w in weekly:
-        ws.cell(row=row, column=1, value=w.get("week", ""))
-        ws.cell(row=row, column=2, value=w.get("bugs", 0))
-        ws.cell(row=row, column=3, value=w.get("demandes", 0))
-        ws.cell(row=row, column=4, value=w.get("obs", ""))
+        ws.write(row, 0, w.get("week", "")); ws.write(row, 1, w.get("bugs", 0))
+        ws.write(row, 2, w.get("demandes", 0)); ws.write(row, 3, w.get("obs", ""))
+        weekly_labels.append(w.get("week", "")); weekly_bugs.append(w.get("bugs", 0)); weekly_demandes.append(w.get("demandes", 0))
         row += 1
-    weekly_data_end = row - 1
 
-    for col, width in zip("ABCDE", [26, 12, 10, 40, 26]):
-        ws.column_dimensions[col].width = width
+    ws.set_column("A:A", 26)
+    ws.set_column("B:B", 12)
+    ws.set_column("C:C", 10)
+    ws.set_column("D:D", 40)
+    ws.set_column("E:E", 26)
 
-    if weekly and weekly_data_end >= weekly_data_start:
-        from openpyxl.chart import BarChart, Reference
-        from openpyxl.chart.label import DataLabelList
-        bar = BarChart()
-        bar.type = "col"
-        bar.title = "Évolution hebdomadaire — Bugs vs Demandes"
-        bar.y_axis.title = "Nombre"
-        cats = Reference(ws, min_col=1, min_row=weekly_data_start, max_row=weekly_data_end)
-        bar_data = Reference(ws, min_col=2, max_col=3, min_row=weekly_header_row, max_row=weekly_data_end)
-        bar.add_data(bar_data, titles_from_data=True)
-        bar.set_categories(cats)
-        bar.height = 8
-        bar.width = 16
-        bar.legend.position = "b"
-        bar.legend.overlay = False
-        bar.dataLabels = DataLabelList()
-        bar.dataLabels.showVal = True
-        ws.add_chart(bar, "H3")
+    if weekly_labels:
+        png = chart_bar_png(weekly_labels, {"Bugs": weekly_bugs, "Demandes": weekly_demandes}, "Évolution hebdomadaire — Bugs vs Demandes", ylabel="Nombre")
+        xlsx_insert_png(ws, 2, 7, png)
 
-    if problems and problems_data_end >= problems_data_start:
-        from openpyxl.chart import PieChart, Reference
-        from openpyxl.chart.label import DataLabelList
-        pie = PieChart()
-        pie.title = "Répartition des problèmes techniques"
-        labels = Reference(ws, min_col=1, min_row=problems_data_start, max_row=problems_data_end)
-        pie_data = Reference(ws, min_col=2, min_row=problems_data_start, max_row=problems_data_end)
-        pie.add_data(pie_data)
-        pie.set_categories(labels)
-        pie.height = 8
-        pie.width = 12
-        pie.legend.position = "b"
-        pie.legend.overlay = False
-        pie.dataLabels = DataLabelList()
-        pie.dataLabels.showPercent = True
-        ws.add_chart(pie, "H20")
+    if problem_labels:
+        png = chart_pie_png(problem_labels, problem_values, "Répartition des problèmes techniques")
+        xlsx_insert_png(ws, 20, 7, png)
 
-    write_alerts_sheet(wb, module, header_fill, header_font)
+    write_alerts_sheet_xw(wb, fmts, module)
 
-    buf = io.BytesIO()
-    wb.save(buf)
+    wb.close()
     buf.seek(0)
     return send_file(buf, as_attachment=True, download_name=f"dashboard_{module}_{ym}.xlsx",
                       mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")

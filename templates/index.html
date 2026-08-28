@@ -15,7 +15,7 @@
   <div class="auth-box">
     <div class="auth-brand">
       <div class="brand-mark" style="width:44px;height:44px;font-size:20px;">H</div>
-      <div class="auth-brand-title">SANAD<div style="font-size:11px;font-weight:500;color:var(--muted);margin-top:2px;">Plateforme de pilotage du Helpdesk SI</div></div>
+      <div class="auth-brand-title"><span id="authBrandTitle">SANAD</span><div style="font-size:11px;font-weight:500;color:var(--muted);margin-top:2px;" id="authBrandSubtitle">Plateforme de pilotage du Helpdesk SI</div></div>
     </div>
 
     <div id="setupForm" style="display:none;">
@@ -741,6 +741,32 @@
           </div>
         </div>
         <button class="btn btn-primary" id="saveGlobalSettingsBtn">Enregistrer</button>
+      </div>
+
+      <div class="card">
+        <h2>✏️ Édition avancée — identité &amp; grands titres</h2>
+        <p class="hint">Personnalise le nom de la plateforme et le titre affiché en tête de chaque rapport (email/PDF/Excel/PowerPoint). Laisser vide revient au libellé par défaut.</p>
+        <div class="form-row">
+          <label>Nom de la plateforme (écran de connexion, titre de page, repli logo)</label>
+          <input type="text" id="appNameInput" placeholder="SANAD">
+        </div>
+        <div class="form-row">
+          <label>Sous-titre de la plateforme</label>
+          <input type="text" id="appSubtitleInput" placeholder="Plateforme de pilotage du Helpdesk SI">
+        </div>
+        <div class="form-row">
+          <label>Titre du rapport — Tarkhiss</label>
+          <input type="text" id="reportTitleTarkhissInput" placeholder="Rapport Support Tarkhiss">
+        </div>
+        <div class="form-row">
+          <label>Titre du rapport — Moussanada</label>
+          <input type="text" id="reportTitleMoussanadaInput" placeholder="Rapport Support Moussanada">
+        </div>
+        <div class="form-row">
+          <label>Titre du rapport — Reporting Métier (PCHC)</label>
+          <input type="text" id="reportTitlePchcInput" placeholder="Reporting Métier — PCHC">
+        </div>
+        <button class="btn btn-primary" id="saveAdvancedEditingBtn">Enregistrer</button>
       </div>
 
       <div class="card">
