@@ -16,7 +16,12 @@ from glpi_import import (
     glpi_cell_to_seconds, decimal_hours_cell, format_dh, normalize_header,
     match_header, parse_glpi_row_sheet, import_moussanada_xlsx as _parse_moussanada_xlsx,
     import_moussanada_csv as _parse_moussanada_csv,
+    parse_glpi_raw_tickets, merge_raw_tickets, compute_heatmap_matrix,
+    compute_resolution_hours, bucket_resolution_hours,
+    store_ticket_series, store_source_items,
 )
+from glpi_client import GLPIClient, GLPIConnectionError, test_connection as glpi_test_connection
+import glpi_profiles
 from pchc_import import (
     CATEGORIES as PCHC_CATEGORIES, COLOR_HEX as PCHC_COLOR_HEX,
     status_color as pchc_status_color, import_pchc_xlsx as _parse_pchc_xlsx,
@@ -105,6 +110,7 @@ def log_audit(action, details=None, module=None):
 GLOBAL_SETTINGS_FILE = os.path.join(DATA_DIR, "global_settings.json")
 
 app = Flask(__name__)
+app.config["SESSION_PERMANENT"] = True
 
 SECRET_KEY_FILE = os.path.join(DATA_DIR, ".secret_key")
 if os.path.exists(SECRET_KEY_FILE):
@@ -114,6 +120,19 @@ else:
     app.secret_key = os.urandom(32).hex()
     with open(SECRET_KEY_FILE, "w") as f:
         f.write(app.secret_key)
+
+
+@app.before_request
+def apply_session_timeout():
+    """Durée de session configurable (Administration → Sécurité), en minutes d'inactivité.
+    Doit s'exécuter à chaque requête (avant le contrôle d'accès) pour que le compteur
+    d'inactivité soit rafraîchi tant que l'utilisateur est actif."""
+    session.permanent = True
+    try:
+        minutes = int(load_global_settings().get("session_timeout_minutes", 240))
+    except Exception:
+        minutes = 240
+    app.permanent_session_lifetime = timedelta(minutes=max(5, minutes))
 
 MOIS_FR = ["janvier", "février", "mars", "avril", "mai", "juin",
            "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
@@ -154,6 +173,20 @@ def save_users(users):
     write_json_safely(USERS_FILE, users)
 
 
+def validate_password(password):
+    """Politique de mot de passe configurable (Administration → Sécurité). Retourne un message
+    d'erreur (str) si le mot de passe ne respecte pas la politique, sinon None."""
+    gs = load_global_settings()
+    min_len = int(gs.get("password_min_length", 8))
+    if len(password or "") < min_len:
+        return f"Mot de passe trop court ({min_len} caractères minimum)."
+    if gs.get("password_require_digit", True) and not any(c.isdigit() for c in password):
+        return "Le mot de passe doit contenir au moins un chiffre."
+    if gs.get("password_require_upper", True) and not any(c.isupper() for c in password):
+        return "Le mot de passe doit contenir au moins une majuscule."
+    return None
+
+
 def public_user(u):
     return {"id": u["id"], "username": u["username"], "name": u.get("name", ""),
             "role": u["role"], "modules": u.get("modules", list(MODULES.keys())), "active": u.get("active", True)}
@@ -188,6 +221,8 @@ def auth_gate():
         return
     if path == "/api/global-settings" and request.method == "GET":
         return  # branding (nom d'app, agence, thème) : lisible avant connexion pour l'écran de login
+    if path == "/api/system/reminder-check":
+        return  # authentification par jeton dédié (voir la fonction), pas par session — appel headless
     user = current_user()
     if not user:
         return jsonify({"error": "auth_required"}), 401
@@ -231,8 +266,11 @@ def auth_setup():
     username = (payload.get("username") or "").strip()
     password = payload.get("password") or ""
     name = (payload.get("name") or "").strip()
-    if not username or len(password) < 4:
-        return jsonify({"ok": False, "error": "Identifiant requis, mot de passe 4 caractères min."}), 400
+    if not username:
+        return jsonify({"ok": False, "error": "Identifiant requis."}), 400
+    pw_error = validate_password(password)
+    if pw_error:
+        return jsonify({"ok": False, "error": pw_error}), 400
     user = {"id": 1, "username": username, "password_hash": generate_password_hash(password),
             "name": name or username, "role": "admin", "modules": list(MODULES.keys()), "active": True}
     save_users([user])
@@ -267,13 +305,15 @@ def auth_change_password():
     if not check_password_hash(user["password_hash"], payload.get("old_password") or ""):
         return jsonify({"ok": False, "error": "Ancien mot de passe incorrect"}), 400
     new_pw = payload.get("new_password") or ""
-    if len(new_pw) < 4:
-        return jsonify({"ok": False, "error": "Mot de passe trop court (4 caractères min.)"}), 400
+    pw_error = validate_password(new_pw)
+    if pw_error:
+        return jsonify({"ok": False, "error": pw_error}), 400
     users = load_users()
     for u in users:
         if u["id"] == user["id"]:
             u["password_hash"] = generate_password_hash(new_pw)
     save_users(users)
+    log_audit("password_change", {"username": user["username"]})
     return jsonify({"ok": True})
 
 
@@ -291,8 +331,11 @@ def create_user():
     role = payload.get("role")
     if role not in ROLES:
         return jsonify({"ok": False, "error": "Rôle invalide"}), 400
-    if not username or len(password) < 4:
-        return jsonify({"ok": False, "error": "Identifiant requis, mot de passe 4 caractères min."}), 400
+    if not username:
+        return jsonify({"ok": False, "error": "Identifiant requis."}), 400
+    pw_error = validate_password(password)
+    if pw_error:
+        return jsonify({"ok": False, "error": pw_error}), 400
     users = load_users()
     if any(u["username"] == username for u in users):
         return jsonify({"ok": False, "error": "Identifiant déjà utilisé"}), 400
@@ -309,6 +352,10 @@ def create_user():
 @app.route("/api/users/<int:uid>", methods=["POST"])
 def update_user(uid):
     payload = request.json or {}
+    if payload.get("new_password"):
+        pw_error = validate_password(payload["new_password"])
+        if pw_error:
+            return jsonify({"ok": False, "error": pw_error}), 400
     users = load_users()
     found = None
     for u in users:
@@ -376,6 +423,28 @@ def append_note(hotliner_id, sender_role, text):
 def notes_mine():
     user = current_user()
     return jsonify(load_notes_thread(user["id"]))
+
+
+@app.route("/api/notes/search")
+def notes_search():
+    """Recherche dans les Notes (Lot G — recherche globale étendue). Un admin cherche dans
+    tous les fils hotliner ; un hotliner ne cherche que dans son propre fil."""
+    q = (request.args.get("q") or "").strip().lower()
+    if not q:
+        return jsonify([])
+    user = current_user()
+    results = []
+    if user["role"] == "admin":
+        hotliners = [u for u in load_users() if u.get("role") == "hotliner"]
+        for h in hotliners:
+            for entry in load_notes_thread(h["id"]):
+                if q in (entry.get("text") or "").lower():
+                    results.append({**entry, "hotliner_id": h["id"], "hotliner_name": h.get("name", h.get("username"))})
+    else:
+        for entry in load_notes_thread(user["id"]):
+            if q in (entry.get("text") or "").lower():
+                results.append({**entry, "hotliner_id": user["id"], "hotliner_name": user.get("name")})
+    return jsonify(results[:20])
 
 
 @app.route("/api/notes/mine", methods=["POST"])
@@ -537,6 +606,32 @@ def duration_seconds(rec):
     return 0
 
 
+def compute_tarkhiss_heatmap(calls, ym):
+    """Heatmap 'jour de semaine x semaine du mois' du volume d'appels — limite honnête :
+    la saisie Tarkhiss est au jour (pas à l'heure), donc contrairement à la heatmap Moussanada
+    (jour x heure, à partir des horodatages réels GLPI), celle-ci ne peut pas descendre en
+    dessous de la granularité journalière. Elle reste utile pour repérer les jours de semaine
+    à forte charge sur le mois."""
+    y, m = (int(x) for x in ym.split("-"))
+    import calendar
+    _, days_in_month = calendar.monthrange(y, m)
+    weeks = []
+    matrix = []
+    current_week = None
+    row = None
+    for day in range(1, days_in_month + 1):
+        wd = datetime(y, m, day).weekday()  # 0=lundi
+        week_of_month = (day + datetime(y, m, 1).weekday() - 1) // 7 + 1
+        if week_of_month != current_week:
+            current_week = week_of_month
+            row = [0] * 7
+            matrix.append(row)
+            weeks.append(f"Sem. {week_of_month}")
+        count = (calls.get(str(day)) or {}).get("calls", 0)
+        row[wd] = count
+    return matrix, weeks
+
+
 def format_hms(total_seconds):
     total_seconds = int(total_seconds or 0)
     h = total_seconds // 3600
@@ -555,11 +650,24 @@ def load_global_settings():
         "sanad_logo_filename": None,    # logo SANAD (identité plateforme)
         "app_name": "SANAD",
         "app_subtitle": "Plateforme de pilotage du Helpdesk SI",
-        "ui_theme": "flat",             # "flat" ou "soft" (neumorphism doux) — écran uniquement, sans effet sur PDF/Excel
+        "ui_theme": "flat",             # "flat", "soft", "neu" ou "clay" — écran uniquement, sans effet sur PDF/Excel
+        "ui_palette": "ammps",          # "ammps", "ocean", "emerald", "slate", "violet", "crimson"
         # Grands titres des rapports (email/PDF/Excel/PPTX) — édition avancée, Administration
         "report_title_tarkhiss": "Rapport Support Tarkhiss",
         "report_title_moussanada": "Rapport Support Moussanada",
         "report_title_pchc": "Reporting Métier — PCHC",
+        # SMTP optionnel — si renseigné, permet l'envoi RÉEL du rappel programmé par email
+        # (sans lui, le rappel reste un simple bandeau à l'ouverture de l'app, comme documenté).
+        "smtp_host": "", "smtp_port": 587, "smtp_user": "", "smtp_password": "",
+        "smtp_use_tls": True, "smtp_from": "",
+        "reminder_api_token": "",  # jeton partagé pour l'appel headless (tâche planifiée)
+        # Sécurité (Lot 4)
+        "session_timeout_minutes": 240,   # déconnexion automatique après N minutes d'inactivité
+        "password_min_length": 8,
+        "password_require_digit": True,
+        "password_require_upper": True,
+        # Intégration GLPI (Lot A) — API REST legacy (apirest.php), en complément de l'import CSV
+        "glpi_url": "", "glpi_app_token": "", "glpi_user_token": "", "glpi_entity_id": "",
     }
     if os.path.exists(GLOBAL_SETTINGS_FILE):
         with open(GLOBAL_SETTINGS_FILE, "r", encoding="utf-8") as f:
@@ -661,6 +769,73 @@ def append_send_log(module, entry):
     write_json_safely(send_log_file(module), log[:200])
 
 
+def send_email_smtp(msg):
+    """Envoi réel via SMTP si configuré (Administration). Retourne (ok, error)."""
+    import smtplib
+    gs = load_global_settings()
+    host = gs.get("smtp_host")
+    if not host:
+        return False, "SMTP non configuré (Administration → Notifications par email)"
+    try:
+        msg["From"] = gs.get("smtp_from") or gs.get("smtp_user") or "sanad@localhost"
+        with smtplib.SMTP(host, int(gs.get("smtp_port") or 587), timeout=15) as server:
+            if gs.get("smtp_use_tls", True):
+                server.starttls()
+            if gs.get("smtp_user"):
+                server.login(gs["smtp_user"], gs.get("smtp_password") or "")
+            server.send_message(msg)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
+@app.route("/api/system/reminder-check", methods=["POST"])
+def system_reminder_check():
+    """Point d'entrée headless — destiné à être appelé par une tâche planifiée (Windows
+    Task Scheduler, cron...) une fois par jour, en dehors de toute session utilisateur.
+    Envoie un email RÉEL (SMTP) si le rapport du mois précédent n'a pas encore été envoyé et
+    que le jour de rappel configuré est atteint. Protégé par un jeton partagé (pas de session
+    navigateur ici). Sans SMTP configuré, ne fait rien (le rappel reste visible dans l'app)."""
+    gs = load_global_settings()
+    expected_token = gs.get("reminder_api_token") or ""
+    provided = request.headers.get("X-Reminder-Token") or (request.json or {}).get("token", "")
+    if not expected_token or provided != expected_token:
+        return jsonify({"ok": False, "error": "Jeton invalide ou non configuré"}), 403
+
+    today = datetime.now()
+    results = []
+    for module in ("tarkhiss", "moussanada"):
+        settings = load_module_settings(module)
+        reminder_day = settings.get("reminder_day", 5)
+        py = prev_ym(f"{today.year}-{today.month:02d}")
+        already_sent = any(l.get("ym") == py for l in load_send_log(module))
+        if already_sent or today.day < reminder_day:
+            results.append({"module": module, "sent": False, "reason": "déjà envoyé ou pas encore le jour de rappel"})
+            continue
+        to_list = [c["email"] for c in settings.get("contacts", []) if c.get("role") == "to"]
+        if not to_list:
+            results.append({"module": module, "sent": False, "reason": "aucun destinataire configuré"})
+            continue
+        report_html, month_label = get_report_html_and_label(module, py, None, for_pdf=False)
+        greeting = settings.get("greeting", "Bonjour,")
+        body_html = build_email_body(month_label, report_html, greeting, settings, MODULES[module]["label"])
+        subject = build_subject(module, month_label)
+        msg = EmailMessage()
+        msg["Subject"] = f"[Rappel automatique] {subject}"
+        msg["To"] = "; ".join(to_list)
+        cc_list = [c["email"] for c in settings.get("contacts", []) if c.get("role") == "cc"]
+        if cc_list:
+            msg["Cc"] = "; ".join(cc_list)
+        msg.set_content("Ce message nécessite un client compatible HTML.")
+        msg.add_alternative(body_html, subtype="html")
+        ok, error = send_email_smtp(msg)
+        if ok:
+            append_send_log(module, {"date": today.isoformat(timespec="seconds"), "ym": py, "subject": subject, "to": to_list, "cc": cc_list, "opened": False, "auto": True})
+            log_audit("reminder_email_sent", {"ym": py, "to": to_list}, module=module)
+        results.append({"module": module, "sent": ok, "reason": error})
+    return jsonify({"ok": True, "results": results})
+
+
 def empty_analysis(ym):
     return {
         "month_label": month_label_fr(ym),
@@ -745,12 +920,248 @@ def save_notes(ym, data):
     write_json_safely(notes_path(ym), data)
 
 
+# ---------------------------------------------------------------------------
+# MOUSSANADA — filtre technicien (Lot D) : exclusion ou whitelist, persistant, appliqué à la
+# fois à l'import (direct et CSV) et à la lecture des données pour dashboard/rapports — un
+# changement de filtre affecte donc immédiatement les régénérations de rapport, sans ré-import.
+# ---------------------------------------------------------------------------
+def technicien_filter_file():
+    return os.path.join(module_dir("moussanada"), "technicien_filter.json")
+
+
+def load_technicien_filter():
+    defaults = {"mode": "exclude", "technicians": []}  # mode: "exclude" ou "whitelist"
+    p = technicien_filter_file()
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as f:
+            defaults.update(json.load(f))
+    return defaults
+
+
+def save_technicien_filter(data):
+    write_json_safely(technicien_filter_file(), data)
+
+
+def apply_technicien_filter(items):
+    """Filtre une liste d'enregistrements techniciens ({"label": <nom>, ...}) selon la
+    configuration persistante. Mode 'exclude' : retire les noms listés. Mode 'whitelist' (si la
+    liste n'est pas vide) : ne garde que les noms listés. Insensible à la casse/espaces."""
+    cfg = load_technicien_filter()
+    names = {n.strip().lower() for n in cfg.get("technicians", []) if n.strip()}
+    if not names:
+        return items
+    if cfg.get("mode") == "whitelist":
+        return [it for it in items if (it.get("label") or "").strip().lower() in names]
+    return [it for it in items if (it.get("label") or "").strip().lower() not in names]
+
+
+# ---------------------------------------------------------------------------
+# MOUSSANADA — tickets bruts (import ticket-par-ticket, distinct des feuilles agrégées)
+# Alimente : répartition par Type/Priorité, et la heatmap de charge (jour x heure).
+# ---------------------------------------------------------------------------
+def raw_tickets_file():
+    return os.path.join(module_dir("moussanada"), "tickets_raw.json")
+
+
+def load_raw_tickets():
+    p = raw_tickets_file()
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def save_raw_tickets(tickets):
+    write_json_safely(raw_tickets_file(), tickets)
+
+
+@app.route("/api/moussanada/import-tickets", methods=["POST"])
+def moussanada_import_tickets():
+    if "file" not in request.files:
+        return jsonify({"ok": False, "error": "Aucun fichier fourni"}), 400
+    f = request.files["file"]
+    try:
+        new_tickets = parse_glpi_raw_tickets(f)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Erreur d'analyse du fichier : {e}"}), 400
+    if not new_tickets:
+        return jsonify({"ok": True, "result": {"rows": 0}, "warnings": [
+            "0 ticket détecté — vérifiez qu'il s'agit bien d'un export GLPI brut (ticket par ticket) "
+            "avec les colonnes ID, Statut, Date d'ouverture, Priorité, Catégorie, Type, etc."
+        ]})
+    existing = load_raw_tickets()
+    merged = merge_raw_tickets(existing, new_tickets)
+    save_raw_tickets(merged)
+    log_audit("import_tickets", {"file": f.filename, "new": len(new_tickets), "total": len(merged)}, module="moussanada")
+    return jsonify({"ok": True, "result": {"rows": len(new_tickets), "total": len(merged)}, "warnings": []})
+
+
+@app.route("/api/moussanada/heatmap")
+def moussanada_heatmap():
+    """Heatmap jour x heure des tickets ouverts, calculée à partir des tickets bruts importés.
+    Filtrable par période (start/end au format YYYY-MM)."""
+    tickets = load_raw_tickets()
+    start = request.args.get("start")
+    end = request.args.get("end")
+    if start or end:
+        def in_range(t):
+            d = (t.get("date_ouverture") or "")[:7]
+            if start and d < start:
+                return False
+            if end and d > end:
+                return False
+            return True
+        tickets = [t for t in tickets if in_range(t)]
+    matrix = compute_heatmap_matrix(tickets)
+    type_counts = {}
+    priority_counts = {}
+    for t in tickets:
+        type_counts[t.get("type") or "Non renseigné"] = type_counts.get(t.get("type") or "Non renseigné", 0) + 1
+        priority_counts[t.get("priorite") or "Non renseignée"] = priority_counts.get(t.get("priorite") or "Non renseignée", 0) + 1
+    return jsonify({
+        "matrix": matrix, "total_tickets": len(tickets),
+        "type_counts": type_counts, "priority_counts": priority_counts,
+    })
+
+
+@app.route("/api/moussanada/heatmap.png")
+def moussanada_heatmap_png():
+    """Rendu image (seaborn) de la heatmap, pour affichage direct <img> côté dashboard."""
+    tickets = load_raw_tickets()
+    start = request.args.get("start")
+    end = request.args.get("end")
+    if start or end:
+        def in_range(t):
+            d = (t.get("date_ouverture") or "")[:7]
+            if start and d < start:
+                return False
+            if end and d > end:
+                return False
+            return True
+        tickets = [t for t in tickets if in_range(t)]
+    matrix = compute_heatmap_matrix(tickets)
+    hours = [f"{h}h" for h in range(24)]
+    days = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
+    buf = chart_heatmap_png(matrix, days, hours, "Heatmap de charge — tickets ouverts par jour et heure", figsize=(11, 3.8))
+    return send_file(buf, mimetype="image/png")
+
+
+@app.route("/api/tarkhiss/heatmap-png/<ym>")
+def tarkhiss_heatmap_png(ym):
+    calls = _load("tarkhiss", "calls", ym, {})
+    matrix, weeks = compute_tarkhiss_heatmap(calls, ym)
+    buf = chart_heatmap_png(
+        matrix, weeks, ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"],
+        "Heatmap de charge — appels par jour de semaine et semaine du mois",
+        figsize=(8.5, 3.4), cbar_label="Nombre d'appels",
+    )
+    return send_file(buf, mimetype="image/png")
+
+
+def _filter_raw_tickets_period(tickets, start=None, end=None):
+    def in_range(t):
+        d = (t.get("date_ouverture") or "")[:7]
+        if start and d < start:
+            return False
+        if end and d > end:
+            return False
+        return True
+    return [t for t in tickets if in_range(t)] if (start or end) else tickets
+
+
+@app.route("/api/moussanada/tickets-analytics")
+def moussanada_tickets_analytics():
+    """Analyses tirées des tickets bruts GLPI (Type, Priorité, distribution des délais, tickets
+    en souffrance) — ce que le module reporting natif de GLPI n'agrège pas. Filtrable par
+    période (start/end au format YYYY-MM)."""
+    tickets = _filter_raw_tickets_period(load_raw_tickets(), request.args.get("start"), request.args.get("end"))
+
+    type_counts = {}
+    priority_counts = {}
+    for t in tickets:
+        type_counts[t.get("type") or "Non renseigné"] = type_counts.get(t.get("type") or "Non renseigné", 0) + 1
+        priority_counts[t.get("priorite") or "Non renseignée"] = priority_counts.get(t.get("priorite") or "Non renseignée", 0) + 1
+
+    durations = compute_resolution_hours(tickets)
+    delay_buckets = bucket_resolution_hours(durations)
+
+    open_statuses = {"En attente", "En cours (Attribué)", "En cours (Planifié)", "Nouveau"}
+    en_souffrance = sorted(
+        [t for t in tickets if (t.get("statut") or "") in open_statuses or (t.get("statut") not in ("Résolu", "Clos") and t.get("statut"))],
+        key=lambda t: t.get("date_ouverture") or "",
+    )
+
+    return jsonify({
+        "total_tickets": len(tickets),
+        "type_counts": type_counts,
+        "priority_counts": priority_counts,
+        "delay_buckets": delay_buckets,
+        "avg_resolution_h": round(sum(durations) / len(durations), 1) if durations else 0,
+        "tickets_en_souffrance": [
+            {"id": t["id"], "titre": t.get("titre", ""), "statut": t.get("statut", ""),
+             "date_ouverture": t.get("date_ouverture", ""), "technicien": t.get("technicien", ""),
+             "priorite": t.get("priorite", "")}
+            for t in en_souffrance
+        ],
+    })
+
+
+# ---------------------------------------------------------------------------
+# MOUSSANADA — détection de doublons d'import (Lot F). Les profils "par étiquette"
+# (categories/services/techniciens/demandeurs) REMPLACENT intégralement les données du mois à
+# chaque import (voir store_source_items) — silencieusement si CSV et Direct sont utilisés en
+# alternance pour le même mois. On avertit donc avant d'écraser un import fait dans l'AUTRE mode.
+REPLACE_SEMANTICS_KINDS = {"categories", "services", "techniciens", "demandeurs"}
+
+
+def import_history_file():
+    return os.path.join(module_dir("moussanada"), "import_history.json")
+
+
+def load_import_history():
+    p = import_history_file()
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def record_import_history(kind, ym, mode, source):
+    hist = load_import_history()
+    hist.insert(0, {"kind": kind, "ym": ym, "mode": mode, "source": source,
+                     "date": datetime.now().isoformat(timespec="seconds")})
+    write_json_safely(import_history_file(), hist[:300])
+
+
+def find_conflicting_import(kind, ym, mode):
+    """Retourne la dernière entrée d'import connue pour (kind, ym) faite dans l'AUTRE mode
+    (CSV vs Direct), s'il y en a une — signe qu'écraser maintenant perdrait une source
+    différente sans avertissement."""
+    if kind not in REPLACE_SEMANTICS_KINDS:
+        return None
+    for entry in load_import_history():
+        if entry["kind"] == kind and entry["ym"] == ym and entry["mode"] != mode:
+            return entry
+    return None
+
+
 @app.route("/api/moussanada/import/<ym>", methods=["POST"])
 def moussanada_import(ym):
     f = request.files.get("file")
     if not f:
         return jsonify({"ok": False, "error": "Aucun fichier reçu"}), 400
     kind = request.form.get("kind", "auto")
+    force = str(request.form.get("force", "")).lower() in ("1", "true", "yes")
+
+    conflict = find_conflicting_import(kind, ym, "csv")
+    if conflict and not force:
+        return jsonify({
+            "ok": False, "conflict": True,
+            "message": f"Ce mois a déjà été importé en Mode Direct GLPI le {conflict['date'][:16].replace('T',' ')} "
+                       f"pour '{kind}'. Continuer en Mode CSV remplacera intégralement ces données.",
+            "previous": conflict,
+        }), 409
+
     ext = os.path.splitext(f.filename)[1].lower()
     ts = load_timeseries()
     src = load_sources(ym)
@@ -767,6 +1178,7 @@ def moussanada_import(ym):
         return jsonify({"ok": False, "error": f"Erreur d'analyse du fichier : {e}"}), 400
     save_timeseries(ts)
     save_sources(ym, src)
+    record_import_history(kind, ym, "csv", f.filename)
     log_audit("import", {"file": f.filename, "kind": kind, "result": result}, module="moussanada")
     warnings = []
     if isinstance(result, dict) and not any(v for k, v in result.items() if k != "detected_month"):
@@ -795,7 +1207,7 @@ def moussanada_data(ym):
             },
             "categories": src.get("categories", []),
             "services": src.get("services", []),
-            "techniciens": src.get("techniciens", []),
+            "techniciens": apply_technicien_filter(src.get("techniciens", [])),
             "demandeurs": src.get("demandeurs", []),
         },
         "timeseries": ts,
@@ -946,6 +1358,27 @@ def chart_combo_png(categories, bar_series, line_series, bar_ylabel="", line_yla
     ax1.legend(lines1 + lines2, labels1 + labels2, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.5), ncol=2, fontsize=9)
     ax1.set_title(title, fontsize=13, fontweight="bold", color="#0B4965", pad=12)
     fig.subplots_adjust(bottom=0.38)
+    return _fig_to_png_buf(fig)
+
+
+def chart_heatmap_png(matrix, row_labels, col_labels, title, figsize=(10, 3.6), cbar_label="Nombre de tickets"):
+    """Heatmap générique (jour x heure, ou jour x semaine). matrix: liste de listes [rows][cols]."""
+    import numpy as np
+    import matplotlib.pyplot as plt
+    _seaborn_setup()
+    import seaborn as sns
+    fig, ax = plt.subplots(figsize=figsize)
+    data = np.array(matrix, dtype=float)
+    sns.heatmap(
+        data, ax=ax, cmap="YlOrRd", linewidths=0.6, linecolor="white",
+        xticklabels=col_labels, yticklabels=row_labels,
+        cbar_kws={"label": cbar_label, "shrink": 0.8},
+        annot=data.shape[0] * data.shape[1] <= 60, fmt=".0f", annot_kws={"fontsize": 8},
+    )
+    ax.set_title(title, fontsize=13, fontweight="bold", color="#0B4965", pad=12)
+    plt.setp(ax.get_xticklabels(), rotation=0, fontsize=8)
+    plt.setp(ax.get_yticklabels(), rotation=0, fontsize=9)
+    fig.tight_layout()
     return _fig_to_png_buf(fig)
 
 
@@ -1660,6 +2093,7 @@ def pchc_send_email():
     append_send_log("pchc", {
         "date": datetime.now().isoformat(timespec="seconds"),
         "ym": f"{start}_{end}", "subject": subject, "to": to_list, "cc": cc_list, "opened": opened,
+        "file": fname,
     })
     return jsonify({"ok": True, "file": fpath, "opened": opened, "error": error, "subject": subject})
 
@@ -1813,6 +2247,16 @@ def get_month(module, ym):
     return jsonify({"calls": calls, "emails": emails, "analysis": analysis})
 
 
+@app.route("/api/<module>/heatmap/<ym>")
+def tarkhiss_heatmap(module, ym):
+    check_module(module)
+    if module != "tarkhiss":
+        return jsonify({"error": "heatmap non disponible pour ce volet"}), 400
+    calls = _load(module, "calls", ym, {})
+    matrix, weeks = compute_tarkhiss_heatmap(calls, ym)
+    return jsonify({"matrix": matrix, "weeks": weeks, "days": ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]})
+
+
 @app.route("/api/<module>/calls/<ym>", methods=["POST"])
 def save_calls(module, ym):
     check_module(module)
@@ -1855,6 +2299,213 @@ def get_audit_log():
                     continue
     entries.reverse()
     return jsonify(entries[:limit])
+
+
+# ---------------------------------------------------------------------------
+# API - RGPD (recherche / export / anonymisation d'une personne nommée dans les données)
+# Périmètre couvert : tickets bruts Moussanada (champ "demandeur") et dossiers PCHC (champ
+# "entity" — raison sociale/opérateur). Les feuilles agrégées mensuelles Moussanada
+# (Catégories/Services/Techniciens/Demandeurs) ne sont PAS couvertes par l'anonymisation :
+# ce sont des totaux par étiquette, pas des enregistrements individuels — limite assumée.
+# ---------------------------------------------------------------------------
+def _rgpd_search(query):
+    q = (query or "").strip().lower()
+    if not q:
+        return {"tickets": [], "pchc_records": []}
+    tickets = [t for t in load_raw_tickets() if q in (t.get("demandeur") or "").lower()]
+    pchc_data = load_pchc_records()
+    matches_pchc = []
+    for cat_key, recs in pchc_data.get("categories", {}).items():
+        for r in recs:
+            if q in (r.get("entity") or "").lower():
+                matches_pchc.append({**r, "categorie": cat_key})
+    return {"tickets": tickets, "pchc_records": matches_pchc}
+
+
+@app.route("/api/admin/rgpd/search")
+def rgpd_search():
+    result = _rgpd_search(request.args.get("q"))
+    return jsonify({
+        "query": request.args.get("q", ""),
+        "tickets_count": len(result["tickets"]), "tickets": result["tickets"][:50],
+        "pchc_count": len(result["pchc_records"]), "pchc_records": result["pchc_records"][:50],
+    })
+
+
+@app.route("/api/admin/rgpd/export")
+def rgpd_export():
+    q = request.args.get("q", "")
+    result = _rgpd_search(q)
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["source", "champ_nom", "id_ou_ref", "statut", "date", "detail"])
+    for t in result["tickets"]:
+        writer.writerow(["Ticket Moussanada", t.get("demandeur", ""), t.get("id", ""), t.get("statut", ""), t.get("date_ouverture", ""), t.get("titre", "")])
+    for r in result["pchc_records"]:
+        writer.writerow(["Dossier PCHC", r.get("entity", ""), r.get("ref", ""), r.get("statut", ""), r.get("date_depot", ""), r.get("details", "")])
+    log_audit("rgpd_export", {"query": q, "tickets": len(result["tickets"]), "pchc": len(result["pchc_records"])})
+    mem = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
+    return send_file(mem, as_attachment=True, download_name=f"rgpd_export_{secure_filename(q) or 'recherche'}.csv", mimetype="text/csv")
+
+
+@app.route("/api/admin/rgpd/anonymize", methods=["POST"])
+def rgpd_anonymize():
+    """Remplace le nom recherché par '[Anonymisé RGPD]' dans les tickets bruts et dossiers PCHC
+    correspondants. Action irréversible (hors restauration depuis une sauvegarde horodatée) —
+    tracée dans le journal d'audit avec le nombre d'enregistrements touchés."""
+    q = ((request.json or {}).get("q") or "").strip()
+    if not q:
+        return jsonify({"ok": False, "error": "Requête vide"}), 400
+    anon_label = "[Anonymisé RGPD]"
+
+    tickets = load_raw_tickets()
+    touched_tickets = 0
+    for t in tickets:
+        if q.lower() in (t.get("demandeur") or "").lower():
+            t["demandeur"] = anon_label
+            touched_tickets += 1
+    if touched_tickets:
+        save_raw_tickets(tickets)
+
+    pchc_data = load_pchc_records()
+    touched_pchc = 0
+    for cat_key, recs in pchc_data.get("categories", {}).items():
+        for r in recs:
+            if q.lower() in (r.get("entity") or "").lower():
+                r["entity"] = anon_label
+                touched_pchc += 1
+    if touched_pchc:
+        save_pchc_records(pchc_data)
+
+    log_audit("rgpd_anonymize", {"query": q, "tickets_touched": touched_tickets, "pchc_touched": touched_pchc})
+    return jsonify({"ok": True, "tickets_touched": touched_tickets, "pchc_touched": touched_pchc})
+
+
+# ---------------------------------------------------------------------------
+# API - Intégration GLPI (Lot A — fondation : connexion, sans profils d'import pour l'instant)
+# ---------------------------------------------------------------------------
+@app.route("/api/admin/glpi/test-connection", methods=["POST"])
+def glpi_test_connection_route():
+    """Bouton "Tester la connexion" du panneau Admin > Intégrations. Utilise soit les
+    paramètres déjà enregistrés, soit ceux fournis dans le corps de la requête (permet de
+    tester avant d'enregistrer)."""
+    payload = request.json or {}
+    gs = load_global_settings()
+    base_url = payload.get("glpi_url") or gs.get("glpi_url")
+    app_token = payload.get("glpi_app_token") or gs.get("glpi_app_token")
+    user_token = payload.get("glpi_user_token") or gs.get("glpi_user_token")
+    entity_id = payload.get("glpi_entity_id") or gs.get("glpi_entity_id")
+    ok, message = glpi_test_connection(base_url, app_token, user_token, entity_id or None)
+    log_audit("glpi_test_connection", {"url": base_url, "ok": ok, "message": message})
+    return jsonify({"ok": ok, "message": message})
+
+
+@app.route("/api/admin/glpi/profiles")
+def glpi_list_profiles():
+    """Liste des profils d'import disponibles, pour peupler le sélecteur du panneau Admin."""
+    return jsonify(glpi_profiles.list_profiles())
+
+
+@app.route("/api/moussanada/technicien-filter", methods=["GET"])
+def get_technicien_filter():
+    return jsonify(load_technicien_filter())
+
+
+@app.route("/api/moussanada/technicien-filter", methods=["POST"])
+def set_technicien_filter():
+    payload = request.json or {}
+    mode = payload.get("mode")
+    if mode not in ("exclude", "whitelist"):
+        return jsonify({"ok": False, "error": "mode doit être 'exclude' ou 'whitelist'"}), 400
+    technicians = [str(t).strip() for t in (payload.get("technicians") or []) if str(t).strip()]
+    data = {"mode": mode, "technicians": technicians}
+    save_technicien_filter(data)
+    log_audit("technicien_filter_update", data, module="moussanada")
+    return jsonify({"ok": True, **data})
+
+
+@app.route("/api/moussanada/technicien-names")
+def moussanada_technicien_names():
+    """Liste (non filtrée) des noms de techniciens actuellement connus dans les données déjà
+    importées, pour faciliter la saisie du filtre côté Admin (éviter de retaper les noms).
+    Parcourt directement les fichiers sources_<mois>.json existants (les techniciens sont
+    stockés indépendamment de la série mensuelle des tickets)."""
+    names = set()
+    d = module_dir("moussanada")
+    for fn in os.listdir(d):
+        if fn.startswith("sources_") and fn.endswith(".json"):
+            ym = fn[len("sources_"):-len(".json")]
+            src = load_sources(ym)
+            for t in src.get("techniciens", []):
+                if t.get("label"):
+                    names.add(t["label"])
+    return jsonify(sorted(names))
+
+
+@app.route("/api/moussanada/glpi-import-direct", methods=["POST"])
+def moussanada_glpi_import_direct():
+    """Mode DIRECT (Lot C/E) : appel API GLPI -> agrégation -> stockage JSON SANAD, sans fichier
+    intermédiaire. Converge vers les mêmes fonctions de stockage (store_ticket_series /
+    store_source_items) que le mode CSV historique — voir glpi_import.py et glpi_profiles.py."""
+    payload = request.json or {}
+    profile_key = payload.get("profile")
+    if profile_key not in glpi_profiles.PROFILES:
+        return jsonify({"ok": False, "error": f"Profil inconnu : {profile_key}"}), 400
+
+    gs = load_global_settings()
+    base_url = gs.get("glpi_url")
+    app_token = gs.get("glpi_app_token")
+    user_token = gs.get("glpi_user_token")
+    entity_id = gs.get("glpi_entity_id") or None
+    if not base_url or not app_token or not user_token:
+        return jsonify({"ok": False, "error": "Configuration GLPI incomplète (Administration → Intégrations GLPI)"}), 400
+
+    date_start = payload.get("date_start")
+    date_end = payload.get("date_end")
+    force = bool(payload.get("force"))
+
+    profile = glpi_profiles.PROFILES[profile_key]
+    target = profile["target"]
+    ym = payload.get("ym")
+    if target.startswith("source_items:"):
+        kind = target.split(":", 1)[1]
+        if not ym:
+            return jsonify({"ok": False, "error": "Paramètre 'ym' requis pour ce profil (mois cible, format YYYY-MM)"}), 400
+        conflict = find_conflicting_import(kind, ym, "direct")
+        if conflict and not force:
+            return jsonify({
+                "ok": False, "conflict": True,
+                "message": f"Ce mois a déjà été importé en Mode CSV le {conflict['date'][:16].replace('T',' ')} "
+                           f"pour '{kind}'. Continuer en Mode Direct remplacera intégralement ces données.",
+                "previous": conflict,
+            }), 409
+
+    try:
+        client = GLPIClient(base_url, app_token, user_token, entity_id)
+        client.init_session()
+        try:
+            records, total_raw = glpi_profiles.run_profile(client, profile_key, date_start, date_end)
+        finally:
+            client.kill_session()
+    except GLPIConnectionError as e:
+        log_audit("glpi_import_direct_failed", {"profile": profile_key, "error": str(e)}, module="moussanada")
+        return jsonify({"ok": False, "error": str(e)}), 502
+
+    if target == "ticket_series":
+        ts = load_timeseries()
+        store_ticket_series(records, ts)
+        save_timeseries(ts)
+    elif target.startswith("source_items:"):
+        kind = target.split(":", 1)[1]
+        src = load_sources(ym)
+        store_source_items(kind, records, src)
+        save_sources(ym, src)
+        record_import_history(kind, ym, "direct", f"GLPI:{profile_key}")
+    else:
+        return jsonify({"ok": False, "error": f"Cible de stockage non gérée : {target}"}), 500
+
+    log_audit("glpi_import_direct", {"profile": profile_key, "raw_tickets": total_raw, "records": len(records)}, module="moussanada")
+    return jsonify({"ok": True, "profile": profile_key, "raw_tickets": total_raw, "records_stored": len(records)})
 
 
 # ---------------------------------------------------------------------------
@@ -2021,14 +2672,47 @@ def get_send_log(module):
     return jsonify(load_send_log(module))
 
 
+@app.route("/api/<module>/send-log/download/<path:filename>")
+def download_sent_export(module, filename):
+    """Téléchargement d'un email déjà généré (.eml, avec sa pièce jointe Excel/PDF incluse),
+    référencé dans le journal d'envoi (Lot F). Le nom de fichier est validé contre le contenu
+    du journal pour empêcher tout accès en dehors du dossier exports/ du volet."""
+    check_module(module)
+    known_files = {entry.get("file") for entry in load_send_log(module) if entry.get("file")}
+    safe_name = secure_filename(filename)
+    if safe_name not in known_files:
+        return jsonify({"error": "Fichier non référencé dans le journal d'envoi de ce volet"}), 404
+    fpath = os.path.join(module_dir(module), "exports", safe_name)
+    if not os.path.exists(fpath):
+        return jsonify({"error": "Fichier introuvable sur le disque (a-t-il été nettoyé ?)"}), 404
+    return send_file(fpath, as_attachment=True, download_name=safe_name)
+
+
 @app.route("/api/<module>/export-csv/<kind>/<ym>")
 def export_csv(module, kind, ym):
     check_module(module)
-    if kind not in ("calls", "emails"):
+    if kind not in ("calls", "emails", "problems", "demandes", "weekly"):
         return jsonify({"ok": False, "error": "kind invalide"}), 400
-    data = _load(module, kind, ym, {})
     buf = io.StringIO()
     writer = csv.writer(buf)
+    if kind in ("problems", "demandes", "weekly"):
+        analysis = _load(module, "analysis", ym, empty_analysis(ym))
+        rows = analysis.get(kind, [])
+        if kind == "weekly":
+            writer.writerow(["semaine", "bugs", "demandes", "observations"])
+            for w in rows:
+                writer.writerow([w.get("week", ""), w.get("bugs", 0), w.get("demandes", 0), w.get("obs", "")])
+        else:
+            writer.writerow(["type", "nombre", "description"] + (["action"] if kind == "problems" else []))
+            for r in rows:
+                row = [r.get("label", ""), r.get("count", 0), r.get("desc", "")]
+                if kind == "problems":
+                    row.append(r.get("action", ""))
+                writer.writerow(row)
+        mem = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
+        return send_file(mem, as_attachment=True, download_name=f"{module}_{kind}_{ym}.csv", mimetype="text/csv")
+
+    data = _load(module, kind, ym, {})
     if kind == "calls":
         writer.writerow(["date", "appels", "duree_hms"])
         for date in sorted(data.keys()):
@@ -2041,6 +2725,39 @@ def export_csv(module, kind, ym):
             writer.writerow([date, rec.get("received", 0), rec.get("sent", 0)])
     mem = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
     return send_file(mem, as_attachment=True, download_name=f"{module}_{kind}_{ym}.csv", mimetype="text/csv")
+
+
+@app.route("/api/pchc/export-csv-raw")
+def pchc_export_csv_raw():
+    """Export CSV brut de tous les dossiers PCHC (toutes catégories), pour analyse ad hoc
+    hors SANAD (Power BI, Excel avancé...)."""
+    start = request.args.get("start") or pchc_default_period()[0]
+    end = request.args.get("end") or pchc_default_period()[1]
+    data = load_pchc_records()
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    writer.writerow(["categorie", "reference", "entite", "details", "date_depot", "statut"])
+    for cat_key, cfg in PCHC_CATEGORIES.items():
+        recs = filter_by_period(data["categories"].get(cat_key, []), start, end)
+        for r in recs:
+            writer.writerow([cfg["label"], r.get("ref", ""), r.get("entity", ""), r.get("details", ""), r.get("date_depot", ""), r.get("statut", "")])
+    mem = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
+    return send_file(mem, as_attachment=True, download_name=f"pchc_dossiers_{start}_{end}.csv", mimetype="text/csv")
+
+
+@app.route("/api/moussanada/export-csv-tickets")
+def moussanada_export_csv_tickets():
+    """Export CSV brut des tickets GLPI importés (ticket par ticket), pour analyse ad hoc."""
+    tickets = _filter_raw_tickets_period(load_raw_tickets(), request.args.get("start"), request.args.get("end"))
+    buf = io.StringIO()
+    writer = csv.writer(buf)
+    cols = ["id", "titre", "statut", "date_ouverture", "priorite", "demandeur", "groupe_demandeur",
+            "technicien", "categorie", "ttr", "type", "derniere_modification"]
+    writer.writerow(cols)
+    for t in tickets:
+        writer.writerow([t.get(c, "") for c in cols])
+    mem = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
+    return send_file(mem, as_attachment=True, download_name="moussanada_tickets_bruts.csv", mimetype="text/csv")
 
 
 # ---------------------------------------------------------------------------
@@ -2267,6 +2984,19 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
     total_demandes = sum(d.get("count", 0) for d in demandes)
     ratio_bd = round(total_problems / total_demandes, 2) if total_demandes else 0
 
+    # Heatmap de charge — limite honnête : la saisie Tarkhiss est au jour (pas à l'heure), donc
+    # cette heatmap croise jour de semaine x semaine du mois (pas jour x heure comme Moussanada,
+    # qui dispose d'horodatages réels via l'import GLPI brut).
+    heatmap_matrix, heatmap_weeks = compute_tarkhiss_heatmap(calls, ym)
+    heatmap_has_data = any(any(row) for row in heatmap_matrix)
+    heatmap_b64 = ""
+    if heatmap_has_data:
+        heatmap_b64 = base64.b64encode(chart_heatmap_png(
+            heatmap_matrix, heatmap_weeks, ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"],
+            "Heatmap de charge — appels par jour de semaine et semaine du mois",
+            figsize=(8, 3.2), cbar_label="Nombre d'appels",
+        ).read()).decode()
+
     prev_problems = prev_analysis.get("problems", [])
     prev_demandes = prev_analysis.get("demandes", [])
     prev_total_problems = sum(p.get("count", 0) for p in prev_problems)
@@ -2409,7 +3139,8 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
           <a href="#sec-problems" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">2. Problèmes techniques</a>
           <a href="#sec-demandes" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">3. Demandes d'information</a>
           <a href="#sec-weekly" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">4. Évolution hebdomadaire</a>
-          <a href="#sec-synth" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">5. Constats &amp; recommandations</a>
+          {'<a href="#sec-heatmap" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">5. Heatmap de charge</a>' if heatmap_has_data else ""}
+          <a href="#sec-synth" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">{6 if heatmap_has_data else 5}. Constats &amp; recommandations</a>
         </div>''' if for_pdf else ""}
 
         <a name="sec-graphs"></a>
@@ -2458,6 +3189,8 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
         </table>
 
         {"<div style='font-size:14px;font-weight:bold;color:#0B4965;margin:20px 0 8px;'>Mots-clés fréquents</div><div style='font-size:12.5px;color:#55616B;margin-bottom:16px;'>" + keywords_line + "</div>" if keywords_line else ""}
+
+        {'<a name="sec-heatmap"></a><div class="pdf-break"></div><div style="font-size:14px;font-weight:bold;color:#0B4965;margin:4px 0 8px;">Heatmap de charge</div><p style="font-size:12px;color:#55616B;margin:0 0 10px;">Volume d\'appels par jour de semaine et semaine du mois (granularité journalière — Tarkhiss ne journalise pas l\'heure des appels).</p><img src="data:image/png;base64,' + heatmap_b64 + '" style="width:100%;max-width:620px;display:block;margin:0 auto 14px;" />' if heatmap_has_data else ""}
 
         <a name="sec-synth"></a>
         <div class="pdf-break"></div>
@@ -2520,6 +3253,16 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
     top_cat = top_n(m["categories"], 10)
     top_srv = top_n(m["services"], 10)
     techs = sorted(m["techniciens"], key=lambda x: x.get("ouverts", 0), reverse=True)
+
+    # Heatmap de charge (jour x heure) — seulement si des tickets bruts ont été importés pour
+    # ce mois (fonctionnalité optionnelle, distincte de l'import agrégé habituel).
+    raw_tickets_for_month = [t for t in load_raw_tickets() if (t.get("date_ouverture") or "")[:7] == ym]
+    heatmap_matrix = compute_heatmap_matrix(raw_tickets_for_month) if raw_tickets_for_month else None
+    heatmap_b64 = ""
+    if heatmap_matrix:
+        _hours = [f"{h}h" for h in range(24)]
+        _days = ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"]
+        heatmap_b64 = base64.b64encode(chart_heatmap_png(heatmap_matrix, _days, _hours, "Heatmap de charge — tickets ouverts par jour et heure", figsize=(9.5, 3.4)).read()).decode()
 
     def esc(s):
         return html_module.escape(str(s), quote=True) if s is not None else ""
@@ -2610,8 +3353,10 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
         "Volume global des tickets", "Évolution des délais de traitement",
         f"Principales catégories de demandes en {month_label}", "Services les plus demandeurs",
         "Charge et mobilisation de l'équipe SI", f"Analyse comparative {prev_month_label} / {month_label}",
-        "Synthèse finale et conclusion",
     ]
+    if heatmap_matrix:
+        moussanada_toc_titles.append("Heatmap de charge (jour x heure)")
+    moussanada_toc_titles.append("Synthèse finale et conclusion")
     moussanada_toc_html = f"""<div class="pdf-break"></div><div style="margin:10px 0 4px;padding:10px 14px;background:#F5F7F9;border:1px solid #DAE0E7;border-radius:6px;">
       <div style="font-size:10.5px;font-weight:800;color:#0B4965;letter-spacing:.4px;text-transform:uppercase;margin-bottom:6px;">Sommaire</div>
       {"".join(f'<a href="#sec-{i+1}" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">{i+1}. {esc(t)}</a>' for i, t in enumerate(moussanada_toc_titles))}
@@ -2701,7 +3446,10 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
         {img_tag("delay")}
         {copilot_box(sections.get("comparative", ""))}
 
-        {section_title(7, "Synthèse finale et conclusion")}
+        {section_title(7, "Heatmap de charge (jour x heure)") if heatmap_matrix else ""}
+        {"<p style='font-size:12.5px;color:#55616B;margin:0 0 10px;'>Répartition des tickets ouverts par jour de semaine et heure de la journée — basée sur les tickets bruts importés (colonne Date d'ouverture). Utile pour dimensionner les plages de présence hotline.</p><img src='data:image/png;base64," + heatmap_b64 + "' style='width:100%;max-width:680px;display:block;margin:0 auto 14px;' />" if heatmap_matrix else ""}
+
+        {section_title(8 if heatmap_matrix else 7, "Synthèse finale et conclusion")}
         {("<div style='font-size:13px;font-weight:bold;color:#0B4965;margin:6px 0 6px;'>Constats clés</div><ul style='padding-left:18px;margin:0 0 14px;'>" + list_html(notes.get('constats', [])) + "</ul>") if notes.get('constats') else ""}
         {("<div style='font-size:13px;font-weight:bold;color:#0B4965;margin:6px 0 6px;'>Recommandations</div><ul style='padding-left:18px;margin:0 0 14px;'>" + list_html(notes.get('recommandations', [])) + "</ul>") if notes.get('recommandations') else ""}
         {copilot_box(sections.get("synthesis", ""))}
@@ -2791,6 +3539,7 @@ def send_email(module, ym):
         "to": to_list,
         "cc": cc_list,
         "opened": opened,
+        "file": fname,
     })
 
     return jsonify({"ok": True, "file": fpath, "opened": opened, "error": error, "subject": subject})
@@ -2800,15 +3549,46 @@ def send_email(module, ym):
 # API - Export Excel du dashboard (par volet)
 # ---------------------------------------------------------------------------
 def render_pdf_bytes(inner_html, landscape=False, header_label=None):
-    from xhtml2pdf import pisa
+    """Génère le PDF final. Utilise WeasyPrint si disponible (meilleur rendu CSS moderne,
+    flexbox/grid, en-tête récurrent via CSS Paged Media standard) ; sinon repli automatique
+    sur xhtml2pdf (moteur historique, zéro dépendance système). WeasyPrint nécessite GTK3 sous
+    Windows — voir le README pour l'installation ; sans ça, l'app continue de fonctionner
+    normalement avec xhtml2pdf."""
     size = "A4 landscape" if landscape else "A4"
     header_block = ""
-    frame_rule = ""
     if header_label:
         header_block = f"""<div id="pdfRunningHeader" style="font-size:9px;color:#55616B;
           border-bottom:1px solid #DAE0E7;padding-bottom:4px;">
           <strong style="color:#0B4965;">SANAD — AMMPS/DSID</strong> &nbsp;·&nbsp; {header_label}
         </div>"""
+
+    try:
+        import weasyprint
+        top_margin = "2.1cm" if header_label else "1.4cm"
+        header_css = ""
+        if header_label:
+            header_css = """
+              @top-left { content: element(pdfrunhead); }
+            """
+            header_block = f'<div style="position:running(pdfrunhead);">{header_block}</div>'
+        doc = f"""<html><head><meta charset="utf-8">
+        <style>
+          @page {{ size: {size}; margin: {top_margin} 1.4cm 1.4cm 1.4cm;{header_css} }}
+          body {{ font-family: Arial, sans-serif; }}
+          img {{ max-width: 100%; }}
+          .pdf-break {{ page-break-before: always; }}
+        </style>
+        </head><body>{header_block}{inner_html}</body></html>"""
+        pdf_bytes = weasyprint.HTML(string=doc).write_pdf()
+        buf = io.BytesIO(pdf_bytes)
+        buf.seek(0)
+        return buf
+    except Exception:
+        pass  # WeasyPrint absent ou en échec (ex. GTK3 manquant sous Windows) → repli xhtml2pdf
+
+    from xhtml2pdf import pisa
+    frame_rule = ""
+    if header_label:
         frame_rule = """
           @frame header_frame {
             -pdf-frame-content: pdfRunningHeader;

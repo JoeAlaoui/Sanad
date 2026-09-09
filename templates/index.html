@@ -57,6 +57,12 @@
     </div>
 
     <nav class="nav">
+      <!-- Favoris (Lot G) — épingles personnelles, mémorisées par navigateur, remplies dynamiquement -->
+      <div class="nav-subgroup-title" id="favoritesTitle" style="display:none;">
+        <span class="nav-subgroup-ico">⭐</span> Favoris
+      </div>
+      <div class="nav-subgroup" id="favoritesGroup" style="display:none;"></div>
+
       <!-- Sous-groupe Tarkhiss : Reporting Hotline & Emails -->
       <div class="nav-subgroup-title" data-module="tarkhiss" data-roles="admin,superviseur">
         <span class="nav-subgroup-ico">🎧</span> Reporting Hotline &amp; Emails
@@ -137,6 +143,8 @@
   <main class="main">
 
     <header class="topbar">
+      <div class="breadcrumb" id="breadcrumb"></div>
+      <button class="btn-add" id="favoriteToggleBtn" title="Épingler cette vue en favori">☆</button>
       <div class="month-picker" id="monthPickerWrap">
         <label for="monthSelect">Mois</label>
         <input type="month" id="monthSelect">
@@ -150,9 +158,25 @@
       <div class="user-menu">
         <span id="userMenuName"></span>
         <span class="role-pill" id="userMenuRole"></span>
+        <button class="btn-add" id="densityToggleBtn" title="Basculer la densité d'affichage des tableaux">▤ Compact</button>
+        <button class="btn-add" id="helpBtn" title="Revoir l'aide de démarrage">? Aide</button>
         <button class="btn-add" id="logoutBtn">Déconnexion</button>
       </div>
     </header>
+
+    <!-- MODAL ONBOARDING -->
+    <div class="modal-overlay" id="onboardingOverlay" style="display:none;">
+      <div class="modal-box">
+        <div class="modal-head">
+          <div>
+            <div class="mini-label">Prise en main</div>
+            <div id="onboardingTitle" style="font-weight:700;color:var(--primary);"></div>
+          </div>
+          <button class="modal-close" id="closeOnboardingBtn">✕</button>
+        </div>
+        <div id="onboardingBody" style="padding:20px 24px;font-size:13.5px;line-height:1.7;color:var(--ink);"></div>
+      </div>
+    </div>
 
     <div class="banner warn" id="reminderBanner" style="display:none;"></div>
     <div class="banner info" id="moduleNotReadyBanner" style="display:none;">
@@ -450,9 +474,11 @@
       </div>
 
       <div class="card">
-        <h2>Import séparé (.csv)</h2>
-        <div class="contact-add-row" style="grid-template-columns:1fr 1fr auto;">
-          <select id="mCsvKind">
+        <h2>Import par section — Mode Direct GLPI ou Mode CSV</h2>
+        <p class="hint">Choisir le type de données puis le mode d'import. Le Mode Direct interroge l'API GLPI configurée (Administration → Intégrations GLPI) sans fichier intermédiaire ; le Mode CSV conserve la traçabilité fichier pour l'audit qualité. Les deux modes alimentent exactement les mêmes données.</p>
+        <div class="form-row">
+          <label>Type de données</label>
+          <select id="mUnifiedKind">
             <option value="tickets">Tickets (série mensuelle)</option>
             <option value="durations">Durée moyenne</option>
             <option value="categories">Catégories</option>
@@ -460,9 +486,33 @@
             <option value="techniciens">Technicien assigné</option>
             <option value="demandeurs">Demandeurs</option>
           </select>
-          <input type="file" id="mCsvFile" accept=".csv">
-          <button class="btn-add" id="mCsvImportBtn">Importer</button>
         </div>
+        <div class="theme-choice" style="margin-bottom:10px;">
+          <label class="theme-option"><input type="radio" name="mImportMode" value="csv" id="mModeCsvInput" checked><span>📄 Mode CSV</span></label>
+          <label class="theme-option"><input type="radio" name="mImportMode" value="direct" id="mModeDirectInput"><span>🔌 Mode Direct GLPI</span></label>
+        </div>
+        <div id="mModeCsvBlock" class="contact-add-row" style="grid-template-columns:1fr auto;">
+          <input type="file" id="mCsvFile" accept=".csv">
+          <button class="btn-add" id="mCsvImportBtn">Importer le fichier</button>
+        </div>
+        <div id="mModeDirectBlock" style="display:none;">
+          <div class="contact-add-row" style="grid-template-columns:140px auto;">
+            <input type="month" id="mUnifiedYmInput">
+            <button class="btn-add" id="mUnifiedDirectBtn">Importer depuis GLPI</button>
+          </div>
+          <p class="hint" id="mUnifiedDirectHint" style="margin-top:6px;"></p>
+        </div>
+        <div id="mUnifiedResult" style="margin-top:8px;font-size:12.5px;"></div>
+      </div>
+
+      <div class="card">
+        <h2>🗓️ Import tickets bruts (ticket par ticket)</h2>
+        <p class="hint">Export GLPI brut — une ligne par ticket, avec colonnes ID, Statut, Date d'ouverture, Priorité, Catégorie, Type, Technicien... Distinct de l'import consolidé ci-dessus. Alimente la répartition par Type/Priorité et la <strong>heatmap de charge (jour × heure)</strong>, calculée à partir des horodatages réels — ré-importer régulièrement pour la tenir à jour (les tickets déjà connus sont mis à jour, pas dupliqués).</p>
+        <label class="btn btn-outline file-btn">
+          ⬆ Importer un export GLPI brut (.csv)
+          <input type="file" id="mImportRawTickets" accept=".csv" hidden>
+        </label>
+        <span class="hint autosave-hint" id="mImportRawTicketsHint"></span>
       </div>
 
       <div class="card">
@@ -480,6 +530,7 @@
           <h2>Catégories importées</h2>
           <span class="hint" id="mCatCount"></span>
         </div>
+        <input type="text" class="table-filter-input" data-target="mCategoriesTable" placeholder="🔍 Filtrer les catégories...">
         <div class="table-scroll"><table class="dash-table" id="mCategoriesTable">
           <thead><tr><th>Catégorie</th><th>Ouverts</th><th>Résolus</th><th>En retard</th><th>Fermés</th></tr></thead>
           <tbody></tbody>
@@ -491,6 +542,7 @@
           <h2>Services importés</h2>
           <span class="hint" id="mSrvCount"></span>
         </div>
+        <input type="text" class="table-filter-input" data-target="mServicesTable" placeholder="🔍 Filtrer les services...">
         <div class="table-scroll"><table class="dash-table" id="mServicesTable">
           <thead><tr><th>Service</th><th>Ouverts</th><th>Résolus</th><th>En retard</th><th>Fermés</th></tr></thead>
           <tbody></tbody>
@@ -499,6 +551,7 @@
 
       <div class="card">
         <h2>Techniciens</h2>
+        <input type="text" class="table-filter-input" data-target="mTechTable" placeholder="🔍 Filtrer les techniciens...">
         <table class="dash-table" id="mTechTable">
           <thead><tr><th>Technicien</th><th>Ouverts</th><th>Résolus</th><th>En retard</th><th>Fermés</th></tr></thead>
           <tbody></tbody>
@@ -509,6 +562,7 @@
         <button class="btn btn-outline" id="mCsvCatBtn">⬇ CSV Catégories</button>
         <button class="btn btn-outline" id="mCsvSrvBtn">⬇ CSV Services</button>
         <button class="btn btn-outline" id="mCsvTechBtn">⬇ CSV Techniciens</button>
+        <button class="btn btn-outline" id="mCsvTicketsBtn">⬇ CSV Tickets bruts</button>
       </div>
     </section>
 
@@ -594,6 +648,7 @@
 
       <div class="dash-actions" style="margin-bottom:16px;">
         <button class="btn btn-outline" id="pXlsxBtn">⬇ Excel consolidé</button>
+        <button class="btn btn-outline" id="pCsvRawBtn">⬇ CSV brut</button>
         <button class="btn btn-outline" id="pPdfBtn">⬇ PDF</button>
         <button class="btn btn-outline" id="pPptxBtn">📊 PPTX Revue Direction</button>
         <button class="btn btn-primary" id="pMailToggleBtn">✉ Envoyer par email</button>
@@ -738,6 +793,28 @@
               <span class="theme-swatch theme-swatch--soft"></span>
               <span>Neumorphism doux</span>
             </label>
+            <label class="theme-option">
+              <input type="radio" name="uiTheme" value="neu" id="themeNeuInput">
+              <span class="theme-swatch theme-swatch--neu"></span>
+              <span>Neumorphism complet</span>
+            </label>
+            <label class="theme-option">
+              <input type="radio" name="uiTheme" value="clay" id="themeClayInput">
+              <span class="theme-swatch theme-swatch--clay"></span>
+              <span>Claymorphism</span>
+            </label>
+          </div>
+          <p class="hint" style="margin-top:8px;">⚠️ Le neumorphism complet est déconseillé en usage courant (contraste réduit, moins lisible en survol rapide) — proposé ici à titre d'option, "Neumorphism doux" reste la recommandation par défaut si vous souhaitez sortir du flat.</p>
+        </div>
+        <div class="form-row">
+          <label>Palette de couleur (indépendante du thème — Neumorphism complet/Claymorphism gardent leur propre teinte)</label>
+          <div class="theme-choice">
+            <label class="theme-option"><input type="radio" name="uiPalette" value="ammps" id="palAmmpsInput"><span class="theme-swatch" style="background:#0B4965;"></span><span>AMMPS (défaut)</span></label>
+            <label class="theme-option"><input type="radio" name="uiPalette" value="ocean" id="palOceanInput"><span class="theme-swatch" style="background:#0E5C86;"></span><span>Océan</span></label>
+            <label class="theme-option"><input type="radio" name="uiPalette" value="emerald" id="palEmeraldInput"><span class="theme-swatch" style="background:#0F6B4F;"></span><span>Émeraude</span></label>
+            <label class="theme-option"><input type="radio" name="uiPalette" value="slate" id="palSlateInput"><span class="theme-swatch" style="background:#3A4A5C;"></span><span>Ardoise</span></label>
+            <label class="theme-option"><input type="radio" name="uiPalette" value="violet" id="palVioletInput"><span class="theme-swatch" style="background:#5B3FBD;"></span><span>Violet</span></label>
+            <label class="theme-option"><input type="radio" name="uiPalette" value="crimson" id="palCrimsonInput"><span class="theme-swatch" style="background:#8C2233;"></span><span>Bordeaux</span></label>
           </div>
         </div>
         <button class="btn btn-primary" id="saveGlobalSettingsBtn">Enregistrer</button>
@@ -767,6 +844,98 @@
           <input type="text" id="reportTitlePchcInput" placeholder="Reporting Métier — PCHC">
         </div>
         <button class="btn btn-primary" id="saveAdvancedEditingBtn">Enregistrer</button>
+      </div>
+
+      <div class="card">
+        <h2>📧 Notifications par email — rappel automatique (tâche planifiée)</h2>
+        <p class="hint">Sans configuration SMTP, le rappel de rapport non envoyé reste un bandeau visible à l'ouverture de l'app (limite déjà documentée dans le README). En renseignant un serveur SMTP ici, une tâche planifiée externe (Windows Task Scheduler, cron...) peut appeler <code>/api/system/reminder-check</code> une fois par jour pour un envoi <strong>réel</strong>, même app fermée.</p>
+        <div class="form-row"><label>Serveur SMTP</label><input type="text" id="smtpHostInput" placeholder="smtp.office365.com"></div>
+        <div class="form-row"><label>Port</label><input type="text" id="smtpPortInput" placeholder="587"></div>
+        <div class="form-row"><label>Utilisateur</label><input type="text" id="smtpUserInput" placeholder="sanad@ammps.ma"></div>
+        <div class="form-row"><label>Mot de passe</label><input type="password" id="smtpPasswordInput" placeholder="••••••••"></div>
+        <div class="form-row"><label>Adresse d'expédition (From)</label><input type="text" id="smtpFromInput" placeholder="sanad@ammps.ma"></div>
+        <div class="form-row">
+          <label>Jeton d'appel headless (à mettre dans la tâche planifiée)</label>
+          <div class="logo-row">
+            <input type="text" id="reminderTokenInput" readonly style="flex:1;">
+            <button class="btn btn-outline" id="regenerateTokenBtn" type="button">🔄 Régénérer</button>
+          </div>
+        </div>
+        <button class="btn btn-primary" id="saveSmtpBtn">Enregistrer</button>
+      </div>
+
+      <div class="card">
+        <h2>🔒 Sécurité</h2>
+        <div class="form-row">
+          <label>Déconnexion automatique après inactivité (minutes)</label>
+          <input type="text" id="sessionTimeoutInput" placeholder="240">
+        </div>
+        <div class="form-row">
+          <label>Longueur minimale du mot de passe</label>
+          <input type="text" id="pwMinLenInput" placeholder="8">
+        </div>
+        <div class="form-row">
+          <label><input type="checkbox" id="pwRequireDigitInput"> Exiger au moins un chiffre</label>
+        </div>
+        <div class="form-row">
+          <label><input type="checkbox" id="pwRequireUpperInput"> Exiger au moins une majuscule</label>
+        </div>
+        <p class="hint">S'applique à la création de compte, à la réinitialisation et au changement de mot de passe — pas rétroactif sur les mots de passe déjà en place.</p>
+        <button class="btn btn-primary" id="saveSecurityBtn">Enregistrer</button>
+      </div>
+
+      <div class="card">
+        <h2>🛡️ RGPD — données personnelles</h2>
+        <p class="hint">Recherche un nom (demandeur GLPI ou raison sociale/opérateur PCHC) dans les données stockées, pour exercer un droit d'accès ou d'effacement. Ne couvre pas les feuilles agrégées mensuelles Moussanada (totaux par étiquette, pas d'enregistrements individuels).</p>
+        <div class="contact-add-row" style="grid-template-columns:1fr auto auto;">
+          <input type="text" id="rgpdQueryInput" placeholder="Nom à rechercher...">
+          <button class="btn-add" id="rgpdSearchBtn">Rechercher</button>
+          <button class="btn btn-outline" id="rgpdExportBtn">⬇ Exporter CSV</button>
+        </div>
+        <div id="rgpdResults" style="margin-top:12px;"></div>
+      </div>
+
+      <div class="card">
+        <h2>🔌 Intégrations — GLPI (API REST)</h2>
+        <p class="hint">Connexion directe à l'API REST GLPI (apirest.php), en complément de l'import CSV existant qui reste pleinement fonctionnel. Nécessite un App-Token (Configuration → Générale → API, dans GLPI) et un User-Token (préférences du compte GLPI utilisé pour l'import).</p>
+        <div class="form-row"><label>URL de l'API GLPI</label><input type="text" id="glpiUrlInput" placeholder="https://glpi.ammps.ma/apirest.php"></div>
+        <div class="form-row"><label>App-Token</label><input type="password" id="glpiAppTokenInput" placeholder="••••••••"></div>
+        <div class="form-row"><label>User-Token</label><input type="password" id="glpiUserTokenInput" placeholder="••••••••"></div>
+        <div class="form-row"><label>ID d'entité GLPI (optionnel)</label><input type="text" id="glpiEntityIdInput" placeholder="0"></div>
+        <div class="actions-row">
+          <button class="btn btn-outline" id="glpiTestConnectionBtn">🔍 Tester la connexion</button>
+          <button class="btn btn-primary" id="saveGlpiBtn">Enregistrer</button>
+        </div>
+        <div id="glpiTestResult" style="margin-top:10px;font-size:12.5px;"></div>
+
+        <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border);">
+          <h3 style="margin:0 0 8px;font-size:14px;color:var(--primary);">Import direct par profil</h3>
+          <p class="hint">Récupère les données directement depuis GLPI (sans passer par un fichier CSV). Le mois cible n'est requis que pour les profils par étiquette (Catégories, Demandeurs, Techniciens).</p>
+          <div class="contact-add-row" style="grid-template-columns:1fr 140px auto;">
+            <select id="glpiProfileSelect"></select>
+            <input type="month" id="glpiImportYmInput">
+            <button class="btn-add" id="glpiImportDirectBtn">Importer</button>
+          </div>
+          <div id="glpiImportDirectResult" style="margin-top:8px;font-size:12.5px;"></div>
+        </div>
+
+        <div style="margin-top:18px;padding-top:16px;border-top:1px solid var(--border);">
+          <h3 style="margin:0 0 8px;font-size:14px;color:var(--primary);">Filtre techniciens (stats mensuelles)</h3>
+          <p class="hint">S'applique automatiquement à l'écran, à l'Excel et au PDF/email Moussanada — y compris sur des données déjà importées, sans besoin de ré-importer.</p>
+          <div class="theme-choice" style="margin-bottom:10px;">
+            <label class="theme-option"><input type="radio" name="technicienFilterMode" value="exclude" id="techFilterExcludeInput"><span>Mode exclusion</span></label>
+            <label class="theme-option"><input type="radio" name="technicienFilterMode" value="whitelist" id="techFilterWhitelistInput"><span>Mode whitelist</span></label>
+          </div>
+          <div class="form-row">
+            <label>Techniciens concernés (un par ligne)</label>
+            <textarea id="technicienFilterListInput" rows="4" placeholder="Nom Prénom&#10;Compte test&#10;..." style="width:100%;font-family:'Inter',sans-serif;padding:8px;border:1px solid var(--border);border-radius:8px;"></textarea>
+          </div>
+          <div class="actions-row">
+            <button class="btn btn-outline" id="loadTechnicienNamesBtn">📋 Voir les noms déjà connus</button>
+            <button class="btn btn-primary" id="saveTechnicienFilterBtn">Enregistrer le filtre</button>
+          </div>
+          <div id="technicienNamesKnown" class="hint" style="margin-top:8px;"></div>
+        </div>
       </div>
 
       <div class="card">
@@ -821,6 +990,9 @@
         <div class="actions-row">
           <button class="btn btn-outline" id="csvCallsBtn">⬇ CSV Appels</button>
           <button class="btn btn-outline" id="csvEmailsBtn">⬇ CSV Emails</button>
+          <button class="btn btn-outline" id="csvProblemsBtn">⬇ CSV Problèmes</button>
+          <button class="btn btn-outline" id="csvDemandesBtn">⬇ CSV Demandes</button>
+          <button class="btn btn-outline" id="csvWeeklyBtn">⬇ CSV Hebdo</button>
         </div>
       </div>
       <div id="moussanadaAdminNote" class="banner info" style="display:none;">
@@ -838,7 +1010,15 @@
       <div class="card">
         <h2>Historique des envois — volet <span id="adminModuleLabel6">Tarkhiss</span></h2>
         <table class="dash-table" id="sendLogTable">
-          <thead><tr><th>Date</th><th>Mois</th><th>Objet</th><th>À</th><th>Cc</th></tr></thead>
+          <thead><tr><th>Date</th><th>Mois</th><th>Objet</th><th>À</th><th>Cc</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+
+      <div class="card">
+        <h2>Historique des envois — Reporting Métier (PCHC)</h2>
+        <table class="dash-table" id="pchcSendLogTable">
+          <thead><tr><th>Date</th><th>Période</th><th>Objet</th><th>À</th><th>Cc</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -1015,6 +1195,12 @@
 </div>
 
 <div id="toast" class="toast"></div>
+<div id="busyOverlay" class="busy-overlay" style="display:none;">
+  <div class="busy-spinner"></div>
+  <div class="busy-text" id="busyText">Traitement en cours...</div>
+  <div class="busy-skeleton-row"></div>
+  <div class="busy-skeleton-row" style="width:min(340px,60vw);"></div>
+</div>
 
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.4/dist/chart.umd.min.js"></script>
 <script src="https://cdn.jsdelivr.net/npm/chartjs-plugin-datalabels@2.2.0/dist/chartjs-plugin-datalabels.min.js"></script>

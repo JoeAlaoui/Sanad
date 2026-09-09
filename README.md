@@ -1,15 +1,32 @@
-# Helpdesk Dashboard — Tarkhiss / Moussanada
+# SANAD — Plateforme de pilotage du Helpdesk SI (AMMPS)
 
-Application web locale (Flask + JSON), multi-volets, multi-utilisateurs, sans base de données.
+Application web locale (Flask + JSON), multi-volets (Tarkhiss, Moussanada, Reporting Métier
+PCHC), multi-utilisateurs, sans base de données. Le nom "SANAD" désigne désormais l'application
+complète (et non plus seulement le volet historique Tarkhiss) — personnalisable dans
+Administration → Édition avancée.
 
 ## 1. Installation & lancement
 
 ```bash
-cd tarkhiss_app
-pip install -r requirements.txt
+cd sanad_app
+python -m pip install -r requirements.txt
 python app.py
 ```
 Ouvrir : **http://127.0.0.1:5050**. Laisser le terminal ouvert.
+
+**⚠️ Remarque Windows** : la commande `pip install -r requirements.txt` seule a échoué sur certains
+postes (pip introuvable dans le PATH alors que Python l'est). Utiliser systématiquement
+`python -m pip install -r requirements.txt` (avec `python -m` devant) plutôt que `pip` seul —
+cela invoque pip via l'interpréteur Python actif et évite ce problème.
+
+**⚠️ WeasyPrint (génération PDF) sous Windows** : WeasyPrint est le moteur PDF principal depuis
+cette version (meilleur rendu que l'ancien moteur xhtml2pdf, conservé en repli automatique).
+Il dépend de bibliothèques système (GTK3 : Pango, Cairo, GDK-Pixbuf) absentes de Windows par
+défaut. Si l'export PDF échoue avec une erreur liée à `libgobject`/`cairo`/`pango`, installer le
+runtime GTK3 pour Windows (voir la documentation officielle WeasyPrint, section "Windows") puis
+relancer l'application. **Tant que GTK3 n'est pas installé, l'application bascule automatiquement
+sur xhtml2pdf** (rendu légèrement moins soigné mais fonctionnel) — aucune action requise pour que
+l'export PDF continue de fonctionner en attendant.
 
 ## 2. Premier lancement — création du compte administrateur
 
@@ -76,3 +93,21 @@ conservées à l'identique, désormais protégées par le contrôle d'accès par
 - Comptes : `data/users.json`. Notes : `data/notes/thread_<id>.json`. Base de connaissances :
   `data/knowledge.json`.
 - Aucune donnée envoyée à l'extérieur, tout reste local.
+- Sauvegardes horodatées automatiques avant chaque écriture (`data/_backups/`, 20 versions/fichier).
+- Journal d'audit : `data/audit_log.jsonl` (connexions, imports, gestion des comptes, RGPD).
+
+## 7. Personnalisation de l'écran (Administration)
+
+- **4 thèmes visuels** : Flat (défaut), Neumorphism doux (recommandé si vous sortez du flat),
+  Neumorphism complet et Claymorphism (ces deux derniers sont des options assumées, pas des
+  recommandations — voir l'avertissement affiché dans l'écran Administration).
+- **6 palettes de couleur**, indépendantes du thème choisi : AMMPS (défaut), Océan, Émeraude,
+  Ardoise, Violet, Bordeaux. Neumorphism complet et Claymorphism gardent leur propre teinte
+  fixe (la palette ne s'applique pas par-dessus ces deux thèmes).
+- Ces réglages sont **purement visuels côté écran** : ils n'ont aucun effet sur les rapports
+  PDF/Excel/PowerPoint, qui conservent toujours la charte AMMPS officielle.
+- Bouton **densité compacte** (topbar) pour resserrer les tableaux volumineux, mémorisé par
+  navigateur.
+- Raccourcis clavier : `/` (focus recherche globale), `Échap` (ferme les fenêtres ouvertes),
+  `Ctrl+S` / `Cmd+S` sur un dashboard (exporte le PDF du volet actif).
+- Glisser-déposer disponible sur toutes les zones d'import de fichiers.

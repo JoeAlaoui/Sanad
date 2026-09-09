@@ -18,6 +18,21 @@ if(window.Chart && window.ChartDataLabels){
   Chart.defaults.set('plugins.datalabels', {display:false});
 }
 
+// ---------- Filtrage générique des tableaux de détail (Lot 3) ----------
+// Un input.table-filter-input avec data-target="idDuTableau" filtre les lignes <tbody>
+// du tableau ciblé en direct, sur l'ensemble du texte de la ligne (insensible à la casse).
+// Délégation d'événement sur le document : fonctionne aussi pour les tableaux re-rendus
+// dynamiquement après le premier chargement (pas besoin de ré-attacher l'écouteur).
+document.addEventListener("input", (e)=>{
+  if(!e.target.classList || !e.target.classList.contains("table-filter-input")) return;
+  const table = document.getElementById(e.target.dataset.target);
+  if(!table) return;
+  const q = e.target.value.trim().toLowerCase();
+  table.querySelectorAll("tbody tr").forEach(tr=>{
+    tr.style.display = (!q || tr.textContent.toLowerCase().includes(q)) ? "" : "none";
+  });
+});
+
 // ---------- Résilience réseau (Lot 1 — fiabilisation) ----------
 // Intercepte les échecs fetch au niveau réseau (serveur injoignable, coupure Wi-Fi/VPN) pour
 // informer l'utilisateur au lieu d'un échec silencieux. Les erreurs HTTP (4xx/5xx) restent
@@ -101,6 +116,19 @@ function toast(msg){
   t.textContent = msg;
   t.classList.add("show");
   setTimeout(()=>t.classList.remove("show"), 2600);
+}
+
+// ---------- Overlay de chargement (Lot 5) — imports/générations volumineuses ----------
+function showBusy(message){
+  const overlay = document.getElementById("busyOverlay");
+  const text = document.getElementById("busyText");
+  if(!overlay) return;
+  if(text) text.textContent = message || "Traitement en cours...";
+  overlay.style.display = "flex";
+}
+function hideBusy(){
+  const overlay = document.getElementById("busyOverlay");
+  if(overlay) overlay.style.display = "none";
 }
 
 function saveIndicatorPulse(){
@@ -258,7 +286,85 @@ function activateTab(tab){
   document.querySelectorAll(".nav-item").forEach(b=>b.classList.toggle("active", b.dataset.tab === tab));
   document.querySelectorAll(".tab-panel").forEach(p=>p.classList.remove("active"));
   document.getElementById("tab-"+tab).classList.add("active");
+  updateBreadcrumb(tab);
   renderTab(tab);
+}
+
+// ---------- Fil d'ariane (Lot G) — dérivé de la structure de nav existante, pas de mapping
+// statique à maintenir séparément : on lit le data-module et le sous-groupe le plus proche.
+function updateBreadcrumb(tab){
+  const bc = document.getElementById("breadcrumb");
+  if(!bc) return;
+  const navItem = document.querySelector(`.nav-item[data-tab="${tab}"]:not([data-real-module])`);
+  if(!navItem){ bc.innerHTML = ""; return; }
+  const itemLabel = navItem.textContent.trim().replace(/\s+/g, " ");
+  const module = navItem.dataset.module;
+  const parts = [];
+  if(module === "tarkhiss" || module === "pchc"){
+    parts.push("Tarkhiss");
+    let sib = navItem.previousElementSibling;
+    while(sib && !sib.classList.contains("nav-subgroup-title")) sib = sib.previousElementSibling;
+    if(sib) parts.push(sib.textContent.trim());
+  } else if(module === "moussanada"){
+    parts.push("Moussanada");
+  }
+  parts.push(itemLabel);
+  bc.innerHTML = parts.map((p,i)=> i === parts.length-1
+    ? `<span class="bc-current">${esc(p)}</span>`
+    : `<span>${esc(p)}</span><span class="bc-sep">›</span>`
+  ).join("");
+
+  const favBtn = document.getElementById("favoriteToggleBtn");
+  if(favBtn) updateFavoriteBtn(tab);
+}
+
+// ---------- Favoris (Lot G) — épingles personnelles, persistées par navigateur ----------
+function loadFavorites(){
+  try{ return JSON.parse(localStorage.getItem("sanad_favorites") || "[]"); }
+  catch(e){ return []; }
+}
+function saveFavoritesList(list){
+  localStorage.setItem("sanad_favorites", JSON.stringify(list.slice(0, 8)));
+}
+function isFavorited(tab){
+  return loadFavorites().some(f=>f.tab === tab);
+}
+function toggleCurrentFavorite(){
+  const tab = document.querySelector(".nav-item.active:not([data-real-module])")?.dataset.tab;
+  if(!tab) return;
+  const navItem = document.querySelector(`.nav-item[data-tab="${tab}"]:not([data-real-module])`);
+  const label = navItem ? navItem.textContent.trim().replace(/\s+/g, " ") : tab;
+  const module = navItem ? navItem.dataset.module : currentModule;
+  let list = loadFavorites();
+  if(list.some(f=>f.tab === tab)){
+    list = list.filter(f=>f.tab !== tab);
+  } else {
+    list.push({tab, label, module});
+  }
+  saveFavoritesList(list);
+  renderFavorites();
+  updateFavoriteBtn(tab);
+}
+function renderFavorites(){
+  const group = document.getElementById("favoritesGroup");
+  const title = document.getElementById("favoritesTitle");
+  const list = loadFavorites();
+  if(!list.length){ group.style.display = "none"; title.style.display = "none"; group.innerHTML = ""; return; }
+  title.style.display = ""; group.style.display = "";
+  // data-module="shared" : toujours visible quel que soit le volet actif (c'est le principe
+  // même d'un raccourci) — le clic bascule quand même le bon module via data-real-module.
+  group.innerHTML = list.map(f=>`
+    <button class="nav-item" data-tab="${f.tab}" data-module="shared" data-real-module="${f.module}">
+      <span class="nav-ico">⭐</span> ${esc(f.label)}
+    </button>
+  `).join("");
+}
+function updateFavoriteBtn(tab){
+  const btn = document.getElementById("favoriteToggleBtn");
+  if(!btn) return;
+  btn.textContent = isFavorited(tab) ? "★" : "☆";
+  btn.title = isFavorited(tab) ? "Retirer des favoris" : "Épingler cette vue en favori";
+  btn.classList.toggle("is-favorited", isFavorited(tab));
 }
 
 function renderTab(tab){
@@ -302,14 +408,16 @@ async function switchModule(mod){
 // Les deux sous-volets de Tarkhiss (Hotline&Emails / Métier) étant visibles en même temps dans
 // la sidebar (accordéon), un clic peut passer de l'un à l'autre sans repasser par le sélecteur
 // de premier niveau : on bascule currentModule (routage /api/<module>/...) avant d'activer l'onglet.
-document.querySelectorAll(".nav-item").forEach(btn=>{
-  btn.addEventListener("click", async ()=>{
-    const mod = btn.dataset.module;
-    if(mod !== "shared" && mod !== currentModule){
-      await switchModule(mod);
-    }
-    activateTab(btn.dataset.tab);
-  });
+// Délégation d'événement (plutôt qu'un attachement par élément) pour que les favoris (Lot G),
+// ajoutés dynamiquement dans la sidebar, bénéficient du même comportement sans code dupliqué.
+document.addEventListener("click", async (e)=>{
+  const btn = e.target.closest(".nav-item");
+  if(!btn || !document.contains(btn)) return;
+  const mod = btn.dataset.realModule || btn.dataset.module;
+  if(mod && mod !== "shared" && mod !== currentModule){
+    await switchModule(mod);
+  }
+  activateTab(btn.dataset.tab);
 });
 
 // ---------- Month handling ----------
@@ -400,12 +508,21 @@ function notifyReminder(moduleLabel, py){
   const key = moduleLabel+py;
   if(notifiedThisSession[key]) return;
   notifiedThisSession[key] = true;
-  if("Notification" in window){
-    if(Notification.permission === "granted"){
-      new Notification(`Rapport ${moduleLabel} en attente`, {body:`Le rapport de ${monthLabel(py)} n'a pas encore été envoyé.`});
-    } else if(Notification.permission !== "denied"){
-      Notification.requestPermission();
-    }
+  notifyBrowser(`Rapport ${moduleLabel} en attente`, `Le rapport de ${monthLabel(py)} n'a pas encore été envoyé.`, false);
+}
+
+// Notification navigateur générique — utilisée pour le rappel de rapport (ci-dessus) et pour
+// les opérations longues terminées pendant que l'onglet est en arrière-plan (imports).
+// Ne redemande jamais la permission de façon intrusive : seule la première notification
+// déclenche potentiellement une demande native du navigateur.
+// onlyIfHidden=true : n'affiche que si l'onglet est actuellement en arrière-plan (évite les
+// notifications redondantes avec le toast déjà visible quand l'utilisateur regarde l'écran).
+function notifyBrowser(title, body, onlyIfHidden=true){
+  if(!("Notification" in window)) return;
+  if(Notification.permission === "granted"){
+    if(!onlyIfHidden || document.hidden) new Notification(title, {body});
+  } else if(Notification.permission !== "denied"){
+    Notification.requestPermission();
   }
 }
 
@@ -979,6 +1096,12 @@ function renderDashboard(){
       </div>
     </div>
 
+    <div class="chart-card" style="margin-bottom:16px;">
+      <h3>Heatmap de charge (jour × semaine)</h3>
+      <p style="font-size:11.5px;color:var(--muted);margin:0 0 8px;">Granularité journalière — Tarkhiss n'enregistre pas l'heure des appels.</p>
+      <img src="/api/tarkhiss/heatmap-png/${state.ym}?_=${Date.now()}" style="width:100%;max-width:720px;display:block;margin:0 auto;" alt="Heatmap de charge Tarkhiss">
+    </div>
+
     ${wordCloudHtml}
 
     <div class="dash-table-wrap">
@@ -1201,8 +1324,13 @@ function downloadCanvas(canvas, filename){
 // ---------- PDF / Excel ----------
 let _pdfPreviewBlobUrl = null;
 async function downloadPdfFromServer(url, payload, filename){
-  toast("Génération du PDF...");
-  const res = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+  showBusy("Génération du PDF en cours...");
+  let res;
+  try{
+    res = await fetch(url, {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+  } finally {
+    hideBusy();
+  }
   if(!res.ok){ toast("Erreur génération PDF"); return; }
   const blob = await res.blob();
   if(_pdfPreviewBlobUrl) URL.revokeObjectURL(_pdfPreviewBlobUrl);
@@ -1593,6 +1721,7 @@ async function loadGlobalSettings(){
   const res = await fetch("/api/global-settings");
   globalSettings = await res.json();
   applyUiTheme(globalSettings.ui_theme || "flat");
+  applyUiPalette(globalSettings.ui_palette || "ammps");
   applyAppBranding();
 }
 
@@ -1609,13 +1738,21 @@ function applyAppBranding(){
 }
 
 function applyUiTheme(theme){
-  document.documentElement.dataset.theme = theme === "soft" ? "soft" : "flat";
-  const flatInput = document.getElementById("themeFlatInput");
-  const softInput = document.getElementById("themeSoftInput");
-  if(flatInput && softInput){
-    flatInput.checked = theme !== "soft";
-    softInput.checked = theme === "soft";
-  }
+  const valid = ["flat", "soft", "neu", "clay"];
+  document.documentElement.dataset.theme = valid.includes(theme) ? theme : "flat";
+  document.querySelectorAll('input[name="uiTheme"]').forEach(input=>{
+    input.checked = (input.value === theme) || (input.value === "flat" && !valid.includes(theme));
+  });
+}
+
+function applyUiPalette(palette){
+  const valid = ["ammps", "ocean", "emerald", "slate", "violet", "crimson"];
+  const p = valid.includes(palette) ? palette : "ammps";
+  if(p === "ammps") delete document.documentElement.dataset.palette;
+  else document.documentElement.dataset.palette = p;
+  document.querySelectorAll('input[name="uiPalette"]').forEach(input=>{
+    input.checked = input.value === p;
+  });
 }
 
 async function loadModuleSettings(){
@@ -1660,8 +1797,10 @@ document.getElementById("addContactBtn").addEventListener("click", async ()=>{
 document.getElementById("saveGlobalSettingsBtn").addEventListener("click", async ()=>{
   globalSettings.agency_name = document.getElementById("agencyNameInput").value.trim();
   globalSettings.ui_theme = document.querySelector('input[name="uiTheme"]:checked')?.value || "flat";
-  await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({agency_name: globalSettings.agency_name, ui_theme: globalSettings.ui_theme})});
+  globalSettings.ui_palette = document.querySelector('input[name="uiPalette"]:checked')?.value || "ammps";
+  await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({agency_name: globalSettings.agency_name, ui_theme: globalSettings.ui_theme, ui_palette: globalSettings.ui_palette})});
   applyUiTheme(globalSettings.ui_theme);
+  applyUiPalette(globalSettings.ui_palette);
   toast("Paramètres généraux enregistrés");
 });
 
@@ -1677,6 +1816,171 @@ document.getElementById("saveAdvancedEditingBtn").addEventListener("click", asyn
   await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
   applyAppBranding();
   toast("Identité et grands titres enregistrés");
+});
+
+function randomToken(len=32){
+  const chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
+  let out = "";
+  for(let i=0;i<len;i++) out += chars[Math.floor(Math.random()*chars.length)];
+  return out;
+}
+
+document.getElementById("regenerateTokenBtn").addEventListener("click", ()=>{
+  document.getElementById("reminderTokenInput").value = randomToken();
+});
+
+document.getElementById("saveSmtpBtn").addEventListener("click", async ()=>{
+  const payload = {
+    smtp_host: document.getElementById("smtpHostInput").value.trim(),
+    smtp_port: Number(document.getElementById("smtpPortInput").value || 587),
+    smtp_user: document.getElementById("smtpUserInput").value.trim(),
+    smtp_password: document.getElementById("smtpPasswordInput").value,
+    smtp_from: document.getElementById("smtpFromInput").value.trim(),
+    reminder_api_token: document.getElementById("reminderTokenInput").value.trim(),
+  };
+  Object.assign(globalSettings, payload);
+  await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+  toast("Configuration SMTP enregistrée");
+});
+
+document.getElementById("saveSecurityBtn").addEventListener("click", async ()=>{
+  const payload = {
+    session_timeout_minutes: Number(document.getElementById("sessionTimeoutInput").value || 240),
+    password_min_length: Number(document.getElementById("pwMinLenInput").value || 8),
+    password_require_digit: document.getElementById("pwRequireDigitInput").checked,
+    password_require_upper: document.getElementById("pwRequireUpperInput").checked,
+  };
+  Object.assign(globalSettings, payload);
+  await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+  toast("Paramètres de sécurité enregistrés");
+});
+
+async function runRgpdSearch(){
+  const q = document.getElementById("rgpdQueryInput").value.trim();
+  const box = document.getElementById("rgpdResults");
+  if(!q){ box.innerHTML = ""; return; }
+  const res = await fetch(`/api/admin/rgpd/search?q=${encodeURIComponent(q)}`);
+  const data = await res.json();
+  if(!data.tickets_count && !data.pchc_count){
+    box.innerHTML = `<p class="hint">Aucun résultat pour "${esc(q)}".</p>`;
+    return;
+  }
+  box.innerHTML = `
+    <p class="hint">${data.tickets_count} ticket(s) Moussanada, ${data.pchc_count} dossier(s) PCHC trouvés.</p>
+    <button class="btn btn-outline" id="rgpdAnonymizeBtn" style="margin-bottom:10px;">🗑️ Anonymiser ces résultats</button>
+    ${data.tickets.length ? `<table class="dash-table"><thead><tr><th>Ticket</th><th>Demandeur</th><th>Statut</th><th>Date</th></tr></thead><tbody>
+      ${data.tickets.map(t=>`<tr><td>${esc(t.id)}</td><td>${esc(t.demandeur)}</td><td>${esc(t.statut)}</td><td>${esc((t.date_ouverture||"").slice(0,10))}</td></tr>`).join("")}
+    </tbody></table>` : ""}
+    ${data.pchc_records.length ? `<table class="dash-table" style="margin-top:10px;"><thead><tr><th>Référence</th><th>Entité</th><th>Statut</th></tr></thead><tbody>
+      ${data.pchc_records.map(r=>`<tr><td>${esc(r.ref)}</td><td>${esc(r.entity)}</td><td>${esc(r.statut)}</td></tr>`).join("")}
+    </tbody></table>` : ""}
+  `;
+  document.getElementById("rgpdAnonymizeBtn")?.addEventListener("click", async ()=>{
+    if(!confirm(`Anonymiser définitivement toutes les occurrences de "${q}" ? Cette action est tracée dans le journal d'audit et n'est pas réversible depuis l'écran (seule une restauration de sauvegarde le permettrait).`)) return;
+    const r = await fetch("/api/admin/rgpd/anonymize", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({q})});
+    const d = await r.json();
+    toast(`${d.tickets_touched} ticket(s) et ${d.pchc_touched} dossier(s) anonymisés`);
+    runRgpdSearch();
+  });
+}
+document.getElementById("rgpdSearchBtn").addEventListener("click", runRgpdSearch);
+document.getElementById("rgpdExportBtn").addEventListener("click", ()=>{
+  const q = document.getElementById("rgpdQueryInput").value.trim();
+  if(!q) return toast("Saisir un nom à rechercher d'abord");
+  window.location.href = `/api/admin/rgpd/export?q=${encodeURIComponent(q)}`;
+});
+
+document.getElementById("saveGlpiBtn").addEventListener("click", async ()=>{
+  const payload = {
+    glpi_url: document.getElementById("glpiUrlInput").value.trim(),
+    glpi_app_token: document.getElementById("glpiAppTokenInput").value,
+    glpi_user_token: document.getElementById("glpiUserTokenInput").value,
+    glpi_entity_id: document.getElementById("glpiEntityIdInput").value.trim(),
+  };
+  Object.assign(globalSettings, payload);
+  await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+  toast("Configuration GLPI enregistrée");
+});
+
+document.getElementById("glpiTestConnectionBtn").addEventListener("click", async ()=>{
+  const box = document.getElementById("glpiTestResult");
+  box.textContent = "Test en cours...";
+  box.style.color = "var(--muted)";
+  const payload = {
+    glpi_url: document.getElementById("glpiUrlInput").value.trim(),
+    glpi_app_token: document.getElementById("glpiAppTokenInput").value,
+    glpi_user_token: document.getElementById("glpiUserTokenInput").value,
+    glpi_entity_id: document.getElementById("glpiEntityIdInput").value.trim(),
+  };
+  try{
+    const res = await fetch("/api/admin/glpi/test-connection", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+    const data = await res.json();
+    box.textContent = (data.ok ? "✅ " : "❌ ") + data.message;
+    box.style.color = data.ok ? "var(--success)" : "var(--danger)";
+  } catch(e){
+    box.textContent = "❌ Erreur réseau lors du test.";
+    box.style.color = "var(--danger)";
+  }
+});
+
+async function loadGlpiProfilesSelect(){
+  const select = document.getElementById("glpiProfileSelect");
+  if(!select) return;
+  try{
+    const res = await fetch("/api/admin/glpi/profiles");
+    const profiles = await res.json();
+    select.innerHTML = profiles.map(p=>`<option value="${p.key}">${esc(p.label)}</option>`).join("");
+  } catch(e){ /* silencieux : GLPI peut ne pas être configuré */ }
+}
+
+document.getElementById("glpiImportDirectBtn").addEventListener("click", async ()=>{
+  const box = document.getElementById("glpiImportDirectResult");
+  const profile = document.getElementById("glpiProfileSelect").value;
+  const ym = document.getElementById("glpiImportYmInput").value;
+  box.textContent = "Import en cours...";
+  box.style.color = "var(--muted)";
+  showBusy("Import direct depuis GLPI en cours...");
+  try{
+    const res = await fetch("/api/moussanada/glpi-import-direct", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({profile, ym})});
+    const data = await res.json();
+    if(data.ok){
+      box.textContent = `✅ ${data.raw_tickets} ticket(s) GLPI -> ${data.records_stored} enregistrement(s) stocké(s).`;
+      box.style.color = "var(--success)";
+      toast("Import direct GLPI réussi");
+    } else {
+      box.textContent = "❌ " + data.error;
+      box.style.color = "var(--danger)";
+    }
+  } catch(e){
+    box.textContent = "❌ Erreur réseau lors de l'import.";
+    box.style.color = "var(--danger)";
+  } finally {
+    hideBusy();
+  }
+});
+
+async function loadTechnicienFilter(){
+  try{
+    const res = await fetch("/api/moussanada/technicien-filter");
+    const data = await res.json();
+    document.getElementById(data.mode === "whitelist" ? "techFilterWhitelistInput" : "techFilterExcludeInput").checked = true;
+    document.getElementById("technicienFilterListInput").value = (data.technicians || []).join("\n");
+  } catch(e){ /* silencieux */ }
+}
+
+document.getElementById("saveTechnicienFilterBtn").addEventListener("click", async ()=>{
+  const mode = document.querySelector('input[name="technicienFilterMode"]:checked')?.value || "exclude";
+  const technicians = document.getElementById("technicienFilterListInput").value.split("\n").map(s=>s.trim()).filter(Boolean);
+  await fetch("/api/moussanada/technicien-filter", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({mode, technicians})});
+  toast("Filtre techniciens enregistré — appliqué immédiatement aux rapports");
+});
+
+document.getElementById("loadTechnicienNamesBtn").addEventListener("click", async ()=>{
+  const box = document.getElementById("technicienNamesKnown");
+  box.textContent = "Chargement...";
+  const res = await fetch("/api/moussanada/technicien-names");
+  const names = await res.json();
+  box.textContent = names.length ? `Noms connus : ${names.join(", ")}` : "Aucun technicien connu pour l'instant (importer des données Moussanada d'abord).";
 });
 
 document.getElementById("saveModuleSettingsBtn").addEventListener("click", async ()=>{
@@ -1780,6 +2084,15 @@ document.getElementById("csvCallsBtn").addEventListener("click", ()=>{
 document.getElementById("csvEmailsBtn").addEventListener("click", ()=>{
   window.location.href = apiM(`/export-csv/emails/${state.ym}`);
 });
+document.getElementById("csvProblemsBtn").addEventListener("click", ()=>{
+  window.location.href = apiM(`/export-csv/problems/${state.ym}`);
+});
+document.getElementById("csvDemandesBtn").addEventListener("click", ()=>{
+  window.location.href = apiM(`/export-csv/demandes/${state.ym}`);
+});
+document.getElementById("csvWeeklyBtn").addEventListener("click", ()=>{
+  window.location.href = apiM(`/export-csv/weekly/${state.ym}`);
+});
 
 async function loadAdmin(){
   await loadGlobalSettings();
@@ -1790,6 +2103,21 @@ async function loadAdmin(){
   document.getElementById("reportTitleTarkhissInput").value = globalSettings.report_title_tarkhiss || "";
   document.getElementById("reportTitleMoussanadaInput").value = globalSettings.report_title_moussanada || "";
   document.getElementById("reportTitlePchcInput").value = globalSettings.report_title_pchc || "";
+  document.getElementById("smtpHostInput").value = globalSettings.smtp_host || "";
+  document.getElementById("smtpPortInput").value = globalSettings.smtp_port || 587;
+  document.getElementById("smtpUserInput").value = globalSettings.smtp_user || "";
+  document.getElementById("smtpFromInput").value = globalSettings.smtp_from || "";
+  document.getElementById("reminderTokenInput").value = globalSettings.reminder_api_token || randomToken();
+  document.getElementById("sessionTimeoutInput").value = globalSettings.session_timeout_minutes ?? 240;
+  document.getElementById("pwMinLenInput").value = globalSettings.password_min_length ?? 8;
+  document.getElementById("pwRequireDigitInput").checked = globalSettings.password_require_digit !== false;
+  document.getElementById("pwRequireUpperInput").checked = globalSettings.password_require_upper !== false;
+  document.getElementById("glpiUrlInput").value = globalSettings.glpi_url || "";
+  document.getElementById("glpiAppTokenInput").value = globalSettings.glpi_app_token || "";
+  document.getElementById("glpiUserTokenInput").value = globalSettings.glpi_user_token || "";
+  document.getElementById("glpiEntityIdInput").value = globalSettings.glpi_entity_id || "";
+  loadGlpiProfilesSelect();
+  loadTechnicienFilter();
   updateLogoPreview();
   document.getElementById("defaultGreetingInput").value = moduleSettings.greeting || "";
   document.getElementById("sigNameInput").value = moduleSettings.signature_name || "";
@@ -1846,8 +2174,27 @@ async function loadAdmin(){
       <td style="font-size:12px;">${l.subject}</td>
       <td style="font-size:12px;">${(l.to||[]).join(", ") || "—"}</td>
       <td style="font-size:12px;">${(l.cc||[]).join(", ") || "—"}</td>
+      <td>${l.file ? `<a href="/api/${currentModule}/send-log/download/${encodeURIComponent(l.file)}" class="btn-add" style="text-decoration:none;">⬇</a>` : ""}</td>
     </tr>
-  `).join("") || `<tr><td colspan="5" style="color:var(--muted);">Aucun envoi enregistré</td></tr>`;
+  `).join("") || `<tr><td colspan="6" style="color:var(--muted);">Aucun envoi enregistré</td></tr>`;
+
+  try{
+    const pchcLogRes = await fetch("/api/pchc/send-log");
+    const pchcLogData = await pchcLogRes.json();
+    const pchcLogBody = document.querySelector("#pchcSendLogTable tbody");
+    if(pchcLogBody){
+      pchcLogBody.innerHTML = pchcLogData.map(l=>`
+        <tr>
+          <td>${new Date(l.date).toLocaleString('fr-FR')}</td>
+          <td style="font-size:12px;">${l.ym}</td>
+          <td style="font-size:12px;">${l.subject}</td>
+          <td style="font-size:12px;">${(l.to||[]).join(", ") || "—"}</td>
+          <td style="font-size:12px;">${(l.cc||[]).join(", ") || "—"}</td>
+          <td>${l.file ? `<a href="/api/pchc/send-log/download/${encodeURIComponent(l.file)}" class="btn-add" style="text-decoration:none;">⬇</a>` : ""}</td>
+        </tr>
+      `).join("") || `<tr><td colspan="6" style="color:var(--muted);">Aucun envoi enregistré</td></tr>`;
+    }
+  } catch(e){ /* silencieux */ }
 
   const alertHistRes = await fetch(apiM("/alert-history"));
   const alertHistData = await alertHistRes.json();
@@ -2028,6 +2375,31 @@ function renderMDashboard(){
         <h3>Comparatif Délais moyens (heures)</h3>
         <canvas id="mDelayChart" height="150"></canvas>
       </div>
+    </div>
+
+    <div class="chart-card" id="mHeatmapCard" style="margin-bottom:16px;display:none;">
+      <h3>Heatmap de charge (jour × heure)</h3>
+      <p style="font-size:11.5px;color:var(--muted);margin:0 0 8px;">Basée sur les tickets bruts GLPI importés (Administration → Import tickets bruts).</p>
+      <img id="mHeatmapImg" style="width:100%;max-width:760px;display:block;margin:0 auto;" alt="Heatmap de charge Moussanada">
+    </div>
+
+    <div class="charts-row" id="mTicketAnalyticsRow" style="display:none;">
+      <div class="chart-card">
+        <h3>Répartition par Type</h3>
+        <canvas id="mTypeChart" height="150"></canvas>
+      </div>
+      <div class="chart-card">
+        <h3>Distribution des délais de résolution</h3>
+        <canvas id="mDelayDistChart" height="150"></canvas>
+      </div>
+    </div>
+
+    <div class="dash-table-wrap" id="mSouffranceWrap" style="display:none;">
+      <h3>⚠️ Tickets en souffrance (non résolus/clos)</h3>
+      <table class="dash-table">
+        <thead><tr><th>ID</th><th>Titre</th><th>Statut</th><th>Ouvert le</th><th>Technicien</th></tr></thead>
+        <tbody id="mSouffranceBody"></tbody>
+      </table>
     </div>
 
     <div class="charts-row">
@@ -2239,6 +2611,76 @@ function renderMDashboard(){
 
   setupEmailPanel("mToCheckList","mCcCheckList","mGreetingInput");
   addPngExportButtons(mCharts);
+  refreshMoussanadaHeatmap();
+}
+
+async function refreshMoussanadaHeatmap(){
+  const card = document.getElementById("mHeatmapCard");
+  const img = document.getElementById("mHeatmapImg");
+  if(!card || !img) return;
+  try{
+    const res = await fetch(`/api/moussanada/heatmap?start=${mState.ym}&end=${mState.ym}`);
+    const data = await res.json();
+    if(data.total_tickets > 0){
+      img.src = `/api/moussanada/heatmap.png?start=${mState.ym}&end=${mState.ym}&_=${Date.now()}`;
+      card.style.display = "";
+    } else {
+      card.style.display = "none";
+    }
+  } catch(e){
+    card.style.display = "none";
+  }
+  await refreshMoussanadaTicketAnalytics();
+}
+
+let mTypeChart = null, mDelayDistChart = null;
+async function refreshMoussanadaTicketAnalytics(){
+  const row = document.getElementById("mTicketAnalyticsRow");
+  const souffranceWrap = document.getElementById("mSouffranceWrap");
+  if(!row) return;
+  try{
+    const res = await fetch(`/api/moussanada/tickets-analytics?start=${mState.ym}&end=${mState.ym}`);
+    const data = await res.json();
+    if(!data.total_tickets){
+      row.style.display = "none";
+      souffranceWrap.style.display = "none";
+      return;
+    }
+    row.style.display = "";
+    const typeEntries = Object.entries(data.type_counts);
+    if(mTypeChart) mTypeChart.destroy();
+    mTypeChart = new Chart(document.getElementById("mTypeChart"), {
+      type:"doughnut",
+      data:{ labels: typeEntries.map(([k])=>k), datasets:[{ data: typeEntries.map(([,v])=>v), backgroundColor:["#0B4965","#F59F0A","#25935F","#DC2828"] }] },
+      options:{responsive:true, animation:{duration:700}, plugins:{legend:{position:"bottom"}}}
+    });
+
+    const delayEntries = Object.entries(data.delay_buckets);
+    if(mDelayDistChart) mDelayDistChart.destroy();
+    mDelayDistChart = new Chart(document.getElementById("mDelayDistChart"), {
+      type:"bar",
+      data:{ labels: delayEntries.map(([k])=>k), datasets:[{ label:"Tickets", data: delayEntries.map(([,v])=>v), backgroundColor:"#1794CF", borderRadius:4 }] },
+      options:{responsive:true, animation:{duration:700}, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true}}}
+    });
+
+    if(data.tickets_en_souffrance && data.tickets_en_souffrance.length){
+      souffranceWrap.style.display = "";
+      document.getElementById("mSouffranceBody").innerHTML = data.tickets_en_souffrance.map(t=>`
+        <tr>
+          <td>${esc(t.id)}</td>
+          <td>${esc(t.titre)}</td>
+          <td>${esc(t.statut)}</td>
+          <td>${esc((t.date_ouverture||"").slice(0,10))}</td>
+          <td>${esc(t.technicien)}</td>
+        </tr>
+      `).join("");
+    } else {
+      souffranceWrap.style.display = "none";
+    }
+  } catch(e){
+    row.style.display = "none";
+    if(souffranceWrap) souffranceWrap.style.display = "none";
+  }
 }
 
 document.getElementById("mPdfBtn").addEventListener("click", ()=>{
@@ -2334,8 +2776,14 @@ document.getElementById("mImportXlsx").addEventListener("change", async (e)=>{
   fd.append("file", file);
   document.getElementById("mImportHint").textContent = "Import en cours...";
   document.getElementById("mImportHint").classList.add("show");
-  const res = await fetch(`/api/moussanada/import/${mState.ym}`, {method:"POST", body: fd});
-  const data = await res.json();
+  showBusy("Import du fichier GLPI en cours...");
+  let res, data;
+  try{
+    res = await fetch(`/api/moussanada/import/${mState.ym}`, {method:"POST", body: fd});
+    data = await res.json();
+  } finally {
+    hideBusy();
+  }
   if(data.ok){
     toast("Import réussi");
     document.getElementById("mImportHint").textContent = `✓ Importé : ${data.result.tickets_months} mois de tickets, ${data.result.categories} catégories, ${data.result.services} services, ${data.result.techniciens} techniciens`;
@@ -2365,21 +2813,105 @@ document.getElementById("mImportXlsx").addEventListener("change", async (e)=>{
 
 document.getElementById("mCsvImportBtn").addEventListener("click", async ()=>{
   const file = document.getElementById("mCsvFile").files[0];
-  const kind = document.getElementById("mCsvKind").value;
+  const kind = document.getElementById("mUnifiedKind").value;
   if(!file){ toast("Choisissez un fichier CSV"); return; }
-  const fd = new FormData();
-  fd.append("file", file);
-  fd.append("kind", kind);
-  const res = await fetch(`/api/moussanada/import/${mState.ym}`, {method:"POST", body: fd});
-  const data = await res.json();
-  if(data.ok){
-    toast("Import CSV réussi");
-    await loadMoussanadaMonth(mState.ym);
-    renderMSources();
-  } else {
-    toast(data.error || "Erreur d'import");
-  }
+  const doImport = async (force)=>{
+    const fd = new FormData();
+    fd.append("file", file);
+    fd.append("kind", kind);
+    if(force) fd.append("force", "1");
+    showBusy("Import du fichier CSV en cours...");
+    let res, data;
+    try{
+      res = await fetch(`/api/moussanada/import/${mState.ym}`, {method:"POST", body: fd});
+      data = await res.json();
+    } finally {
+      hideBusy();
+    }
+    const box = document.getElementById("mUnifiedResult");
+    if(data.conflict && !force){
+      if(confirm(data.message + "\n\nContinuer quand même ?")) await doImport(true);
+      return;
+    }
+    if(data.ok){
+      box.textContent = `✅ ${data.result.rows} ligne(s) importée(s).`;
+      box.style.color = "var(--success)";
+      toast("Import CSV réussi");
+      await loadMoussanadaMonth(mState.ym);
+      renderMSources();
+    } else {
+      box.textContent = "❌ " + (data.error || "Erreur d'import");
+      box.style.color = "var(--danger)";
+      toast(data.error || "Erreur d'import");
+    }
+  };
+  await doImport(false);
 });
+
+// ---------- Mode unifié Direct/CSV (Lot E) ----------
+// Profils GLPI disponibles en Mode Direct (les autres kinds — durées, services — restent
+// CSV uniquement tant qu'aucun profil GLPI n'a été défini pour eux, voir glpi_profiles.py).
+const MOUSSANADA_DIRECT_PROFILES = { tickets: null, categories: "ym", demandeurs: "ym", techniciens: "ym" };
+
+function updateUnifiedImportUI(){
+  const kind = document.getElementById("mUnifiedKind").value;
+  const directAvailable = kind in MOUSSANADA_DIRECT_PROFILES;
+  document.getElementById("mModeDirectInput").disabled = !directAvailable;
+  if(!directAvailable && document.getElementById("mModeDirectInput").checked){
+    document.getElementById("mModeCsvInput").checked = true;
+  }
+  const mode = document.querySelector('input[name="mImportMode"]:checked').value;
+  document.getElementById("mModeCsvBlock").style.display = mode === "csv" ? "" : "none";
+  document.getElementById("mModeDirectBlock").style.display = mode === "direct" ? "" : "none";
+  document.getElementById("mUnifiedDirectHint").textContent = directAvailable
+    ? (MOUSSANADA_DIRECT_PROFILES[kind] === "ym" ? "Le mois cible ci-dessus sera utilisé pour cet import." : "Récupère l'ensemble de la série mensuelle disponible côté GLPI.")
+    : "Mode Direct pas encore disponible pour ce type de données — utiliser le Mode CSV.";
+  document.getElementById("mUnifiedYmInput").value = mState.ym || "";
+}
+document.getElementById("mUnifiedKind").addEventListener("change", updateUnifiedImportUI);
+document.querySelectorAll('input[name="mImportMode"]').forEach(r=> r.addEventListener("change", updateUnifiedImportUI));
+
+document.getElementById("mUnifiedDirectBtn").addEventListener("click", async ()=>{
+  const kind = document.getElementById("mUnifiedKind").value;
+  const ym = document.getElementById("mUnifiedYmInput").value;
+  const box = document.getElementById("mUnifiedResult");
+  if(MOUSSANADA_DIRECT_PROFILES[kind] === "ym" && !ym){
+    box.textContent = "❌ Choisir un mois cible pour ce type de données.";
+    box.style.color = "var(--danger)";
+    return;
+  }
+  const doImport = async (force)=>{
+    box.textContent = "Import en cours...";
+    box.style.color = "var(--muted)";
+    showBusy("Import direct depuis GLPI en cours...");
+    try{
+      const res = await fetch("/api/moussanada/glpi-import-direct", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({profile: kind, ym, force})});
+      const data = await res.json();
+      if(data.conflict && !force){
+        hideBusy();
+        if(confirm(data.message + "\n\nContinuer quand même ?")) await doImport(true);
+        return;
+      }
+      if(data.ok){
+        box.textContent = `✅ ${data.raw_tickets} ticket(s) GLPI -> ${data.records_stored} enregistrement(s) stocké(s).`;
+        box.style.color = "var(--success)";
+        toast("Import direct GLPI réussi");
+        await loadMoussanadaMonth(mState.ym);
+        renderMSources();
+      } else {
+        box.textContent = "❌ " + data.error;
+        box.style.color = "var(--danger)";
+      }
+    } catch(e){
+      box.textContent = "❌ Erreur réseau lors de l'import.";
+      box.style.color = "var(--danger)";
+    } finally {
+      hideBusy();
+    }
+  };
+  await doImport(false);
+});
+updateUnifiedImportUI();
 
 document.getElementById("mCsvCatBtn").addEventListener("click", ()=>{
   window.location.href = `/api/moussanada/export-csv-source/categories/${mState.ym}`;
@@ -2389,6 +2921,40 @@ document.getElementById("mCsvSrvBtn").addEventListener("click", ()=>{
 });
 document.getElementById("mCsvTechBtn").addEventListener("click", ()=>{
   window.location.href = `/api/moussanada/export-csv-source/techniciens/${mState.ym}`;
+});
+document.getElementById("mCsvTicketsBtn").addEventListener("click", ()=>{
+  window.location.href = "/api/moussanada/export-csv-tickets";
+});
+
+document.getElementById("mImportRawTickets").addEventListener("change", async (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const hint = document.getElementById("mImportRawTicketsHint");
+  hint.textContent = "Import en cours...";
+  showBusy("Import des tickets bruts GLPI en cours...");
+  const fd = new FormData();
+  fd.append("file", file);
+  try{
+    const res = await fetch("/api/moussanada/import-tickets", {method:"POST", body: fd});
+    const data = await res.json();
+    if(data.ok){
+      const r = data.result;
+      hint.textContent = r.rows > 0 ? `${r.rows} ticket(s) importé(s) — ${r.total} au total.` : "Aucun ticket détecté.";
+      if(data.warnings && data.warnings.length) toast(data.warnings[0]);
+      else toast("Import des tickets bruts réussi");
+      notifyBrowser("Import terminé", `${r.rows} ticket(s) importé(s) sur Moussanada.`);
+      refreshMoussanadaHeatmap();
+    } else {
+      hint.textContent = "";
+      toast(data.error || "Erreur d'import");
+    }
+  } catch(err){
+    hint.textContent = "";
+    toast("Erreur d'import");
+  } finally {
+    hideBusy();
+  }
+  e.target.value = "";
 });
 
 // ============================================================
@@ -2696,7 +3262,83 @@ async function startApp(){
     }
   }
   activateTab(defaultTabForRole());
+  maybeShowOnboarding();
 }
+
+// ---------- Onboarding contextuel par rôle (Lot 5) ----------
+const ONBOARDING_CONTENT = {
+  admin: {
+    title: "Bienvenue, Administrateur",
+    html: `<p>Vous avez accès complet à SANAD. Points de départ utiles :</p>
+      <ul style="padding-left:18px;margin:10px 0;">
+        <li><strong>Saisie quotidienne</strong> : onglets Appels/Emails (Tarkhiss) ou Import GLPI (Moussanada)</li>
+        <li><strong>Rapports</strong> : chaque dashboard propose Excel, PDF, aperçu avant envoi, et envoi direct par email</li>
+        <li><strong>Administration</strong> : gestion des comptes, personnalisation des titres/logos, sécurité, RGPD, et journal d'audit</li>
+        <li><strong>Reporting Métier</strong> se trouve désormais comme sous-volet de Tarkhiss dans la sidebar</li>
+      </ul>
+      <p style="color:var(--muted);font-size:12.5px;">Vous pouvez revoir cette aide à tout moment via le bouton "? Aide" en haut à droite.</p>`,
+  },
+  superviseur: {
+    title: "Bienvenue, Superviseur",
+    html: `<p>Vous disposez d'un accès en lecture seule à l'ensemble des dashboards et exports.</p>
+      <ul style="padding-left:18px;margin:10px 0;">
+        <li>Consultez les <strong>Dashboards</strong> et <strong>Vues annuelles</strong> de chaque volet</li>
+        <li>Téléchargez les rapports en <strong>Excel</strong> ou <strong>PDF</strong> librement</li>
+        <li>Les comparatifs N-1 et le tableau "Détail par mois" sont accessibles à votre rôle</li>
+        <li>La saisie, l'envoi d'email et l'administration restent réservés à l'Administrateur</li>
+      </ul>`,
+  },
+  hotliner: {
+    title: "Bienvenue",
+    html: `<p>Votre accès est limité à la <strong>Base de connaissances</strong> et aux <strong>Notes</strong>, sur les volets qui vous ont été assignés.</p>
+      <ul style="padding-left:18px;margin:10px 0;">
+        <li>Consultez la Base de connaissances pour les procédures courantes</li>
+        <li>Utilisez les Notes pour échanger avec l'Administrateur (ex. pendant un appel)</li>
+      </ul>`,
+  },
+};
+
+function maybeShowOnboarding(){
+  const role = currentUser?.role;
+  if(!role || !ONBOARDING_CONTENT[role]) return;
+  const key = `sanad_onboarding_seen_${role}`;
+  if(localStorage.getItem(key)) return;
+  showOnboarding(role);
+  localStorage.setItem(key, "1");
+}
+
+function showOnboarding(role){
+  const content = ONBOARDING_CONTENT[role || currentUser?.role];
+  if(!content) return;
+  document.getElementById("onboardingTitle").textContent = content.title;
+  document.getElementById("onboardingBody").innerHTML = content.html;
+  document.getElementById("onboardingOverlay").style.display = "flex";
+}
+
+document.getElementById("closeOnboardingBtn").addEventListener("click", ()=>{
+  document.getElementById("onboardingOverlay").style.display = "none";
+});
+document.getElementById("onboardingOverlay").addEventListener("click", (e)=>{
+  if(e.target.id === "onboardingOverlay") document.getElementById("onboardingOverlay").style.display = "none";
+});
+document.getElementById("helpBtn").addEventListener("click", ()=> showOnboarding());
+
+// ---------- Densité compacte (Lot 5+) ----------
+function applyDensity(density){
+  const d = density === "compact" ? "compact" : "comfortable";
+  if(d === "compact") document.documentElement.dataset.density = "compact";
+  else delete document.documentElement.dataset.density;
+  const btn = document.getElementById("densityToggleBtn");
+  if(btn) btn.textContent = d === "compact" ? "▤ Confortable" : "▤ Compact";
+}
+applyDensity(localStorage.getItem("sanad_density") || "comfortable");
+renderFavorites();
+document.getElementById("favoriteToggleBtn").addEventListener("click", toggleCurrentFavorite);
+document.getElementById("densityToggleBtn").addEventListener("click", ()=>{
+  const next = document.documentElement.dataset.density === "compact" ? "comfortable" : "compact";
+  localStorage.setItem("sanad_density", next);
+  applyDensity(next);
+});
 
 // ============================================================
 // UTILISATEURS (admin)
@@ -2933,6 +3575,18 @@ async function runGlobalSearch(q){
   const kbRes = await fetch("/api/knowledge");
   const kb = await kbRes.json();
   kb.forEach(k=>{ if(k.title.toLowerCase().includes(ql)) items.push({cat:"Base de connaissances", label:k.title, action:()=>{activateTab("knowledge"); document.getElementById("knowledgeSearch").value=k.title; renderKnowledgeList(k.title);}}); });
+
+  try{
+    const notesRes = await fetch(`/api/notes/search?q=${encodeURIComponent(q)}`);
+    const notes = await notesRes.json();
+    notes.forEach(n=>{
+      const preview = n.text.length > 60 ? n.text.slice(0, 60) + "…" : n.text;
+      items.push({cat:`Note — ${n.hotliner_name}`, label: preview, action:()=>{
+        activateTab("notes");
+        if(currentUser.role !== "hotliner"){ notesSelectedHotlinerId = n.hotliner_id; loadNotes(); }
+      }});
+    });
+  } catch(e){ /* silencieux */ }
 
   results.innerHTML = items.slice(0,12).map((it,i)=>`<div class="gsr-item" data-i="${i}"><div class="gsr-cat">${it.cat}</div>${it.label}</div>`).join("") || `<div class="gsr-item" style="color:var(--muted);">Aucun résultat</div>`;
   results.querySelectorAll(".gsr-item[data-i]").forEach((el,i)=>{
@@ -3193,6 +3847,9 @@ document.getElementById("pPdfBtn").addEventListener("click", ()=>{
 document.getElementById("pXlsxBtn").addEventListener("click", ()=>{
   window.location.href = `/api/pchc/export-xlsx?start=${pState.start}&end=${pState.end}`;
 });
+document.getElementById("pCsvRawBtn").addEventListener("click", ()=>{
+  window.location.href = `/api/pchc/export-csv-raw?start=${pState.start}&end=${pState.end}`;
+});
 
 function collectPchcChartImages(){
   const map = {summary:"summary", backlog:"backlog", top10:"top10", categories:"categories"};
@@ -3302,8 +3959,14 @@ document.getElementById("pImportXlsx").addEventListener("change", async (e)=>{
   fd.append("file", file);
   document.getElementById("pImportHint").textContent = "Import en cours...";
   document.getElementById("pImportHint").classList.add("show");
-  const res = await fetch("/api/pchc/import", {method:"POST", body: fd});
-  const data = await res.json();
+  showBusy("Import du fichier PCHC en cours...");
+  let res, data;
+  try{
+    res = await fetch("/api/pchc/import", {method:"POST", body: fd});
+    data = await res.json();
+  } finally {
+    hideBusy();
+  }
   if(data.ok){
     toast("Import réussi");
     document.getElementById("pImportHint").textContent = "✓ " + Object.entries(data.result).map(([k,v])=>`${PCHC_CAT_LABELS[k]||k}: ${v}`).join(" · ");
@@ -3445,3 +4108,57 @@ document.getElementById("pSaveThresholdsBtn").addEventListener("click", async ()
   hideAuthOverlay();
   await startApp();
 })();
+
+// ---------- Drag & drop générique sur les zones d'import (Lot 5+) ----------
+// Toute zone .file-btn (bouton stylé enrobant un <input type=file hidden>) devient une zone
+// de dépôt : on simule la sélection de fichier puis on redéclenche l'événement 'change' déjà
+// géré par les handlers existants — aucune duplication de logique d'import nécessaire.
+document.querySelectorAll(".file-btn").forEach(label=>{
+  const input = label.querySelector('input[type="file"]');
+  if(!input) return;
+  const zone = label.closest(".card") || label;
+  zone.classList.add("dropzone-target");
+  ["dragenter", "dragover"].forEach(evt=>{
+    zone.addEventListener(evt, (e)=>{ e.preventDefault(); e.stopPropagation(); zone.classList.add("drag-over"); });
+  });
+  ["dragleave", "drop"].forEach(evt=>{
+    zone.addEventListener(evt, (e)=>{ e.preventDefault(); e.stopPropagation(); zone.classList.remove("drag-over"); });
+  });
+  zone.addEventListener("drop", (e)=>{
+    if(e.dataTransfer.files && e.dataTransfer.files.length){
+      input.files = e.dataTransfer.files;
+      input.dispatchEvent(new Event("change", {bubbles:true}));
+    }
+  });
+});
+
+// ---------- Raccourcis clavier (Lot 5+) ----------
+document.addEventListener("keydown", (e)=>{
+  const tag = (e.target.tagName || "").toLowerCase();
+  const typing = tag === "input" || tag === "textarea" || e.target.isContentEditable;
+
+  // "/" focus la recherche globale (sauf si déjà en train de taper ailleurs)
+  if(e.key === "/" && !typing){
+    const search = document.getElementById("globalSearch");
+    if(search){ e.preventDefault(); search.focus(); }
+    return;
+  }
+  // Échap ferme les modales ouvertes (aperçu email/PDF, onboarding)
+  if(e.key === "Escape"){
+    ["previewModalOverlay", "pdfPreviewModalOverlay", "onboardingOverlay"].forEach(id=>{
+      const el = document.getElementById(id);
+      if(el && el.style.display !== "none") el.style.display = "none";
+    });
+    document.getElementById("globalSearchResults")?.classList.remove("show");
+    return;
+  }
+  // Ctrl/Cmd+S sur un dashboard déclenche l'export PDF du volet actif (au lieu de la boîte
+  // de dialogue "Enregistrer la page" du navigateur, peu pertinente ici)
+  if((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "s" && !typing){
+    e.preventDefault();
+    const activeTab = document.querySelector(".nav-item.active")?.dataset.tab;
+    if(activeTab === "dashboard") document.getElementById("pdfBtn")?.click();
+    else if(activeTab === "m-dashboard") document.getElementById("mPdfBtn")?.click();
+    else if(activeTab === "p-dashboard") document.getElementById("pPdfBtn")?.click();
+  }
+});

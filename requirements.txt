@@ -4,4 +4,5 @@ xlsxwriter==3.2.9
 matplotlib==3.10.8
 seaborn==0.13.2
 python-pptx==1.0.2
+weasyprint==69.0
 xhtml2pdf==0.2.16
