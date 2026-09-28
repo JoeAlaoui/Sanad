@@ -736,6 +736,45 @@ document.getElementById("emailsImportFile").addEventListener("change", (e)=>{
   reader.readAsText(file, "UTF-8");
 });
 
+document.getElementById("emailsRawImportFile").addEventListener("change", async (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const box = document.getElementById("emailsRawImportResult");
+  box.style.display = "";
+  box.innerHTML = "Analyse du fichier Outlook en cours...";
+  showBusy("Import de l'export Outlook en cours (peut prendre quelques secondes sur un gros historique)...");
+  const fd = new FormData();
+  fd.append("file", file);
+  try{
+    const res = await fetch("/api/tarkhiss/import-emails-raw", {method:"POST", body: fd});
+    const data = await res.json();
+    if(data.ok){
+      const s = data.stats;
+      box.innerHTML = `
+        <h3 style="margin:0 0 8px;font-size:14px;color:var(--primary);">✅ Import réussi</h3>
+        <p style="font-size:12.5px;color:var(--muted);margin:0 0 8px;">
+          ${s.months_covered.length} mois resynchronisés (${s.months_covered.map(monthLabel).join(", ")})
+        </p>
+        <div class="kpi-grid" style="grid-template-columns:repeat(4,1fr);">
+          <div class="kpi-card"><div class="kpi-label">Total reçus</div><div class="kpi-value">${s.total_received}</div></div>
+          <div class="kpi-card"><div class="kpi-label">Total envoyés</div><div class="kpi-value">${s.total_sent}</div></div>
+          <div class="kpi-card"><div class="kpi-label">Avec pièce jointe</div><div class="kpi-value">${s.pct_with_attachment}%</div></div>
+          <div class="kpi-card"><div class="kpi-label">Importance haute</div><div class="kpi-value">${s.pct_high_importance}%</div></div>
+        </div>`;
+      toast("Import Outlook réussi — mois resynchronisés");
+      if(state.ym) await loadMonth(state.ym);
+    } else {
+      box.innerHTML = `<span style="color:var(--danger);">❌ ${esc(data.error || "Erreur d'import")}</span>`;
+      toast(data.error || "Erreur d'import");
+    }
+  } catch(err){
+    box.innerHTML = `<span style="color:var(--danger);">❌ Erreur réseau lors de l'import.</span>`;
+  } finally {
+    hideBusy();
+    e.target.value = "";
+  }
+});
+
 function updateBadge(elId, completude){
   const el = document.getElementById(elId);
   if(!el) return;
@@ -1074,6 +1113,12 @@ function renderDashboard(){
       </div>
     </div>` : ""}
 
+    <div class="dash-table-wrap" id="emailMetaStatsCard" style="display:none;">
+      <h3>📧 Statistiques email — historique complet</h3>
+      <p style="font-size:11.5px;color:var(--muted);margin:0 0 8px;">Basé sur le dernier import Outlook (tous mois confondus).</p>
+      <div class="yoy-grid" id="emailMetaStatsGrid"></div>
+    </div>
+
     <div class="charts-row">
       <div class="chart-card">
         <h3>Évolution hebdomadaire — Bugs vs Demandes</h3>
@@ -1227,6 +1272,30 @@ function renderDashboard(){
 
   setupEmailPanel();
   addPngExportButtons(charts);
+  refreshEmailMetaStats();
+}
+
+async function refreshEmailMetaStats(){
+  const card = document.getElementById("emailMetaStatsCard");
+  const grid = document.getElementById("emailMetaStatsGrid");
+  if(!card || !grid) return;
+  try{
+    const res = await fetch("/api/tarkhiss/email-meta-stats");
+    const s = await res.json();
+    if(!s || !s.total_received){ card.style.display = "none"; return; }
+    const days = ["Lun","Mar","Mer","Jeu","Ven","Sam","Dim"];
+    const topDay = s.weekday_counts ? days[s.weekday_counts.indexOf(Math.max(...s.weekday_counts))] : "—";
+    grid.innerHTML = `
+      <div class="yoy-chip"><div class="yoy-chip-label">Total reçus (historique)</div><div class="yoy-chip-values">${s.total_received}</div></div>
+      <div class="yoy-chip"><div class="yoy-chip-label">Total envoyés (historique)</div><div class="yoy-chip-values">${s.total_sent}</div></div>
+      <div class="yoy-chip"><div class="yoy-chip-label">Avec pièce jointe</div><div class="yoy-chip-values">${s.pct_with_attachment}%</div></div>
+      <div class="yoy-chip"><div class="yoy-chip-label">Importance haute</div><div class="yoy-chip-values">${s.pct_high_importance}%</div></div>
+      <div class="yoy-chip"><div class="yoy-chip-label">Jour le plus chargé</div><div class="yoy-chip-values">${topDay}</div></div>
+    `;
+    card.style.display = "";
+  } catch(e){
+    card.style.display = "none";
+  }
 }
 
 // ---------- ONE-PAGER (image PNG condensée partageable) ----------

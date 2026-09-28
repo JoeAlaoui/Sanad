@@ -584,6 +584,116 @@ def _save(module, kind, ym, payload):
     write_json_safely(_path(module, kind, ym), payload)
 
 
+# ---------------------------------------------------------------------------
+# TARKHISS — import direct de l'export Outlook brut (feuille "Mail", macro VBA côté client).
+# Recalcule les compteurs reçus/envoyés par jour pour tous les mois présents dans le fichier
+# (resynchronisation complète, à re-uploader chaque mois — le fichier grossit avec l'historique).
+# ---------------------------------------------------------------------------
+def email_meta_stats_file():
+    return os.path.join(module_dir("tarkhiss"), "email_meta_stats.json")
+
+
+def load_email_meta_stats():
+    p = email_meta_stats_file()
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+def save_email_meta_stats(data):
+    write_json_safely(email_meta_stats_file(), data)
+
+
+def parse_tarkhiss_emails_raw(file_storage):
+    """Parse l'export Outlook brut (feuille 'Mail' : Folder Path, Subject, DisplayTo, DisplayCc,
+    DateTimeSent, DateTimeReceived, Importance, IsRead, HasAttachments, Preview, Id). Retourne
+    (par_jour, stats_globales). \\Inbox\\ = reçus (DateTimeReceived) ; \\Sent Items\\ = envoyés
+    (DateTimeSent). Les autres dossiers (Corbeille, Brouillons, Archive) sont ignorés — ce ne
+    sont ni des emails reçus ni des emails effectivement envoyés au support."""
+    from openpyxl import load_workbook
+    wb = load_workbook(file_storage, data_only=True)
+    ws = wb["Mail"] if "Mail" in wb.sheetnames else wb[wb.sheetnames[0]]
+    rows = list(ws.iter_rows(min_row=2, values_only=True))
+
+    by_day = {}  # {"YYYY-MM": {"D": {"received": n, "sent": n}}}
+    total_received = total_sent = 0
+    with_attachment = high_importance = counted = 0
+    weekday_counts = [0] * 7  # 0=lundi
+
+    for row in rows:
+        if not row or not row[0]:
+            continue
+        folder = row[0]
+        if folder not in ("\\Inbox\\", "\\Sent Items\\"):
+            continue
+        dt = row[5] if folder == "\\Inbox\\" else row[4]
+        if not dt:
+            continue
+        if isinstance(dt, str):
+            try:
+                dt = datetime.fromisoformat(dt)
+            except ValueError:
+                continue
+        ym = f"{dt.year}-{dt.month:02d}"
+        day = str(dt.day)
+        by_day.setdefault(ym, {})
+        by_day[ym].setdefault(day, {"received": 0, "sent": 0})
+        if folder == "\\Inbox\\":
+            by_day[ym][day]["received"] += 1
+            total_received += 1
+        else:
+            by_day[ym][day]["sent"] += 1
+            total_sent += 1
+        counted += 1
+        if row[8]:
+            with_attachment += 1
+        if row[6] == "High":
+            high_importance += 1
+        weekday_counts[dt.weekday()] += 1
+
+    stats = {
+        "total_received": total_received, "total_sent": total_sent,
+        "counted": counted,
+        "pct_with_attachment": round(with_attachment / counted * 100, 1) if counted else 0,
+        "pct_high_importance": round(high_importance / counted * 100, 1) if counted else 0,
+        "weekday_counts": weekday_counts,  # [Lun, Mar, Mer, Jeu, Ven, Sam, Dim]
+        "months_covered": sorted(by_day.keys()),
+        "last_import": datetime.now().isoformat(timespec="seconds"),
+    }
+    return by_day, stats
+
+
+@app.route("/api/tarkhiss/import-emails-raw", methods=["POST"])
+def tarkhiss_import_emails_raw():
+    if "file" not in request.files:
+        return jsonify({"ok": False, "error": "Aucun fichier fourni"}), 400
+    f = request.files["file"]
+    try:
+        by_day, stats = parse_tarkhiss_emails_raw(f)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Erreur d'analyse du fichier : {e}"}), 400
+    if not stats["months_covered"]:
+        return jsonify({"ok": False, "error": "Aucun email trouvé dans \\Inbox\\ ou \\Sent Items\\ — vérifiez la feuille 'Mail' et la colonne Folder Path."}), 400
+
+    for ym, days in by_day.items():
+        emails = _load("tarkhiss", "emails", ym, {})
+        for day, counts in days.items():
+            emails[day] = {"received": counts["received"], "sent": counts["sent"]}
+        _save("tarkhiss", "emails", ym, emails)
+
+    save_email_meta_stats(stats)
+    log_audit("import_emails_raw", {"file": f.filename, "months": stats["months_covered"],
+                                     "total_received": stats["total_received"], "total_sent": stats["total_sent"]},
+              module="tarkhiss")
+    return jsonify({"ok": True, "stats": stats})
+
+
+@app.route("/api/tarkhiss/email-meta-stats")
+def tarkhiss_email_meta_stats():
+    return jsonify(load_email_meta_stats() or {})
+
+
 def month_label_fr(ym):
     y, m = ym.split("-")
     return f"{MOIS_FR[int(m) - 1].capitalize()} {y}"

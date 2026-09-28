@@ -258,11 +258,18 @@
           <h1>Saisie des emails</h1>
           <p>Emails reçus et envoyés par jour. Les week-ends restent modifiables (email exceptionnel reçu).</p>
         </div>
-        <label class="btn btn-outline file-btn">
-          ⬆ Importer CSV
-          <input type="file" id="emailsImportFile" accept=".csv" hidden>
-        </label>
+        <div style="display:flex;gap:10px;">
+          <label class="btn btn-outline file-btn">
+            📧 Import Outlook (.xlsm)
+            <input type="file" id="emailsRawImportFile" accept=".xlsm,.xlsx" hidden>
+          </label>
+          <label class="btn btn-outline file-btn">
+            ⬆ Importer CSV
+            <input type="file" id="emailsImportFile" accept=".csv" hidden>
+          </label>
+        </div>
       </div>
+      <div class="card" id="emailsRawImportResult" style="display:none;"></div>
       <div class="card">
         <table class="input-table" id="emailsTable">
           <thead>
