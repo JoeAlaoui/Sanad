@@ -23,7 +23,7 @@
   --shadow:0 1px 2px rgba(11,73,101,0.06),0 8px 24px rgba(11,73,101,0.06);
 }
 
-/* PALETTES DE COULEUR — indépendantes du thème (flat/soft/neu/clay), sélectionnables en
+/* PALETTES DE COULEUR — indépendantes du thème (flat/soft/neu/clay/adp), sélectionnables en
    Administration. "ammps" (défaut) reprend la charte AMMPS ; les autres sont des variantes
    pour un usage plus personnel/visuel sans changer la structure des cartes. */
 [data-palette="ocean"]{
@@ -132,6 +132,14 @@ body{
 .month-picker{display:flex;align-items:center;gap:10px;background:var(--surface);border:1px solid var(--border);border-radius:8px;padding:8px 14px;}
 .month-picker label{font-size:12px;color:var(--muted);font-weight:600;text-transform:uppercase;letter-spacing:.4px;}
 .month-picker input[type=month]{border:none;font-family:'JetBrains Mono',monospace;font-size:14px;font-weight:600;color:var(--primary);background:transparent;}
+.month-nav-btn{
+  display:flex;align-items:center;justify-content:center;
+  width:26px;height:26px;border-radius:7px;border:1px solid var(--border);
+  background:var(--bg);color:var(--primary);font-size:14px;font-weight:700;cursor:pointer;
+  transition:background .15s ease, transform .1s ease, box-shadow .15s ease;
+}
+.month-nav-btn:hover{background:var(--primary-pale);}
+.month-nav-btn:active{transform:scale(.92);}
 .save-indicator{font-size:12px;color:var(--success);font-weight:600;opacity:0;transition:opacity .3s;}
 .save-indicator.show{opacity:1;}
 .last-sync-indicator{
@@ -152,6 +160,18 @@ body{
 .tab-panel{display:none;}
 .tab-panel.active{display:block;animation:fadeIn .25s ease;}
 @keyframes fadeIn{from{opacity:0;transform:translateY(4px);}to{opacity:1;transform:translateY(0);}}
+
+/* Transition douce au changement de mois (flèches ←/→ ou sélecteur) — fondu + léger
+   glissement pendant le rechargement des données, sur l'onglet actif quel qu'il soit. */
+.tab-panel.month-transitioning{
+  opacity:0;
+  transform:translateY(6px);
+  transition:opacity .13s ease, transform .13s ease;
+  pointer-events:none;
+}
+.tab-panel.active:not(.month-transitioning){
+  transition:opacity .22s ease, transform .22s ease;
+}
 
 .card{
   background:var(--surface);border:1px solid var(--border);border-radius:var(--radius);
@@ -352,6 +372,94 @@ textarea#constatsBox, textarea#recoBox{
   box-shadow:inset 0 2px 6px rgba(99,71,196,.14);
 }
 
+/* THÈME "ANT DESIGN PRO" — reprise complète des codes visuels d'Ant Design Pro (Ant Design v4/v5
+   avec layout Pro) : bleu Ant (#1890FF) comme accent, sidebar bleu marine très sombre (#001529)
+   façon "Dark Sidebar" de Pro Layout, fond de contenu gris très clair (#F0F2F5), cartes blanches
+   à coins peu arrondis (6-8px) et ombre portée fine à 3 couches (élévation Ant Design), police
+   système (même famille que le composant Ant Design Typography). Palette de couleur ("Océan",
+   "Émeraude"...) désactivée sur ce thème : Ant Design Pro a sa propre teinte de marque fixe,
+   comme Neumorphism complet et Claymorphism. */
+[data-theme="adp"]{
+  --bg:#F0F2F5;
+  --surface:#FFFFFF;
+  --ink:#000000D9;
+  --muted:#00000073;
+  --primary:#1890FF;
+  --primary-light:#40A9FF;
+  --primary-pale:#E6F7FF;
+  --accent:#FAAD14;
+  --accent-pale:#FFF7E6;
+  --danger:#FF4D4F;
+  --danger-pale:#FFF1F0;
+  --success:#52C41A;
+  --success-pale:#F6FFED;
+  --info:#1890FF;
+  --info-pale:#E6F7FF;
+  --border:#F0F0F0;
+  --sidebar-bg:#001529;
+  --sidebar-bg2:#00111F;
+  --sidebar-accent:#1890FF;
+  --sidebar-border:#002140;
+  --radius:6px;
+  --shadow:0 1px 2px rgba(0,0,0,.03),0 1px 6px -1px rgba(0,0,0,.02),0 2px 4px rgba(0,0,0,.02);
+}
+[data-theme="adp"] body{
+  font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;
+}
+[data-theme="adp"] .kpi-card,
+[data-theme="adp"] .chart-card,
+[data-theme="adp"] .dash-table-wrap,
+[data-theme="adp"] .yoy-chip,
+[data-theme="adp"] .card,
+[data-theme="adp"] .gauge-row{
+  border:1px solid var(--border);border-radius:8px;
+  box-shadow:0 1px 2px rgba(0,0,0,.03),0 1px 6px -1px rgba(0,0,0,.02),0 2px 4px rgba(0,0,0,.02);
+  transition:box-shadow .2s ease;
+}
+[data-theme="adp"] .kpi-card:hover,
+[data-theme="adp"] .chart-card:hover,
+[data-theme="adp"] .dash-table-wrap:hover{
+  box-shadow:0 4px 12px rgba(0,0,0,.08);
+}
+[data-theme="adp"] .dash-table th{
+  background:#FAFAFA;color:var(--ink);font-weight:600;text-transform:none;
+  letter-spacing:0;border-bottom:1px solid var(--border);
+}
+[data-theme="adp"] .dash-table td{border-bottom:1px solid var(--border);}
+[data-theme="adp"] .dash-table tr:hover td{background:#FAFAFA;}
+[data-theme="adp"] .btn{
+  border-radius:6px;font-weight:400;border:1px solid var(--border);background:#FFFFFF;color:var(--ink);
+  transition:color .2s ease, border-color .2s ease, background .2s ease;
+}
+[data-theme="adp"] .btn:hover{color:var(--primary);border-color:var(--primary);}
+[data-theme="adp"] .btn-primary{
+  background:var(--primary);color:#fff;border:1px solid var(--primary);
+  box-shadow:0 2px 0 rgba(5,145,255,.1);
+}
+[data-theme="adp"] .btn-primary:hover{background:var(--primary-light);border-color:var(--primary-light);}
+[data-theme="adp"] .btn-outline{background:#fff;border:1px solid var(--border);color:var(--ink);}
+[data-theme="adp"] .sidebar{background:var(--sidebar-bg);}
+[data-theme="adp"] .nav-item.active{background:var(--primary);color:#fff;border-radius:4px;}
+[data-theme="adp"] .form-row input[type=text],
+[data-theme="adp"] .month-picker,
+[data-theme="adp"] .month-picker input[type=month],
+[data-theme="adp"] textarea#constatsBox,
+[data-theme="adp"] textarea#recoBox,
+[data-theme="adp"] .global-search-wrap input,
+[data-theme="adp"] .table-filter-input{
+  border:1px solid var(--border);border-radius:6px;background:#fff;
+  transition:border-color .2s ease, box-shadow .2s ease;
+}
+[data-theme="adp"] .form-row input[type=text]:focus,
+[data-theme="adp"] textarea#constatsBox:focus,
+[data-theme="adp"] textarea#recoBox:focus,
+[data-theme="adp"] .global-search-wrap input:focus{
+  outline:none;border-color:var(--primary);box-shadow:0 0 0 2px rgba(24,144,255,.2);
+}
+[data-theme="adp"] .role-pill{border-radius:10px;}
+[data-theme="adp"] .month-nav-btn{border-radius:4px;}
+[data-theme="adp"] .toast{border-radius:6px;box-shadow:0 3px 6px -4px rgba(0,0,0,.12),0 6px 16px 0 rgba(0,0,0,.08);}
+
 .dash-table-wrap h3{font-family:'Sora',sans-serif;font-size:14px;margin:0 0 10px;color:var(--primary);}
 .dash-table{width:100%;border-collapse:collapse;}
 .dash-table th{background:var(--primary);color:#fff;font-size:11px;text-transform:uppercase;letter-spacing:.3px;padding:8px 10px;text-align:left;}
@@ -506,6 +614,7 @@ tr.missing-day::after{content:"⚠";position:absolute;right:6px;color:var(--acce
 .theme-swatch--soft{background:#F4F6F8;box-shadow:0 2px 6px rgba(11,73,101,.12), inset 0 0 0 1px rgba(218,224,231,.5);}
 .theme-swatch--neu{background:#E7ECF1;box-shadow:4px 4px 8px rgba(163,177,191,.6), -4px -4px 8px rgba(255,255,255,.9);}
 .theme-swatch--clay{background:linear-gradient(180deg,#7757D6,#5B3FBD);border-radius:14px;box-shadow:inset 0 2px 0 rgba(255,255,255,.5), 0 4px 8px rgba(99,71,196,.3);}
+.theme-swatch--adp{background:linear-gradient(135deg,#001529 50%,#1890FF 50%);border-radius:4px;box-shadow:inset 0 0 0 1px #F0F0F0;}
 .logo-preview{height:44px;max-width:160px;object-fit:contain;background:#FAF9F5;border:1px solid var(--border);border-radius:6px;padding:4px;display:none;}
 .logo-preview.show{display:block;}
 .tag-input-row{display:flex;gap:8px;margin-bottom:12px;max-width:420px;}

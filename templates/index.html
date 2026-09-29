@@ -147,7 +147,9 @@
       <button class="btn-add" id="favoriteToggleBtn" title="Épingler cette vue en favori">☆</button>
       <div class="month-picker" id="monthPickerWrap">
         <label for="monthSelect">Mois</label>
+        <button type="button" class="month-nav-btn" id="monthPrevBtn" title="Mois précédent">←</button>
         <input type="month" id="monthSelect">
+        <button type="button" class="month-nav-btn" id="monthNextBtn" title="Mois suivant">→</button>
       </div>
       <div class="global-search-wrap">
         <input type="text" id="globalSearch" placeholder="🔍 Recherche globale (mois, catégories, contacts...)">
@@ -230,11 +232,18 @@
           <h1>Saisie des appels</h1>
           <p>Nombre d'appels reçus par jour ouvré (hors week-end). Durée au format hh:mm:ss.</p>
         </div>
-        <label class="btn btn-outline file-btn">
-          ⬆ Importer CSV
-          <input type="file" id="callsImportFile" accept=".csv" hidden>
-        </label>
+        <div style="display:flex;gap:10px;">
+          <label class="btn btn-outline file-btn">
+            📞 Import journal d'appels (.csv)
+            <input type="file" id="callsRawImportFile" accept=".csv" hidden>
+          </label>
+          <label class="btn btn-outline file-btn">
+            ⬆ Importer CSV
+            <input type="file" id="callsImportFile" accept=".csv" hidden>
+          </label>
+        </div>
       </div>
+      <div class="card" id="callsRawImportResult" style="display:none;"></div>
       <div class="card">
         <table class="input-table" id="callsTable">
           <thead>
@@ -810,8 +819,13 @@
               <span class="theme-swatch theme-swatch--clay"></span>
               <span>Claymorphism</span>
             </label>
+            <label class="theme-option">
+              <input type="radio" name="uiTheme" value="adp" id="themeAdpInput">
+              <span class="theme-swatch theme-swatch--adp"></span>
+              <span>Ant Design Pro</span>
+            </label>
           </div>
-          <p class="hint" style="margin-top:8px;">⚠️ Le neumorphism complet est déconseillé en usage courant (contraste réduit, moins lisible en survol rapide) — proposé ici à titre d'option, "Neumorphism doux" reste la recommandation par défaut si vous souhaitez sortir du flat.</p>
+          <p class="hint" style="margin-top:8px;">⚠️ Le neumorphism complet est déconseillé en usage courant (contraste réduit, moins lisible en survol rapide) — proposé ici à titre d'option, "Neumorphism doux" reste la recommandation par défaut si vous souhaitez sortir du flat. "Ant Design Pro" reprend la charte bleue et la sidebar sombre de ce design system tel quel (teinte fixe, comme Neumorphism complet/Claymorphism — la palette ci-dessous ne s'y applique pas).</p>
         </div>
         <div class="form-row">
           <label>Palette de couleur (indépendante du thème — Neumorphism complet/Claymorphism gardent leur propre teinte)</label>
@@ -849,6 +863,9 @@
         <div class="form-row">
           <label>Titre du rapport — Reporting Métier (PCHC)</label>
           <input type="text" id="reportTitlePchcInput" placeholder="Reporting Métier — PCHC">
+        </div>
+        <div class="form-row">
+          <label><input type="checkbox" id="reportShowContactNamesInput"> Afficher les noms des contacts (appelants / destinataires) dans les rapports PDF/Excel — RGPD, masqué par défaut</label>
         </div>
         <button class="btn btn-primary" id="saveAdvancedEditingBtn">Enregistrer</button>
       </div>
@@ -1068,6 +1085,18 @@
             <input type="file" id="importConfigFile" accept=".json" hidden>
           </label>
         </div>
+      </div>
+
+      <div class="card">
+        <h2>🗂 Imports bruts Tarkhiss</h2>
+        <p class="hint">Copie archivée de chaque fichier importé (export Outlook .xlsm, journal d'appels .csv) — traçabilité et re-téléchargement. 50 derniers conservés.</p>
+        <div class="actions-row" style="margin-bottom:10px;">
+          <button class="btn btn-outline" id="refreshRawImportsBtn">↻ Actualiser</button>
+        </div>
+        <table class="dash-table" id="rawImportsTable">
+          <thead><tr><th>Date</th><th>Type</th><th>Fichier</th><th>Mois couverts</th><th>Volume</th><th></th></tr></thead>
+          <tbody></tbody>
+        </table>
       </div>
 
       <div class="card">

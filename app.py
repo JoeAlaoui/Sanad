@@ -22,6 +22,7 @@ from glpi_import import (
 )
 from glpi_client import GLPIClient, GLPIConnectionError, test_connection as glpi_test_connection
 import glpi_profiles
+import tarkhiss_meta as tm
 from pchc_import import (
     CATEGORIES as PCHC_CATEGORIES, COLOR_HEX as PCHC_COLOR_HEX,
     status_color as pchc_status_color, import_pchc_xlsx as _parse_pchc_xlsx,
@@ -616,7 +617,9 @@ def parse_tarkhiss_emails_raw(file_storage):
     ws = wb["Mail"] if "Mail" in wb.sheetnames else wb[wb.sheetnames[0]]
     rows = list(ws.iter_rows(min_row=2, values_only=True))
 
-    by_day = {}  # {"YYYY-MM": {"D": {"received": n, "sent": n}}}
+    by_day = {}  # {"YYYY-MM": {"YYYY-MM-DD": {"received": n, "sent": n}}} — clé pleine date,
+                 # alignée sur le format utilisé par la saisie manuelle (data/tarkhiss/emails_<ym>.json).
+    events = []  # événements détaillés pour tarkhiss_meta (heures, délais de réponse, sujets…)
     total_received = total_sent = 0
     with_attachment = high_importance = counted = 0
     weekday_counts = [0] * 7  # 0=lundi
@@ -636,7 +639,7 @@ def parse_tarkhiss_emails_raw(file_storage):
             except ValueError:
                 continue
         ym = f"{dt.year}-{dt.month:02d}"
-        day = str(dt.day)
+        day = f"{dt.year:04d}-{dt.month:02d}-{dt.day:02d}"  # clé pleine date, alignée sur la saisie manuelle
         by_day.setdefault(ym, {})
         by_day[ym].setdefault(day, {"received": 0, "sent": 0})
         if folder == "\\Inbox\\":
@@ -646,6 +649,8 @@ def parse_tarkhiss_emails_raw(file_storage):
             by_day[ym][day]["sent"] += 1
             total_sent += 1
         counted += 1
+        events.append({"kind": "received" if folder == "\\Inbox\\" else "sent", "dt": dt, "subject": row[1],
+                       "to": row[2], "importance": row[6], "attachment": bool(row[8]), "is_read": row[7]})
         if row[8]:
             with_attachment += 1
         if row[6] == "High":
@@ -661,7 +666,66 @@ def parse_tarkhiss_emails_raw(file_storage):
         "months_covered": sorted(by_day.keys()),
         "last_import": datetime.now().isoformat(timespec="seconds"),
     }
+    stats["_events"] = events
     return by_day, stats
+
+
+def raw_imports_dir():
+    d = os.path.join(module_dir("tarkhiss"), "raw_imports")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def raw_imports_history_file():
+    return os.path.join(module_dir("tarkhiss"), "raw_import_history.json")
+
+
+def load_raw_imports_history():
+    p = raw_imports_history_file()
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def save_raw_import(kind, file_storage, extra=None):
+    """Archive une copie du fichier brut uploadé (email .xlsm/.xlsx ou appels .csv), pour
+    traçabilité/audit (RGPD : peut être purgé manuellement en supprimant data/tarkhiss/raw_imports/).
+    Retourne l'entrée d'historique créée."""
+    ts = datetime.now().strftime("%Y%m%d-%H%M%S")
+    ext = os.path.splitext(file_storage.filename or "")[1] or ".bin"
+    safe_orig = secure_filename(file_storage.filename or f"import{ext}")
+    saved_as = f"{kind}_{ts}_{safe_orig}"
+    file_storage.stream.seek(0)
+    with open(os.path.join(raw_imports_dir(), saved_as), "wb") as out:
+        out.write(file_storage.stream.read())
+    file_storage.stream.seek(0)
+    entry = {"id": saved_as, "kind": kind, "original_name": file_storage.filename or safe_orig,
+              "uploaded_at": datetime.now().isoformat(timespec="seconds"), **(extra or {})}
+    history = load_raw_imports_history()
+    history.insert(0, entry)
+    write_json_safely(raw_imports_history_file(), history[:50])  # 50 derniers imports conservés
+    return entry
+
+
+@app.route("/api/tarkhiss/raw-imports")
+def tarkhiss_raw_imports_list():
+    return jsonify(load_raw_imports_history())
+
+
+@app.route("/api/tarkhiss/raw-imports/download/<path:file_id>")
+def tarkhiss_raw_imports_download(file_id):
+    """Téléchargement d'un fichier brut archivé (import Outlook ou journal d'appels).
+    Le nom est validé contre l'historique pour empêcher tout accès hors du dossier dédié."""
+    known = {e["id"]: e for e in load_raw_imports_history()}
+    safe_id = secure_filename(file_id)
+    entry = known.get(safe_id)
+    if not entry:
+        return jsonify({"error": "Fichier non référencé dans l'historique des imports"}), 404
+    fpath = os.path.join(raw_imports_dir(), safe_id)
+    if not os.path.exists(fpath):
+        return jsonify({"error": "Fichier introuvable sur le disque (a-t-il été nettoyé ?)"}), 404
+    return send_file(fpath, as_attachment=True, download_name=entry["original_name"])
 
 
 @app.route("/api/tarkhiss/import-emails-raw", methods=["POST"])
@@ -682,7 +746,12 @@ def tarkhiss_import_emails_raw():
             emails[day] = {"received": counts["received"], "sent": counts["sent"]}
         _save("tarkhiss", "emails", ym, emails)
 
+    events = stats.pop("_events", [])
+    for ym, meta in tm.aggregate_emails(events).items():
+        _save("tarkhiss", "meta_emails", ym, meta)
     save_email_meta_stats(stats)
+    save_raw_import("emails", f, {"months": stats["months_covered"],
+                                   "total_received": stats["total_received"], "total_sent": stats["total_sent"]})
     log_audit("import_emails_raw", {"file": f.filename, "months": stats["months_covered"],
                                      "total_received": stats["total_received"], "total_sent": stats["total_sent"]},
               module="tarkhiss")
@@ -692,6 +761,95 @@ def tarkhiss_import_emails_raw():
 @app.route("/api/tarkhiss/email-meta-stats")
 def tarkhiss_email_meta_stats():
     return jsonify(load_email_meta_stats() or {})
+
+
+@app.route("/api/tarkhiss/email-meta/<ym>")
+def tarkhiss_email_meta_month(ym):
+    return jsonify(_load("tarkhiss", "meta_emails", ym, {}))
+
+
+@app.route("/api/tarkhiss/call-meta/<ym>")
+def tarkhiss_call_meta_month(ym):
+    return jsonify(_load("tarkhiss", "meta_calls", ym, {}))
+
+
+@app.route("/api/tarkhiss/call-meta-stats")
+def tarkhiss_call_meta_stats():
+    """Synthèse tous mois confondus du journal d'appels importé (compteurs sommables + série mensuelle)."""
+    d = module_dir("tarkhiss")
+    months = []
+    for fname in sorted(os.listdir(d)):
+        if fname.startswith("meta_calls_") and fname.endswith(".json"):
+            m = _load("tarkhiss", "meta_calls", fname[len("meta_calls_"):-5], {})
+            if m:
+                c = m.get("counts", {})
+                months.append({"ym": m["ym"], "in": c.get("in", 0), "missed": c.get("missed", 0),
+                               "out": c.get("out", 0), "answer_rate": m.get("answer_rate"),
+                               "median_sec": (m.get("duration") or {}).get("median_sec")})
+    if not months:
+        return jsonify({})
+    tin, tmiss = sum(x["in"] for x in months), sum(x["missed"] for x in months)
+    return jsonify({"months": months, "total_in": tin, "total_missed": tmiss,
+                    "total_out": sum(x["out"] for x in months),
+                    "answer_rate": round(tin / (tin + tmiss) * 100, 1) if (tin + tmiss) else None})
+
+
+@app.route("/api/tarkhiss/call-heatmap-hourly-png/<ym>")
+def tarkhiss_call_heatmap_hourly_png(ym):
+    meta = _load("tarkhiss", "meta_calls", ym, {})
+    if not meta:
+        abort(404)
+    buf = chart_heatmap_png(meta["hourly"]["in"], ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"],
+                             [str(h) for h in range(24)], "Appels reçus — jour × heure",
+                             figsize=(9, 3), cbar_label="Nb d'appels")
+    return send_file(buf, mimetype="image/png")
+
+
+@app.route("/api/tarkhiss/email-heatmap-hourly-png/<ym>")
+def tarkhiss_email_heatmap_hourly_png(ym):
+    meta = _load("tarkhiss", "meta_emails", ym, {})
+    if not meta:
+        abort(404)
+    buf = chart_heatmap_png(meta["hourly"]["received"], ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"],
+                             [str(h) for h in range(24)], "Emails reçus — jour × heure",
+                             figsize=(9, 3), cbar_label="Nb d'emails")
+    return send_file(buf, mimetype="image/png")
+
+
+@app.route("/api/tarkhiss/import-calls-raw", methods=["POST"])
+def tarkhiss_import_calls_raw():
+    """Import du journal d'appels brut (CSV du mobile : Name, Phone, Date, Type, Duration…).
+    Fichier cumulatif : chaque mois présent est resynchronisé (jours présents écrasés)."""
+    if "file" not in request.files:
+        return jsonify({"ok": False, "error": "Aucun fichier fourni"}), 400
+    f = request.files["file"]
+    raw_bytes = f.read()
+    f.stream.seek(0)
+    try:
+        calls, skipped = tm.parse_calllog_csv(raw_bytes)
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Erreur d'analyse du fichier : {e}"}), 400
+    if not calls:
+        return jsonify({"ok": False, "error": "Aucun appel exploitable dans le fichier (dates/types non reconnus)."}), 400
+    agg = tm.aggregate_calls(calls)
+    for ym, block in agg.items():
+        existing = _load("tarkhiss", "calls", ym, {})
+        for day, rec in block["days"].items():
+            merged = dict(existing.get(day, {}))
+            merged.update({"calls": rec["calls"], "duration_sec": rec["duration_sec"]})
+            merged.pop("duration_min", None)
+            existing[day] = merged
+        if block["days"]:
+            _save("tarkhiss", "calls", ym, existing)
+        _save("tarkhiss", "meta_calls", ym, block["meta"])
+    tot = {k: sum(b["meta"]["counts"][k] for b in agg.values()) for k in ("in", "missed", "out", "blocked", "rejected")}
+    resp = {"months_covered": sorted(agg.keys()), "rows": len(calls), "skipped": skipped,
+            "total_in": tot["in"], "total_missed": tot["missed"], "total_out": tot["out"],
+            "total_blocked": tot["blocked"], "total_rejected": tot["rejected"],
+            "answer_rate": round(tot["in"] / (tot["in"] + tot["missed"]) * 100, 1) if (tot["in"] + tot["missed"]) else None}
+    save_raw_import("calls", f, {"months": resp["months_covered"], "rows": len(calls)})
+    log_audit("import_calls_raw", {"file": f.filename, "months": resp["months_covered"], "rows": len(calls)}, module="tarkhiss")
+    return jsonify({"ok": True, "stats": resp})
 
 
 def month_label_fr(ym):
@@ -737,7 +895,7 @@ def compute_tarkhiss_heatmap(calls, ym):
             row = [0] * 7
             matrix.append(row)
             weeks.append(f"Sem. {week_of_month}")
-        count = (calls.get(str(day)) or {}).get("calls", 0)
+        count = (calls.get(f"{y}-{m:02d}-{day:02d}") or {}).get("calls", 0)
         row[wd] = count
     return matrix, weeks
 
@@ -766,6 +924,7 @@ def load_global_settings():
         "report_title_tarkhiss": "Rapport Support Tarkhiss",
         "report_title_moussanada": "Rapport Support Moussanada",
         "report_title_pchc": "Reporting Métier — PCHC",
+        "report_show_contact_names": False,  # PDF/Excel Tarkhiss : noms des contacts (RGPD) — masqués par défaut
         # SMTP optionnel — si renseigné, permet l'envoi RÉEL du rappel programmé par email
         # (sans lui, le rappel reste un simple bandeau à l'ouverture de l'app, comme documenté).
         "smtp_host": "", "smtp_port": 587, "smtp_user": "", "smtp_password": "",
@@ -2768,7 +2927,7 @@ def delete_month(module, ym):
             removed.append("timeseries")
         return jsonify({"ok": True, "removed": removed})
 
-    for kind in ("calls", "emails", "analysis"):
+    for kind in ("calls", "emails", "analysis", "meta_calls", "meta_emails"):
         p = _path(module, kind, ym)
         if os.path.exists(p):
             os.remove(p)
@@ -3065,6 +3224,101 @@ def report_logos_html(global_settings):
     return f'<div style="margin-bottom:8px;">{imgs}</div>'
 
 
+def build_tarkhiss_advanced_stats_html(meta_calls, meta_emails, show_contact_names):
+    """Section 'Statistiques avancées' (PDF/Excel/écran uniquement, jamais l'email) — issue du
+    journal d'appels et de l'export Outlook bruts (heures réelles, délai de réponse, rappels,
+    sujets/mots-clés fréquents). Vide si aucun des deux imports n'a été fait pour ce mois."""
+    if not meta_calls and not meta_emails:
+        return ""
+
+    def esc(s):
+        return html_module.escape(str(s), quote=True) if s is not None else ""
+
+    def fmt_min(v):
+        if v is None:
+            return "—"
+        h, m = divmod(int(round(v)), 60)
+        return f"{h} h {m:02d}" if h else f"{m} min"
+
+    def mini_table(headers, rows):
+        head = "".join(f'<td style="padding:6px 8px;color:#fff;font-size:11px;font-weight:bold;">{esc(h)}</td>' for h in headers)
+        body = "".join(
+            "<tr>" + "".join(f'<td style="padding:5px 8px;border-bottom:1px solid #DAE0E7;font-size:11.5px;color:#0D1926;">{esc(c)}</td>' for c in row) + "</tr>"
+            for row in rows
+        ) or f'<tr><td colspan="{len(headers)}" style="padding:6px 8px;font-size:11.5px;color:#55616B;">Aucune donnée</td></tr>'
+        return f'<table style="width:100%;border-collapse:collapse;border:1px solid #DAE0E7;margin-bottom:12px;"><tr style="background:#0B4965;">{head}</tr>{body}</table>'
+
+    blocks = []
+
+    if meta_calls:
+        c = meta_calls.get("counts", {})
+        dur = meta_calls.get("duration", {})
+        cb = meta_calls.get("callback", {})
+        hourly_png = base64.b64encode(chart_heatmap_png(
+            meta_calls["hourly"]["in"], ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"], [str(h) for h in range(24)],
+            "Appels reçus — répartition jour × heure", figsize=(9.5, 3), cbar_label="Nb d'appels",
+        ).read()).decode()
+        callers_rows = [[(e["label"] if show_contact_names else mask_call_label(e)), e["calls"], e["missed"], format_hms(e["duration_sec"])]
+                        for e in meta_calls.get("top_callers", [])[:8]]
+        blocks.append(f"""
+        <div style="font-size:13px;font-weight:800;color:#0B4965;margin:14px 0 8px;">☎ Journal d'appels — détail horaire</div>
+        <p style="font-size:11.5px;color:#55616B;margin:0 0 8px;">Import du journal d'appels brut. Heures locales (Maroc).</p>
+        <img src="data:image/png;base64,{hourly_png}" style="width:100%;max-width:640px;display:block;margin:0 auto 12px;" />
+        <table style="width:100%;border-collapse:collapse;margin-bottom:12px;">
+          <tr>
+            <td style="padding:4px 8px;font-size:11.5px;">Taux de décroché : <strong>{meta_calls.get('answer_rate') if meta_calls.get('answer_rate') is not None else '—'}%</strong></td>
+            <td style="padding:4px 8px;font-size:11.5px;">Manqués : <strong>{c.get('missed', 0)}</strong></td>
+            <td style="padding:4px 8px;font-size:11.5px;">Durée médiane : <strong>{format_hms(dur.get('median_sec') or 0)}</strong></td>
+            <td style="padding:4px 8px;font-size:11.5px;">Durée max : <strong>{format_hms(dur.get('max_sec') or 0)}</strong></td>
+          </tr>
+        </table>
+        <div style="font-size:11.5px;color:#55616B;margin:0 0 6px;">Rappel des appels manqués ({cb.get('missed_total', 0)}) : {cb.get('called_back_by_us', 0)} rappelés par nous, {cb.get('client_called_again', 0)} le client a rerappelé, {cb.get('no_callback_24h', 0)} sans suite sous 24 h.</div>
+        <div style="font-size:11.5px;font-weight:bold;color:#0B4965;margin:10px 0 4px;">Top appelants{'(anonymisé)' if not show_contact_names else ''}</div>
+        {mini_table(["Contact", "Appels", "Manqués", "Durée cumulée"], callers_rows)}
+        """)
+
+    if meta_emails:
+        resp = meta_emails.get("response", {})
+        hourly_png = base64.b64encode(chart_heatmap_png(
+            meta_emails["hourly"]["received"], ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"], [str(h) for h in range(24)],
+            "Emails reçus — répartition jour × heure", figsize=(9.5, 3), cbar_label="Nb d'emails",
+        ).read()).decode()
+        subj_rows = [[s["subject"][:70], s["count"]] for s in meta_emails.get("top_subjects", [])[:6]]
+        words_line = " · ".join(f"{w['word']} ({w['count']})" for w in meta_emails.get("top_words", [])[:10])
+        rcpt_rows = [[(r["name"] if show_contact_names else "•••• (masqué)"), r["count"]] for r in meta_emails.get("top_recipients", [])[:6]]
+        blocks.append(f"""
+        <div style="font-size:13px;font-weight:800;color:#0B4965;margin:18px 0 8px;">✉ Emails — détail horaire &amp; délai de réponse</div>
+        <img src="data:image/png;base64,{hourly_png}" style="width:100%;max-width:640px;display:block;margin:0 auto 12px;" />
+        <table style="width:100%;border-collapse:collapse;margin-bottom:8px;">
+          <tr>
+            <td style="padding:4px 8px;font-size:11.5px;">Délai médian (heures ouvrées) : <strong>{fmt_min(resp.get('median_biz_min'))}</strong></td>
+            <td style="padding:4px 8px;font-size:11.5px;">P90 : <strong>{fmt_min(resp.get('p90_biz_min'))}</strong></td>
+            <td style="padding:4px 8px;font-size:11.5px;">Sans réponse sous 7 j : <strong>{meta_emails.get('unanswered', 0)}</strong></td>
+            <td style="padding:4px 8px;font-size:11.5px;">Non lus : <strong>{meta_emails.get('pct_unread', 0)}%</strong></td>
+          </tr>
+        </table>
+        <p style="font-size:10.5px;color:#8A94A3;margin:0 0 10px;">{esc(resp.get('note', ''))} Base : {resp.get('business_hours', '')}. Correspondance sujet↔sujet : {resp.get('match_rate') if resp.get('match_rate') is not None else '—'}% des échanges appariés.</p>
+        <div style="font-size:11.5px;font-weight:bold;color:#0B4965;margin:8px 0 4px;">Sujets les plus fréquents</div>
+        {mini_table(["Sujet", "Occurrences"], subj_rows)}
+        <div style="font-size:11.5px;font-weight:bold;color:#0B4965;margin:8px 0 4px;">Mots-clés fréquents</div>
+        <p style="font-size:11.5px;color:#0D1926;margin:0 0 10px;">{esc(words_line) or 'Aucune donnée'}</p>
+        <div style="font-size:11.5px;font-weight:bold;color:#0B4965;margin:8px 0 4px;">Top destinataires{'(anonymisé)' if not show_contact_names else ''}</div>
+        {mini_table(["Destinataire", "Emails envoyés"], rcpt_rows)}
+        """)
+
+    return f"""
+        <a name="sec-advanced"></a>
+        <div class="pdf-break"></div>
+        <div style="font-size:15px;font-weight:800;color:#0B4965;margin:4px 0 4px;">Statistiques avancées — appels &amp; emails</div>
+        <p style="font-size:11px;color:#8A94A3;margin:0 0 8px;">Basé sur les imports bruts (journal d'appels / export Outlook). Non inclus dans le corps de l'email.</p>
+        {''.join(blocks)}
+    """
+
+
+def mask_call_label(entry):
+    return entry["label"] if not entry.get("named") else "•••• (masqué)"
+
+
 def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev_emails=None, prev_analysis=None, charts=None, for_pdf=False):
     charts = charts or {}
     prev_calls = prev_calls or {}
@@ -3106,6 +3360,15 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
             "Heatmap de charge — appels par jour de semaine et semaine du mois",
             figsize=(8, 3.2), cbar_label="Nombre d'appels",
         ).read()).decode()
+
+    # Statistiques avancées (journal d'appels + export Outlook brut) — issues de tarkhiss_meta.
+    # N'apparaissent PAS dans l'email (for_pdf=False y est toujours utilisé) : uniquement PDF/Excel/écran.
+    show_contact_names = load_global_settings().get("report_show_contact_names", False)
+    adv_html = ""
+    if for_pdf:
+        meta_calls = _load("tarkhiss", "meta_calls", ym, {})
+        meta_emails = _load("tarkhiss", "meta_emails", ym, {})
+        adv_html = build_tarkhiss_advanced_stats_html(meta_calls, meta_emails, show_contact_names)
 
     prev_problems = prev_analysis.get("problems", [])
     prev_demandes = prev_analysis.get("demandes", [])
@@ -3242,16 +3505,17 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
           </tr>
         </table>
 
-        {f'''<div class="pdf-break"></div>
+        {(lambda _entries: f'''<div class="pdf-break"></div>
         <div style="margin:6px 0 4px;padding:10px 14px;background:#F5F7F9;border:1px solid #DAE0E7;border-radius:6px;">
           <div style="font-size:10.5px;font-weight:800;color:#0B4965;letter-spacing:.4px;text-transform:uppercase;margin-bottom:6px;">Sommaire</div>
-          <a href="#sec-graphs" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">1. Analyse graphique</a>
-          <a href="#sec-problems" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">2. Problèmes techniques</a>
-          <a href="#sec-demandes" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">3. Demandes d'information</a>
-          <a href="#sec-weekly" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">4. Évolution hebdomadaire</a>
-          {'<a href="#sec-heatmap" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">5. Heatmap de charge</a>' if heatmap_has_data else ""}
-          <a href="#sec-synth" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">{6 if heatmap_has_data else 5}. Constats &amp; recommandations</a>
-        </div>''' if for_pdf else ""}
+          {"".join(f'<a href="#{aid}" style="display:block;font-size:12px;color:#135A7D;text-decoration:none;padding:2px 0;">{i}. {label}</a>' for i, (aid, label) in enumerate(_entries, 1))}
+        </div>''')([
+            ("sec-graphs", "Analyse graphique"), ("sec-problems", "Problèmes techniques"),
+            ("sec-demandes", "Demandes d'information"), ("sec-weekly", "Évolution hebdomadaire"),
+            *([("sec-heatmap", "Heatmap de charge")] if heatmap_has_data else []),
+            *([("sec-advanced", "Statistiques avancées — appels & emails")] if adv_html else []),
+            ("sec-synth", "Constats & recommandations"),
+        ]) if for_pdf else ""}
 
         <a name="sec-graphs"></a>
         <div class="pdf-break"></div>
@@ -3301,6 +3565,8 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
         {"<div style='font-size:14px;font-weight:bold;color:#0B4965;margin:20px 0 8px;'>Mots-clés fréquents</div><div style='font-size:12.5px;color:#55616B;margin-bottom:16px;'>" + keywords_line + "</div>" if keywords_line else ""}
 
         {'<a name="sec-heatmap"></a><div class="pdf-break"></div><div style="font-size:14px;font-weight:bold;color:#0B4965;margin:4px 0 8px;">Heatmap de charge</div><p style="font-size:12px;color:#55616B;margin:0 0 10px;">Volume d\'appels par jour de semaine et semaine du mois (granularité journalière — Tarkhiss ne journalise pas l\'heure des appels).</p><img src="data:image/png;base64,' + heatmap_b64 + '" style="width:100%;max-width:620px;display:block;margin:0 auto 14px;" />' if heatmap_has_data else ""}
+
+        {adv_html}
 
         <a name="sec-synth"></a>
         <div class="pdf-break"></div>
@@ -3829,12 +4095,92 @@ def export_xlsx(module, ym):
         png = chart_pie_png(problem_labels, problem_values, "Répartition des problèmes techniques")
         xlsx_insert_png(ws, 20, 7, png)
 
+    if module == "tarkhiss":
+        write_tarkhiss_advanced_sheet_xw(wb, fmts, ym)
+
     write_alerts_sheet_xw(wb, fmts, module)
 
     wb.close()
     buf.seek(0)
     return send_file(buf, as_attachment=True, download_name=f"dashboard_{module}_{ym}.xlsx",
                       mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def write_tarkhiss_advanced_sheet_xw(workbook, fmts, ym):
+    """Feuille 'Stats avancées' (appels + emails bruts) — absente si aucun des deux imports
+    n'a été fait pour ce mois. Jamais reprise dans le corps de l'email (Excel uniquement)."""
+    meta_calls = _load("tarkhiss", "meta_calls", ym, {})
+    meta_emails = _load("tarkhiss", "meta_emails", ym, {})
+    if not meta_calls and not meta_emails:
+        return
+    show_names = load_global_settings().get("report_show_contact_names", False)
+    ws = workbook.add_worksheet("Stats avancées")
+    ws.set_column("A:A", 30)
+    ws.set_column("B:E", 16)
+    row = 0
+    ws.write(row, 0, "Statistiques avancées — journal d'appels & export Outlook", fmts["title"]); row += 2
+
+    if meta_calls:
+        c, dur, cb = meta_calls.get("counts", {}), meta_calls.get("duration", {}), meta_calls.get("callback", {})
+        ws.write(row, 0, "Appels — synthèse", fmts["title"]); row += 1
+        for label, val in [
+            ("Reçus (décrochés)", c.get("in", 0)), ("Manqués", c.get("missed", 0)),
+            ("Émis", c.get("out", 0)), ("Bloqués", c.get("blocked", 0)),
+            ("Taux de décroché", f"{meta_calls.get('answer_rate')}%" if meta_calls.get("answer_rate") is not None else "—"),
+            ("Durée moyenne", format_hms(dur.get("avg_sec") or 0)), ("Durée médiane", format_hms(dur.get("median_sec") or 0)),
+            ("Durée P90", format_hms(dur.get("p90_sec") or 0)), ("Durée max (un appel)", format_hms(dur.get("max_sec") or 0)),
+            ("Appelants uniques", meta_calls.get("unique_callers", 0)),
+            ("Appelants récurrents (≥5 appels)", meta_calls.get("recurrent_callers", 0)),
+            ("Rappelés par nous (sous 24h)", cb.get("called_back_by_us", 0)),
+            ("Client a rerappelé (sous 24h)", cb.get("client_called_again", 0)),
+            ("Manqués sans suite (24h)", cb.get("no_callback_24h", 0)),
+        ]:
+            ws.write(row, 0, label); ws.write(row, 1, val); row += 1
+        row += 1
+        ws.write(row, 0, "Distribution des durées", fmts["header"]); ws.write(row, 1, "Nb appels", fmts["header"]); row += 1
+        for d in dur.get("distribution", []):
+            ws.write(row, 0, d["label"]); ws.write(row, 1, d["count"]); row += 1
+        row += 1
+        ws.write(row, 0, "Top appelants", fmts["header"]); ws.write(row, 1, "Appels", fmts["header"])
+        ws.write(row, 2, "Manqués", fmts["header"]); ws.write(row, 3, "Durée cumulée", fmts["header"]); row += 1
+        for e in meta_calls.get("top_callers", []):
+            label = e["label"] if show_names else mask_call_label(e)
+            ws.write(row, 0, label); ws.write(row, 1, e["calls"]); ws.write(row, 2, e["missed"]); ws.write(row, 3, format_hms(e["duration_sec"])); row += 1
+        png = chart_heatmap_png(meta_calls["hourly"]["in"], ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"],
+                                 [str(h) for h in range(24)], "Appels reçus — jour × heure", figsize=(9, 3.2), cbar_label="Nb d'appels")
+        xlsx_insert_png(ws, row + 1, 0, png, scale=0.85)
+        row += 20
+
+    if meta_emails:
+        resp = meta_emails.get("response", {})
+        ws.write(row, 0, "Emails — délai de réponse (indicatif)", fmts["title"]); row += 1
+        for label, val in [
+            ("Reçus", meta_emails.get("received", 0)), ("Envoyés", meta_emails.get("sent", 0)),
+            ("Fils de discussion détectés", meta_emails.get("threads", 0)),
+            ("Répondus (appariés)", resp.get("replied", 0)),
+            ("Taux d'appariement", f"{resp.get('match_rate')}%" if resp.get("match_rate") is not None else "—"),
+            ("Sans réponse sous 7 j", meta_emails.get("unanswered", 0)),
+            ("Délai médian (heures ouvrées)", format_hms((resp.get("median_biz_min") or 0) * 60)),
+            ("Délai P90 (heures ouvrées)", format_hms((resp.get("p90_biz_min") or 0) * 60)),
+            ("Non lus", f"{meta_emails.get('pct_unread', 0)}%"),
+            ("Avec pièce jointe", f"{meta_emails.get('attachments', 0)}"),
+        ]:
+            ws.write(row, 0, label); ws.write(row, 1, val); row += 1
+        row += 1
+        ws.write(row, 0, "Sujets fréquents", fmts["header"]); ws.write(row, 1, "Occurrences", fmts["header"]); row += 1
+        for s in meta_emails.get("top_subjects", []):
+            ws.write(row, 0, s["subject"]); ws.write(row, 1, s["count"]); row += 1
+        row += 1
+        ws.write(row, 0, "Mots-clés fréquents", fmts["header"]); ws.write(row, 1, "Occurrences", fmts["header"]); row += 1
+        for w in meta_emails.get("top_words", []):
+            ws.write(row, 0, w["word"]); ws.write(row, 1, w["count"]); row += 1
+        row += 1
+        ws.write(row, 0, "Top destinataires", fmts["header"]); ws.write(row, 1, "Emails", fmts["header"]); row += 1
+        for r in meta_emails.get("top_recipients", []):
+            ws.write(row, 0, r["name"] if show_names else "•••• (masqué)"); ws.write(row, 1, r["count"]); row += 1
+        png = chart_heatmap_png(meta_emails["hourly"]["received"], ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"],
+                                 [str(h) for h in range(24)], "Emails reçus — jour × heure", figsize=(9, 3.2), cbar_label="Nb d'emails")
+        xlsx_insert_png(ws, row + 1, 0, png, scale=0.85)
 
 
 if __name__ == "__main__":

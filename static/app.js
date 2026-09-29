@@ -283,6 +283,10 @@ function applyModuleBrand(){
 }
 
 function activateTab(tab){
+  const prevTab = document.querySelector(".nav-item.active")?.dataset.tab;
+  if(prevTab === "admin" && tab !== "admin"){
+    revertThemePreviewIfUnsaved();
+  }
   document.querySelectorAll(".nav-item").forEach(b=>b.classList.toggle("active", b.dataset.tab === tab));
   document.querySelectorAll(".tab-panel").forEach(p=>p.classList.remove("active"));
   document.getElementById("tab-"+tab).classList.add("active");
@@ -422,10 +426,48 @@ document.addEventListener("click", async (e)=>{
 
 // ---------- Month handling ----------
 const monthInput = document.getElementById("monthSelect");
+
+function sleep(ms){ return new Promise(r=>setTimeout(r, ms)); }
+
+// Transition douce du contenu au changement de mois : fondu/glissement léger sur l'onglet
+// actif pendant le rechargement, plutôt qu'un simple "saut" du contenu.
+async function withMonthTransition(loaderFn, ym){
+  const panel = document.querySelector(".tab-panel.active");
+  if(panel){
+    panel.classList.add("month-transitioning");
+    await sleep(130);
+  }
+  try{
+    await loaderFn(ym);
+  } finally {
+    if(panel){
+      requestAnimationFrame(()=> panel.classList.remove("month-transitioning"));
+    }
+  }
+}
+
+function goToMonth(ym){
+  monthInput.value = ym;
+  const loader = currentModule === "tarkhiss" ? loadMonth : loadMoussanadaMonth;
+  withMonthTransition(loader, ym);
+}
+
 monthInput.addEventListener("change", ()=>{
-  if(currentModule === "tarkhiss") loadMonth(monthInput.value);
-  else loadMoussanadaMonth(monthInput.value);
+  withMonthTransition(currentModule === "tarkhiss" ? loadMonth : loadMoussanadaMonth, monthInput.value);
 });
+
+document.getElementById("monthPrevBtn").addEventListener("click", ()=>{
+  goToMonth(prevYm(monthInput.value || defaultMonth()));
+});
+document.getElementById("monthNextBtn").addEventListener("click", ()=>{
+  goToMonth(nextYm(monthInput.value || defaultMonth()));
+});
+
+function nextYm(ym){
+  const [y, m] = ym.split("-").map(Number);
+  return m === 12 ? `${y+1}-01` : `${y}-${pad(m+1)}`;
+}
+
 
 function defaultMonth(){
   const d = new Date();
@@ -643,6 +685,45 @@ document.getElementById("callsImportFile").addEventListener("change", (e)=>{
     e.target.value = "";
   };
   reader.readAsText(file, "UTF-8");
+});
+
+document.getElementById("callsRawImportFile").addEventListener("change", async (e)=>{
+  const file = e.target.files[0];
+  if(!file) return;
+  const box = document.getElementById("callsRawImportResult");
+  box.style.display = "";
+  box.innerHTML = "Analyse du journal d'appels en cours...";
+  showBusy("Import du journal d'appels en cours...");
+  const fd = new FormData();
+  fd.append("file", file);
+  try{
+    const res = await fetch("/api/tarkhiss/import-calls-raw", {method:"POST", body: fd});
+    const data = await res.json();
+    if(data.ok){
+      const s = data.stats;
+      box.innerHTML = `
+        <h3 style="margin:0 0 8px;font-size:14px;color:var(--primary);">✅ Import réussi</h3>
+        <p style="font-size:12.5px;color:var(--muted);margin:0 0 8px;">
+          ${s.months_covered.length} mois resynchronisés (${s.months_covered.map(monthLabel).join(", ")}) — ${s.rows} lignes lues${s.skipped ? `, ${s.skipped} ignorée(s)` : ""}
+        </p>
+        <div class="kpi-grid" style="grid-template-columns:repeat(4,1fr);">
+          <div class="kpi-card"><div class="kpi-label">Reçus (décrochés)</div><div class="kpi-value">${s.total_in}</div></div>
+          <div class="kpi-card"><div class="kpi-label">Manqués</div><div class="kpi-value">${s.total_missed}</div></div>
+          <div class="kpi-card"><div class="kpi-label">Émis</div><div class="kpi-value">${s.total_out}</div></div>
+          <div class="kpi-card"><div class="kpi-label">Taux de décroché</div><div class="kpi-value">${s.answer_rate!=null?s.answer_rate+"%":"—"}</div></div>
+        </div>`;
+      toast("Import journal d'appels réussi — mois resynchronisés");
+      if(state.ym) await loadMonth(state.ym);
+    } else {
+      box.innerHTML = `<span style="color:var(--danger);">❌ ${esc(data.error || "Erreur d'import")}</span>`;
+      toast(data.error || "Erreur d'import");
+    }
+  } catch(err){
+    box.innerHTML = `<span style="color:var(--danger);">❌ Erreur réseau lors de l'import.</span>`;
+  } finally {
+    hideBusy();
+    e.target.value = "";
+  }
 });
 
 // ============================================================
@@ -1119,6 +1200,29 @@ function renderDashboard(){
       <div class="yoy-grid" id="emailMetaStatsGrid"></div>
     </div>
 
+    <div class="dash-table-wrap" id="callMetaStatsCard" style="display:none;">
+      <h3>📞 Statistiques appels — historique complet</h3>
+      <p style="font-size:11.5px;color:var(--muted);margin:0 0 8px;">Basé sur le dernier import du journal d'appels (tous mois confondus).</p>
+      <div class="yoy-grid" id="callMetaStatsGrid"></div>
+    </div>
+
+    <div class="charts-row" id="hourlyHeatmapsRow" style="display:none;">
+      <div class="chart-card">
+        <h3>Appels reçus — jour × heure</h3>
+        <img id="callHourlyHeatmapImg" style="width:100%;display:block;" alt="Heatmap horaire des appels">
+      </div>
+      <div class="chart-card">
+        <h3>Emails reçus — jour × heure</h3>
+        <img id="emailHourlyHeatmapImg" style="width:100%;display:block;" alt="Heatmap horaire des emails">
+      </div>
+    </div>
+
+    <div class="dash-table-wrap" id="responseDelayCard" style="display:none;">
+      <h3>⏱ Délai de première réponse (email, indicatif)</h3>
+      <p style="font-size:11px;color:var(--muted);margin:0 0 8px;" id="responseDelayNote"></p>
+      <div class="yoy-grid" id="responseDelayGrid"></div>
+    </div>
+
     <div class="charts-row">
       <div class="chart-card">
         <h3>Évolution hebdomadaire — Bugs vs Demandes</h3>
@@ -1273,6 +1377,69 @@ function renderDashboard(){
   setupEmailPanel();
   addPngExportButtons(charts);
   refreshEmailMetaStats();
+  refreshCallMetaStats();
+  refreshHourlyHeatmaps();
+  refreshResponseDelay();
+}
+
+async function refreshCallMetaStats(){
+  const card = document.getElementById("callMetaStatsCard");
+  const grid = document.getElementById("callMetaStatsGrid");
+  if(!card || !grid) return;
+  try{
+    const res = await fetch("/api/tarkhiss/call-meta-stats");
+    const s = await res.json();
+    if(!s || !s.total_in){ card.style.display = "none"; return; }
+    grid.innerHTML = `
+      <div class="yoy-chip"><div class="yoy-chip-label">Total reçus (historique)</div><div class="yoy-chip-values">${s.total_in}</div></div>
+      <div class="yoy-chip"><div class="yoy-chip-label">Total manqués</div><div class="yoy-chip-values">${s.total_missed}</div></div>
+      <div class="yoy-chip"><div class="yoy-chip-label">Total émis</div><div class="yoy-chip-values">${s.total_out}</div></div>
+      <div class="yoy-chip"><div class="yoy-chip-label">Taux de décroché</div><div class="yoy-chip-values">${s.answer_rate!=null?s.answer_rate+"%":"—"}</div></div>
+    `;
+    card.style.display = "";
+  } catch(e){
+    card.style.display = "none";
+  }
+}
+
+async function refreshHourlyHeatmaps(){
+  const row = document.getElementById("hourlyHeatmapsRow");
+  const callImg = document.getElementById("callHourlyHeatmapImg");
+  const emailImg = document.getElementById("emailHourlyHeatmapImg");
+  if(!row) return;
+  const [callOk, emailOk] = await Promise.all([
+    fetch(`/api/tarkhiss/call-meta/${state.ym}`).then(r=>r.ok?r.json():null).then(d=>d && Object.keys(d).length>0),
+    fetch(`/api/tarkhiss/email-meta/${state.ym}`).then(r=>r.ok?r.json():null).then(d=>d && Object.keys(d).length>0),
+  ]);
+  row.style.display = (callOk || emailOk) ? "" : "none";
+  row.children[0].style.display = callOk ? "" : "none";
+  row.children[1].style.display = emailOk ? "" : "none";
+  if(callOk) callImg.src = `/api/tarkhiss/call-heatmap-hourly-png/${state.ym}?_=${Date.now()}`;
+  if(emailOk) emailImg.src = `/api/tarkhiss/email-heatmap-hourly-png/${state.ym}?_=${Date.now()}`;
+}
+
+async function refreshResponseDelay(){
+  const card = document.getElementById("responseDelayCard");
+  const grid = document.getElementById("responseDelayGrid");
+  const note = document.getElementById("responseDelayNote");
+  if(!card || !grid) return;
+  try{
+    const res = await fetch(`/api/tarkhiss/email-meta/${state.ym}`);
+    const m = await res.json();
+    const r = m && m.response;
+    if(!r || !r.replied){ card.style.display = "none"; return; }
+    const fmtMin = v => v==null ? "—" : (v>=60 ? `${Math.floor(v/60)} h ${String(Math.round(v%60)).padStart(2,"0")}` : `${Math.round(v)} min`);
+    grid.innerHTML = `
+      <div class="yoy-chip"><div class="yoy-chip-label">Délai médian (heures ouvrées)</div><div class="yoy-chip-values">${fmtMin(r.median_biz_min)}</div></div>
+      <div class="yoy-chip"><div class="yoy-chip-label">Délai P90</div><div class="yoy-chip-values">${fmtMin(r.p90_biz_min)}</div></div>
+      <div class="yoy-chip"><div class="yoy-chip-label">Sans réponse sous 7 j</div><div class="yoy-chip-values">${m.unanswered}</div></div>
+      <div class="yoy-chip"><div class="yoy-chip-label">Taux d'appariement</div><div class="yoy-chip-values">${r.match_rate!=null?r.match_rate+"%":"—"}</div></div>
+    `;
+    note.textContent = `${r.note} Base horaire : ${r.business_hours}.`;
+    card.style.display = "";
+  } catch(e){
+    card.style.display = "none";
+  }
 }
 
 async function refreshEmailMetaStats(){
@@ -1786,6 +1953,32 @@ async function loadAuditLog(){
 
 document.getElementById("refreshAuditLogBtn")?.addEventListener("click", loadAuditLog);
 
+async function loadRawImports(){
+  const tbody = document.querySelector("#rawImportsTable tbody");
+  if(!tbody) return;
+  tbody.innerHTML = `<tr><td colspan="6">Chargement...</td></tr>`;
+  try{
+    const res = await fetch("/api/tarkhiss/raw-imports");
+    const rows = await res.json();
+    if(!rows.length){ tbody.innerHTML = `<tr><td colspan="6">Aucun import archivé pour l'instant.</td></tr>`; return; }
+    tbody.innerHTML = rows.map(r=>{
+      const kindLabel = r.kind === "emails" ? "📧 Emails (Outlook)" : "📞 Appels";
+      const vol = r.kind === "emails" ? `${r.total_received||0} reçus / ${r.total_sent||0} envoyés` : `${r.rows||0} lignes`;
+      return `<tr>
+        <td>${esc((r.uploaded_at||"").replace("T"," ").slice(0,16))}</td>
+        <td>${kindLabel}</td>
+        <td>${esc(r.original_name||"")}</td>
+        <td>${(r.months||[]).map(monthLabel).join(", ")}</td>
+        <td>${esc(vol)}</td>
+        <td><a href="/api/tarkhiss/raw-imports/download/${encodeURIComponent(r.id)}" class="btn btn-outline btn-sm">⬇</a></td>
+      </tr>`;
+    }).join("");
+  } catch(e){
+    tbody.innerHTML = `<tr><td colspan="6">Erreur de chargement.</td></tr>`;
+  }
+}
+document.getElementById("refreshRawImportsBtn")?.addEventListener("click", loadRawImports);
+
 async function loadGlobalSettings(){
   const res = await fetch("/api/global-settings");
   globalSettings = await res.json();
@@ -1807,7 +2000,7 @@ function applyAppBranding(){
 }
 
 function applyUiTheme(theme){
-  const valid = ["flat", "soft", "neu", "clay"];
+  const valid = ["flat", "soft", "neu", "clay", "adp"];
   document.documentElement.dataset.theme = valid.includes(theme) ? theme : "flat";
   document.querySelectorAll('input[name="uiTheme"]').forEach(input=>{
     input.checked = (input.value === theme) || (input.value === "flat" && !valid.includes(theme));
@@ -1822,6 +2015,25 @@ function applyUiPalette(palette){
   document.querySelectorAll('input[name="uiPalette"]').forEach(input=>{
     input.checked = input.value === p;
   });
+}
+
+// Aperçu live du thème/palette : chaque clic sur une option l'applique immédiatement à
+// l'écran entier, sans attendre "Enregistrer". Si l'admin quitte l'onglet sans enregistrer,
+// on revient au thème/palette réellement sauvegardés (voir activateTab / revertThemePreviewIfUnsaved).
+document.querySelectorAll('input[name="uiTheme"]').forEach(r=>{
+  r.addEventListener("change", ()=> applyUiTheme(r.value));
+});
+document.querySelectorAll('input[name="uiPalette"]').forEach(r=>{
+  r.addEventListener("change", ()=> applyUiPalette(r.value));
+});
+
+function revertThemePreviewIfUnsaved(){
+  const savedTheme = globalSettings.ui_theme || "flat";
+  const savedPalette = globalSettings.ui_palette || "ammps";
+  if(document.documentElement.dataset.theme !== savedTheme || (document.documentElement.dataset.palette || "ammps") !== savedPalette){
+    applyUiTheme(savedTheme);
+    applyUiPalette(savedPalette);
+  }
 }
 
 async function loadModuleSettings(){
@@ -1880,6 +2092,7 @@ document.getElementById("saveAdvancedEditingBtn").addEventListener("click", asyn
     report_title_tarkhiss: document.getElementById("reportTitleTarkhissInput").value.trim(),
     report_title_moussanada: document.getElementById("reportTitleMoussanadaInput").value.trim(),
     report_title_pchc: document.getElementById("reportTitlePchcInput").value.trim(),
+    report_show_contact_names: document.getElementById("reportShowContactNamesInput").checked,
   };
   Object.assign(globalSettings, payload);
   await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
@@ -2172,6 +2385,7 @@ async function loadAdmin(){
   document.getElementById("reportTitleTarkhissInput").value = globalSettings.report_title_tarkhiss || "";
   document.getElementById("reportTitleMoussanadaInput").value = globalSettings.report_title_moussanada || "";
   document.getElementById("reportTitlePchcInput").value = globalSettings.report_title_pchc || "";
+  document.getElementById("reportShowContactNamesInput").checked = !!globalSettings.report_show_contact_names;
   document.getElementById("smtpHostInput").value = globalSettings.smtp_host || "";
   document.getElementById("smtpPortInput").value = globalSettings.smtp_port || 587;
   document.getElementById("smtpUserInput").value = globalSettings.smtp_user || "";
