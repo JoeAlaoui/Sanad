@@ -64,11 +64,11 @@
       <div class="nav-subgroup" id="favoritesGroup" style="display:none;"></div>
 
       <!-- Sous-groupe Tarkhiss : Reporting Hotline & Emails -->
-      <div class="nav-subgroup-title" data-module="tarkhiss" data-roles="admin,superviseur">
+      <div class="nav-subgroup-title" data-module="tarkhiss" data-roles="admin,superviseur,hotliner">
         <span class="nav-subgroup-ico">🎧</span> Reporting Hotline &amp; Emails
       </div>
-      <div class="nav-subgroup" data-module="tarkhiss" data-roles="admin,superviseur">
-        <button class="nav-item active" data-tab="dashboard" data-module="tarkhiss" data-roles="admin,superviseur">
+      <div class="nav-subgroup" data-module="tarkhiss" data-roles="admin,superviseur,hotliner">
+        <button class="nav-item active" data-tab="dashboard" data-module="tarkhiss" data-roles="admin,superviseur,hotliner">
           <span class="nav-ico">▦</span> Dashboard
         </button>
         <button class="nav-item" data-tab="calls" data-module="tarkhiss" data-roles="admin,superviseur">
@@ -80,7 +80,7 @@
         <button class="nav-item" data-tab="analysis" data-module="tarkhiss" data-roles="admin,superviseur">
           <span class="nav-ico">◇</span> Analyse mensuelle
         </button>
-        <button class="nav-item" data-tab="annual" data-module="tarkhiss" data-roles="admin,superviseur">
+        <button class="nav-item" data-tab="annual" data-module="tarkhiss" data-roles="admin,superviseur,hotliner">
           <span class="nav-ico">📈</span> Vue annuelle
         </button>
         <button class="nav-item" data-tab="prompts" data-module="tarkhiss" data-roles="admin,superviseur">
@@ -160,11 +160,50 @@
       <div class="user-menu">
         <span id="userMenuName"></span>
         <span class="role-pill" id="userMenuRole"></span>
+        <button class="btn-add" id="shareSanadBtn" title="Rendre SANAD accessible depuis le réseau local" style="display:none;">🔗 Partager SANAD</button>
         <button class="btn-add" id="densityToggleBtn" title="Basculer la densité d'affichage des tableaux">▤ Compact</button>
         <button class="btn-add" id="helpBtn" title="Revoir l'aide de démarrage">? Aide</button>
         <button class="btn-add" id="logoutBtn">Déconnexion</button>
       </div>
     </header>
+
+    <!-- MODAL PARTAGE RÉSEAU -->
+    <div class="modal-overlay" id="shareSanadOverlay" style="display:none;">
+      <div class="modal-box">
+        <div class="modal-head">
+          <h2>🔗 Partager SANAD sur le réseau local</h2>
+          <button class="modal-close" id="closeShareSanadBtn">✕</button>
+        </div>
+        <div style="padding:0 4px;">
+          <p class="hint" style="margin-bottom:14px;">
+            Par défaut, SANAD n'est accessible que depuis cet ordinateur (<code>127.0.0.1</code>).
+            Pour qu'un collègue connecté au <strong>même réseau local</strong> (même Wi-Fi/switch
+            que ce poste) puisse y accéder avec le lien ci-dessous, activez le partage réseau.
+            Chaque utilisateur devra se connecter avec son propre compte SANAD.
+          </p>
+          <div class="form-row">
+            <label><input type="radio" name="shareMode" value="local" id="shareModeLocal"> Local uniquement (127.0.0.1) — recommandé par défaut</label>
+          </div>
+          <div class="form-row">
+            <label><input type="radio" name="shareMode" value="network" id="shareModeNetwork"> Accessible sur le réseau local (0.0.0.0)</label>
+          </div>
+          <div class="form-row">
+            <label for="sharePortInput">Port</label>
+            <input type="text" id="sharePortInput" placeholder="5050" style="max-width:120px;">
+          </div>
+          <div class="card" id="shareLinkBox" style="margin:14px 0;display:none;">
+            <div class="hint" style="margin-bottom:6px;">Lien à transmettre à vos collègues sur ce réseau :</div>
+            <div style="display:flex;gap:8px;align-items:center;">
+              <input type="text" id="shareLinkValue" readonly style="flex:1;font-family:'JetBrains Mono',monospace;">
+              <button class="btn btn-outline" id="copyShareLinkBtn">📋 Copier</button>
+            </div>
+          </div>
+          <p class="hint" id="shareRestartHint" style="display:none;color:var(--accent);"></p>
+          <p class="hint">⚠️ Le partage réseau expose SANAD à toute personne connectée au même réseau (pas à Internet). Chacun reste soumis à l'authentification et aux rôles habituels.</p>
+          <button class="btn btn-primary" id="saveShareSanadBtn">Enregistrer</button>
+        </div>
+      </div>
+    </div>
 
     <!-- MODAL ONBOARDING -->
     <div class="modal-overlay" id="onboardingOverlay" style="display:none;">
@@ -800,32 +839,32 @@
           <label>Thème visuel de l'écran (n'affecte pas les PDF/Excel/PPTX)</label>
           <div class="theme-choice">
             <label class="theme-option">
-              <input type="radio" name="uiTheme" value="flat" id="themeFlatInput">
-              <span class="theme-swatch theme-swatch--flat"></span>
-              <span>Flat (actuel)</span>
-            </label>
-            <label class="theme-option">
               <input type="radio" name="uiTheme" value="soft" id="themeSoftInput">
               <span class="theme-swatch theme-swatch--soft"></span>
               <span>Neumorphism doux</span>
-            </label>
-            <label class="theme-option">
-              <input type="radio" name="uiTheme" value="neu" id="themeNeuInput">
-              <span class="theme-swatch theme-swatch--neu"></span>
-              <span>Neumorphism complet</span>
-            </label>
-            <label class="theme-option">
-              <input type="radio" name="uiTheme" value="clay" id="themeClayInput">
-              <span class="theme-swatch theme-swatch--clay"></span>
-              <span>Claymorphism</span>
             </label>
             <label class="theme-option">
               <input type="radio" name="uiTheme" value="adp" id="themeAdpInput">
               <span class="theme-swatch theme-swatch--adp"></span>
               <span>Ant Design Pro</span>
             </label>
+            <label class="theme-option">
+              <input type="radio" name="uiTheme" value="pastel" id="themePastelInput">
+              <span class="theme-swatch theme-swatch--pastel"></span>
+              <span>Pastel</span>
+            </label>
+            <label class="theme-option">
+              <input type="radio" name="uiTheme" value="ammps-vert" id="themeAmmpsVertInput">
+              <span class="theme-swatch theme-swatch--ammps-vert"></span>
+              <span>AMMPS Vert Institutionnel</span>
+            </label>
+            <label class="theme-option">
+              <input type="radio" name="uiTheme" value="ammps-moderne" id="themeAmmpsModerneInput">
+              <span class="theme-swatch theme-swatch--ammps-moderne"></span>
+              <span>AMMPS Moderne 2026</span>
+            </label>
           </div>
-          <p class="hint" style="margin-top:8px;">⚠️ Le neumorphism complet est déconseillé en usage courant (contraste réduit, moins lisible en survol rapide) — proposé ici à titre d'option, "Neumorphism doux" reste la recommandation par défaut si vous souhaitez sortir du flat. "Ant Design Pro" reprend la charte bleue et la sidebar sombre de ce design system tel quel (teinte fixe, comme Neumorphism complet/Claymorphism — la palette ci-dessous ne s'y applique pas).</p>
+          <p class="hint" style="margin-top:8px;">"Neumorphism doux" est la recommandation par défaut. "Ant Design Pro", "Pastel", "AMMPS Vert Institutionnel" et "AMMPS Moderne 2026" ont chacun leur propre teinte fixe et leur propre style de cartes/menus/sidebar (la palette de couleur ci-dessous ne s'applique pas par-dessus ces quatre thèmes).</p>
         </div>
         <div class="form-row">
           <label>Palette de couleur (indépendante du thème — Neumorphism complet/Claymorphism gardent leur propre teinte)</label>

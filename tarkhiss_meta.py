@@ -47,6 +47,23 @@ def _round(v, n=1):
     return None if v is None else round(v, n)
 
 
+# Horaires d'ouverture Tarkhiss (hotline + support email) — utilisés pour restreindre l'AFFICHAGE
+# des heatmaps jour×heure (appels/emails) aux jours ouvrés et à la plage réellement couverte par
+# le service. Les autres statistiques (taux de décroché, délai de réponse...) restent, elles,
+# calculées sur la totalité des données importées — seule la heatmap est recadrée à l'affichage.
+HEATMAP_HOUR_START, HEATMAP_HOUR_END = 8, 16  # colonnes affichées : 8h à 16h inclus (≈ 08h30-16h30)
+HEATMAP_DAYS = 5  # lignes affichées : Lun-Ven uniquement
+
+
+def business_hours_view(matrix):
+    """Découpe une matrice 7×24 (jour×heure, Lun=0..Dim=6) sur la plage d'ouverture Tarkhiss :
+    jours ouvrés (Lun-Ven) et heures HEATMAP_HOUR_START à HEATMAP_HOUR_END inclus. Retourne
+    (sous_matrice, labels_heures) — à utiliser uniquement pour l'affichage de la heatmap."""
+    hours = list(range(HEATMAP_HOUR_START, HEATMAP_HOUR_END + 1))
+    sub = [[row[h] for h in hours] for row in matrix[:HEATMAP_DAYS]]
+    return sub, [str(h) for h in hours]
+
+
 def ym_of(dt):
     return f"{dt.year}-{dt.month:02d}"
 

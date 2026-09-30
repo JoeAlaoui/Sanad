@@ -37,11 +37,17 @@ Helpdesk**. Ce compte gère ensuite les autres utilisateurs dans l'onglet **Util
 |---|---|
 | **Administrateur** | Accès complet : saisie, imports, rapports, administration, comptes, tous les volets |
 | **Superviseur** | Lecture seule : Dashboard, Vue annuelle, export PDF/Excel des volets. Pas de saisie, pas d'envoi d'email, pas d'administration |
-| **Hotliner** | **Base de connaissances** et **Notes** uniquement, limité aux volets assignés par l'admin |
+| **Hotliner** | **Base de connaissances** et **Notes**, limité aux volets assignés par l'admin, + **vue lecture seule** du Dashboard et de la Vue annuelle **Tarkhiss uniquement** (jamais Moussanada/PCHC, jamais de saisie/export/envoi) si "Tarkhiss" fait partie de ses volets assignés |
 
 ## 4. Volets
 
 ### 4.1 Tarkhiss — Support Email & Hotline
+
+**Heatmap jour × heure (appels et emails) recadrée aux horaires d'ouverture** : affichage
+limité aux jours ouvrés (Lun-Ven) et à la plage 08h-17h (≈08h30-16h30, horaires Tarkhiss),
+sur l'écran, le PDF et l'Excel. Seule la heatmap est recadrée — le taux de décroché, le délai
+de réponse et les autres statistiques restent calculés sur l'intégralité des données importées,
+week-ends et heures creuses compris.
 - Saisie mensuelle appels/emails, analyse (problèmes, demandes, constats, recommandations),
   dashboard, vue annuelle, heatmap jour de semaine × semaine du mois, comparatif N vs N-1,
   alertes de seuil configurables, prompts Copilot, rapport email/PDF/Excel.
@@ -87,19 +93,41 @@ Helpdesk**. Ce compte gère ensuite les autres utilisateurs dans l'onglet **Util
 - Seul volet disposant d'un export PowerPoint (décision de conception : pas de PPTX pour
   Tarkhiss/Moussanada).
 
-## 5. Personnalisation de l'écran (Administration)
+## 5. Partager SANAD sur le réseau local
 
-- **5 thèmes visuels** : Flat (défaut), Neumorphism doux (recommandé si vous sortez du flat),
-  Neumorphism complet (déconseillé en usage courant — avertissement affiché), Claymorphism, et
-  **Ant Design Pro** (reprise complète de la charte du design system : bleu #1890FF, sidebar
-  bleu marine très sombre, cartes blanches à ombre fine, coins peu arrondis).
+Bouton **🔗 Partager SANAD** (menu utilisateur, réservé à l'administrateur) : bascule
+l'application entre accès **local uniquement** (`127.0.0.1`, défaut) et accès **réseau local**
+(`0.0.0.0`), avec un port configurable. Une fois enregistré, la fenêtre affiche le lien à
+transmettre (ex. `http://192.168.1.42:5050`) basé sur l'adresse IP détectée du poste. Chaque
+collègue qui ouvre ce lien depuis le **même réseau** (même Wi-Fi/switch) arrive sur l'écran de
+connexion SANAD et utilise son propre compte.
+
+**⚠️ Redémarrage requis** : Flask ne peut pas changer d'adresse d'écoute à chaud — après avoir
+enregistré, fermez la fenêtre du terminal et relancez `python app.py` pour que le nouveau
+réglage s'applique. Le réglage est conservé dans `data/network_config.json`.
+
+**⚠️ Sécurité** : le mode réseau expose SANAD à quiconque est connecté au même réseau local (pas
+à Internet). L'authentification et les rôles habituels restent en vigueur ; à réserver à un
+réseau de confiance (bureau, VPN d'entreprise).
+
+## 6. Personnalisation de l'écran (Administration)
+
+- **5 thèmes visuels**, chacun avec sa propre charte cartes/boutons/tableaux/sidebar (pas
+  seulement une couleur) : Neumorphism doux (recommandé, défaut), Ant Design Pro (bleu #1890FF,
+  sidebar marine très sombre), Pastel (sidebar blanche, cartes KPI pastel rotatives, boutons
+  pilule violets — d'après le kit fourni), AMMPS Vert Institutionnel (vert #0D4823/rouge
+  #DF2328, cartes à coins moyens — d'après `ammps-inspired-theme-kit`), AMMPS Moderne 2026 (vert
+  très sombre #052E24 + accent citron vert, coins très arrondis, sidebar foncée — d'après
+  `ammps-modern-2026-theme-kit`). Les kits sources sont conservés dans
+  `static/design-kits/` à titre de référence.
 - **Aperçu live** : cliquer sur un thème ou une palette l'applique immédiatement à l'écran entier
   (avant même d'enregistrer), pour comparer sans aller-retour. Si vous quittez l'onglet
   Administration sans cliquer sur "Enregistrer", l'écran revient automatiquement au thème/palette
   réellement sauvegardés.
-- **6 palettes de couleur**, indépendantes du thème : AMMPS (défaut), Océan, Émeraude, Ardoise,
-  Violet, Bordeaux. Neumorphism complet, Claymorphism et Ant Design Pro gardent leur propre
-  teinte fixe (la palette ne s'applique pas par-dessus ces trois thèmes).
+- **6 palettes de couleur**, indépendantes du thème, mais utilisables uniquement avec
+  Neumorphism doux : AMMPS (défaut), Océan, Émeraude, Ardoise, Violet, Bordeaux. Ant Design Pro,
+  Pastel, AMMPS Vert Institutionnel et AMMPS Moderne 2026 gardent chacun leur teinte fixe (la
+  palette ne s'applique pas par-dessus ces quatre thèmes).
 - Ces réglages sont **purement visuels côté écran** : aucun effet sur les rapports
   PDF/Excel/PowerPoint, qui conservent toujours la charte AMMPS officielle.
 - **Navigation par mois** : flèches ←/→ à côté du sélecteur de mois pour avancer/reculer d'un
@@ -114,7 +142,7 @@ Helpdesk**. Ce compte gère ensuite les autres utilisateurs dans l'onglet **Util
   imports, notifications navigateur, aperçu PDF avant téléchargement, CSS d'impression,
   indicateur "dernière synchro", onboarding par rôle.
 
-## 6. Gouvernance / fiabilité
+## 7. Gouvernance / fiabilité
 
 - Sauvegardes automatiques horodatées avant chaque écriture (`data/_backups/`, 20
   versions/fichier), écriture atomique.
@@ -131,7 +159,7 @@ Helpdesk**. Ce compte gère ensuite les autres utilisateurs dans l'onglet **Util
 - Historique des envois d'email avec téléchargement des `.eml` (protégé contre le path
   traversal) ; historique des imports bruts Tarkhiss avec re-téléchargement (même protection).
 
-## 7. Notes techniques
+## 8. Notes techniques
 
 - Authentification par session Flask (cookie), mots de passe hashés (`werkzeug.security`), clé
   de session persistée dans `data/.secret_key`. Politique de mot de passe et timeout de session
@@ -143,7 +171,7 @@ Helpdesk**. Ce compte gère ensuite les autres utilisateurs dans l'onglet **Util
   (PDF principal), xhtml2pdf (repli), requests (client GLPI).
 - Aucune donnée envoyée à l'extérieur : tout reste local à la machine qui exécute l'application.
 
-## 8. Historique des lots livrés (repères)
+## 9. Historique des lots livrés (repères)
 
 - **Lots A–G** : navigation/UI (accordéon, favoris, recherche globale, thèmes/palettes,
   densité, raccourcis, drag & drop, notifications), alertes de seuil, export/import de
@@ -157,8 +185,11 @@ Helpdesk**. Ce compte gère ensuite les autres utilisateurs dans l'onglet **Util
   appelants — restitué en PDF/Excel/écran, exclu de l'email.
 - **Thème Ant Design Pro**, aperçu live des thèmes/palettes, navigation par flèches ←/→ avec
   transition douce au changement de mois.
+- **Thèmes Pastel / AMMPS Vert Institutionnel / AMMPS Moderne 2026** (d'après kits fournis),
+  retrait de Flat/Neumorphism complet/Claymorphism, heatmap horaire recadrée aux horaires
+  d'ouverture, vue lecture seule Tarkhiss pour le hotliner, partage réseau local.
 
-## 9. Limites connues (honnêteté sur les points non vérifiés)
+## 10. Limites connues (honnêteté sur les points non vérifiés)
 
 - Rendu visuel jamais vérifié dans un navigateur réel en conditions de développement (sandbox
   sans affichage) : structure, CSS et données sont validés, pas le rendu pixel par pixel.

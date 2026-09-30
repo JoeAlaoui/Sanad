@@ -1,0 +1,173 @@
+/* ============================================================
+   THEME "MODERNE" — design system autonome et portable
+   Extrait de MIRSAAD, réutilisable dans n'importe quelle application.
+   Aucune dépendance : copier ce fichier + charger la police Inter
+   (ou laisser le fallback système) et utiliser les classes ci-dessous.
+   ============================================================ */
+
+/* ---------- 1. Jetons de design (design tokens) ---------- */
+:root {
+    /* Couleurs de marque */
+    --tm-accent: #8b6cff;
+    --tm-accent-dark: #7752f5;
+    --tm-accent-soft: #e8e0fe;
+    --tm-accent-glow: rgba(139, 108, 255, 0.18);
+
+    /* Neutres */
+    --tm-ink: #201c33;          /* texte principal */
+    --tm-ink-soft: #6b6580;     /* texte secondaire */
+    --tm-ink-faint: #a79ccb;    /* texte tertiaire / désactivé */
+    --tm-bg: #f6f5fb;           /* fond de page */
+    --tm-surface: #ffffff;      /* fond des cartes/panneaux */
+    --tm-border: #eeecf7;       /* bordures fines */
+    --tm-border-strong: #e5e1f5;
+
+    /* Couleurs sémantiques (statuts) — à garder stables quel que soit le thème visuel */
+    --tm-danger: #b3261e;
+    --tm-warning: #b06000;
+    --tm-success: #1e7a4c;
+    --tm-neutral: #4b5568;
+
+    /* Palette pastel rotative (cartes statistiques façon "cours") */
+    --tm-pastel-1: #ffead0; /* pêche */
+    --tm-pastel-2: #e8e0fe; /* lavande */
+    --tm-pastel-3: #dcf6e2; /* menthe */
+    --tm-pastel-4: #dcedff; /* ciel */
+
+    /* Navigation (sidebar) */
+    --tm-nav-hover-bg: #f4f2fb;
+    --tm-nav-active-bg: #d9f5c4;  /* pastille vert lime */
+    --tm-nav-active-fg: #1c2b0f;
+
+    /* Forme */
+    --tm-radius-lg: 18px;   /* cartes, panneaux */
+    --tm-radius-md: 12px;   /* champs, boutons non-pilule */
+    --tm-radius-pill: 999px; /* boutons, badges */
+    --tm-shadow-soft: 0 2px 14px rgba(90, 70, 160, 0.07);
+    --tm-shadow-btn: 0 3px 10px rgba(139, 108, 255, 0.35);
+
+    /* Typographie */
+    --tm-font: "Inter", -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+    --tm-ease: cubic-bezier(0.22, 1, 0.36, 1);
+}
+
+/* ---------- 2. Structure de page ---------- */
+.tm-body {
+    margin: 0;
+    font-family: var(--tm-font);
+    background: var(--tm-bg);
+    color: var(--tm-ink);
+    font-size: 14px;
+    line-height: 1.5;
+    -webkit-font-smoothing: antialiased;
+}
+
+/* Sidebar fixe à gauche */
+.tm-sidebar {
+    background: var(--tm-surface);
+    width: 234px;
+    height: 100vh;
+    position: fixed;
+    left: 0;
+    top: 0;
+    display: flex;
+    flex-direction: column;
+    padding: 22px 14px;
+    gap: 26px;
+    box-shadow: 1px 0 0 rgba(20, 10, 50, 0.06);
+    box-sizing: border-box;
+}
+
+.tm-brand { display: flex; align-items: center; gap: 8px; padding: 0 8px; }
+.tm-brand-mark {
+    width: 30px; height: 30px; border-radius: 10px;
+    background: linear-gradient(135deg, var(--tm-accent), #c3a6ff);
+    color: #fff; display: flex; align-items: center; justify-content: center;
+    font-weight: 800; font-size: 14px;
+    box-shadow: 0 4px 10px var(--tm-accent-glow);
+}
+.tm-brand-name { font-weight: 700; font-size: 17px; color: var(--tm-ink); }
+
+.tm-nav { display: flex; flex-direction: column; gap: 3px; }
+.tm-nav a {
+    display: flex; align-items: center; gap: 8px;
+    color: var(--tm-ink-soft); font-weight: 600; font-size: 13px;
+    text-decoration: none; padding: 10px 12px; border-radius: var(--tm-radius-md);
+    transition: background 0.15s var(--tm-ease), color 0.15s var(--tm-ease);
+}
+.tm-nav a:hover { background: var(--tm-nav-hover-bg); color: var(--tm-ink); }
+.tm-nav a.active { background: var(--tm-nav-active-bg); color: var(--tm-nav-active-fg); }
+
+/* Zone de contenu (avec sidebar) */
+.tm-content { margin-left: 234px; padding: 30px 36px; box-sizing: border-box; }
+
+@media (max-width: 900px) {
+    .tm-sidebar { position: static; width: 100%; height: auto; flex-direction: row; align-items: center; justify-content: space-between; padding: 10px 16px; }
+    .tm-nav { flex-direction: row; flex-wrap: wrap; }
+    .tm-content { margin-left: 0; }
+}
+
+/* ---------- 3. Cartes statistiques pastel ---------- */
+.tm-stat-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 14px; }
+.tm-stat-card {
+    background: var(--tm-pastel-2);
+    border-radius: var(--tm-radius-lg);
+    box-shadow: var(--tm-shadow-soft);
+    padding: 18px;
+}
+.tm-stat-card--1 { background: var(--tm-pastel-1); }
+.tm-stat-card--2 { background: var(--tm-pastel-2); }
+.tm-stat-card--3 { background: var(--tm-pastel-3); }
+.tm-stat-card--4 { background: var(--tm-pastel-4); }
+.tm-stat-value { font-size: 28px; font-weight: 800; color: var(--tm-ink); letter-spacing: -0.5px; }
+.tm-stat-label { font-size: 11.5px; color: var(--tm-ink-soft); text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px; }
+
+/* ---------- 4. Panneaux ---------- */
+.tm-panel {
+    background: var(--tm-surface);
+    border: 1px solid var(--tm-border);
+    border-radius: var(--tm-radius-lg);
+    box-shadow: var(--tm-shadow-soft);
+    margin-bottom: 20px;
+}
+.tm-panel-header { padding: 14px 20px; border-bottom: 1px solid var(--tm-border); font-weight: 700; font-size: 13.5px; border-radius: var(--tm-radius-lg) var(--tm-radius-lg) 0 0; }
+.tm-panel-body { padding: 20px; }
+
+/* ---------- 5. Boutons ---------- */
+.tm-btn {
+    display: inline-block; border: 1px solid var(--tm-border-strong); background: var(--tm-surface);
+    border-radius: var(--tm-radius-pill); padding: 9px 18px; font-size: 13px; font-weight: 600;
+    color: var(--tm-ink); text-decoration: none; cursor: pointer;
+    transition: all 0.15s var(--tm-ease); font-family: var(--tm-font);
+}
+.tm-btn:hover { border-color: #c9c0ec; transform: translateY(-1px); }
+.tm-btn-primary { background: var(--tm-accent); border-color: var(--tm-accent); color: #fff; }
+.tm-btn-primary:hover { background: var(--tm-accent-dark); box-shadow: var(--tm-shadow-btn); }
+
+/* ---------- 6. Formulaires ---------- */
+.tm-input, .tm-select, .tm-textarea {
+    border: 1px solid var(--tm-border-strong); border-radius: var(--tm-radius-md);
+    padding: 9px 11px; font-size: 13px; font-family: var(--tm-font);
+    background: var(--tm-surface); color: var(--tm-ink);
+    transition: border-color 0.15s var(--tm-ease), box-shadow 0.15s var(--tm-ease);
+}
+.tm-input:focus, .tm-select:focus, .tm-textarea:focus {
+    outline: none; border-color: var(--tm-accent); box-shadow: 0 0 0 3px var(--tm-accent-glow);
+}
+
+/* ---------- 7. Tableaux ---------- */
+.tm-table { width: 100%; border-collapse: collapse; font-size: 13px; }
+.tm-table th { text-align: left; background: #faf9ff; color: #8b85a0; text-transform: uppercase; font-size: 10.5px; letter-spacing: 0.5px; padding: 10px 12px; border-bottom: 1px solid var(--tm-border); }
+.tm-table td { padding: 11px 12px; border-bottom: 1px solid var(--tm-border); }
+.tm-table tr:hover td { background: #f6f3ff; }
+
+/* ---------- 8. Badges (statuts sémantiques, indépendants du thème) ---------- */
+.tm-badge { display: inline-block; padding: 2px 9px; border-radius: var(--tm-radius-pill); font-size: 11px; font-weight: 700; color: #fff; }
+.tm-badge-danger { background: var(--tm-danger); }
+.tm-badge-warning { background: var(--tm-warning); }
+.tm-badge-success { background: var(--tm-success); }
+.tm-badge-neutral { background: var(--tm-neutral); }
+
+/* ---------- 9. Barre de progression ---------- */
+.tm-progress { width: 80px; height: 6px; background: var(--tm-border); border-radius: var(--tm-radius-pill); overflow: hidden; }
+.tm-progress-fill { height: 100%; background: linear-gradient(90deg, var(--tm-accent), #c3a6ff); border-radius: var(--tm-radius-pill); }

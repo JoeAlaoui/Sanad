@@ -257,7 +257,15 @@ function applyModuleBrand(){
     if(el) el.textContent = info.label;
   });
   document.getElementById("moduleNotReadyBanner").style.display = info.ready ? "none" : "block";
-  document.getElementById("monthPickerWrap").style.display = (currentUser && currentUser.role === "hotliner") ? "none" : "";
+  // Sélecteur de mois : masqué pour le hotliner sauf sur Tarkhiss (seul volet où il a un accès
+  // lecture seule — Dashboard et Vue annuelle). Actions serveur (export/email) restreintes de
+  // même : le hotliner ne fait que consulter, jamais générer/envoyer.
+  const hotlinerReadOnly = currentUser && currentUser.role === "hotliner";
+  document.getElementById("monthPickerWrap").style.display = (hotlinerReadOnly && currentModule !== "tarkhiss") ? "none" : "";
+  ["xlsxBtn", "pdfBtn", "mailToggleBtn"].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.style.display = hotlinerReadOnly ? "none" : "";
+  });
 
   // Filtre les items de nav (et titres de sous-groupe) selon le GROUPE de volet actif ET le rôle.
   // Quand le groupe actif est "tarkhiss", les deux sous-volets (Hotline&Emails + Métier) restent
@@ -500,7 +508,11 @@ async function loadMonth(ym){
     yoyState.analysis = yoyData.analysis || { problems:[], demandes:[], weekly:[] };
   }
 
-  checkReminder();
+  // Rappel d'envoi mensuel : n'a de sens que pour qui peut réellement envoyer (admin/superviseur).
+  // Le hotliner a un accès lecture seule au dashboard Tarkhiss et n'a pas droit à /send-log.
+  if(!currentUser || currentUser.role !== "hotliner"){
+    checkReminder();
+  }
 
   renderCallsTable();
   renderEmailsTable();
@@ -1209,10 +1221,12 @@ function renderDashboard(){
     <div class="charts-row" id="hourlyHeatmapsRow" style="display:none;">
       <div class="chart-card">
         <h3>Appels reçus — jour × heure</h3>
+        <p style="font-size:10.5px;color:var(--muted);margin:-6px 0 8px;">Jours ouvrés, 08h-17h (horaires Tarkhiss)</p>
         <img id="callHourlyHeatmapImg" style="width:100%;display:block;" alt="Heatmap horaire des appels">
       </div>
       <div class="chart-card">
         <h3>Emails reçus — jour × heure</h3>
+        <p style="font-size:10.5px;color:var(--muted);margin:-6px 0 8px;">Jours ouvrés, 08h-17h (horaires Tarkhiss)</p>
         <img id="emailHourlyHeatmapImg" style="width:100%;display:block;" alt="Heatmap horaire des emails">
       </div>
     </div>
@@ -1982,7 +1996,7 @@ document.getElementById("refreshRawImportsBtn")?.addEventListener("click", loadR
 async function loadGlobalSettings(){
   const res = await fetch("/api/global-settings");
   globalSettings = await res.json();
-  applyUiTheme(globalSettings.ui_theme || "flat");
+  applyUiTheme(globalSettings.ui_theme || "soft");
   applyUiPalette(globalSettings.ui_palette || "ammps");
   applyAppBranding();
 }
@@ -2000,10 +2014,10 @@ function applyAppBranding(){
 }
 
 function applyUiTheme(theme){
-  const valid = ["flat", "soft", "neu", "clay", "adp"];
-  document.documentElement.dataset.theme = valid.includes(theme) ? theme : "flat";
+  const valid = ["soft", "adp", "pastel", "ammps-vert", "ammps-moderne"];
+  document.documentElement.dataset.theme = valid.includes(theme) ? theme : "soft";
   document.querySelectorAll('input[name="uiTheme"]').forEach(input=>{
-    input.checked = (input.value === theme) || (input.value === "flat" && !valid.includes(theme));
+    input.checked = (input.value === theme) || (input.value === "soft" && !valid.includes(theme));
   });
 }
 
@@ -2028,7 +2042,7 @@ document.querySelectorAll('input[name="uiPalette"]').forEach(r=>{
 });
 
 function revertThemePreviewIfUnsaved(){
-  const savedTheme = globalSettings.ui_theme || "flat";
+  const savedTheme = globalSettings.ui_theme || "soft";
   const savedPalette = globalSettings.ui_palette || "ammps";
   if(document.documentElement.dataset.theme !== savedTheme || (document.documentElement.dataset.palette || "ammps") !== savedPalette){
     applyUiTheme(savedTheme);
@@ -3526,6 +3540,7 @@ const ROLE_LABELS = {admin:"Administrateur", hotliner:"Hotliner", superviseur:"S
 function applyUserMenu(){
   document.getElementById("userMenuName").textContent = currentUser.name;
   document.getElementById("userMenuRole").textContent = ROLE_LABELS[currentUser.role] || currentUser.role;
+  document.getElementById("shareSanadBtn").style.display = currentUser.role === "admin" ? "" : "none";
 }
 
 async function startApp(){
@@ -4443,5 +4458,91 @@ document.addEventListener("keydown", (e)=>{
     if(activeTab === "dashboard") document.getElementById("pdfBtn")?.click();
     else if(activeTab === "m-dashboard") document.getElementById("mPdfBtn")?.click();
     else if(activeTab === "p-dashboard") document.getElementById("pPdfBtn")?.click();
+  }
+});
+
+// ============================================================
+// PARTAGE SANAD SUR LE RÉSEAU LOCAL
+// ============================================================
+document.getElementById("shareSanadBtn")?.addEventListener("click", async ()=>{
+  document.getElementById("shareSanadOverlay").style.display = "flex";
+  document.getElementById("shareRestartHint").style.display = "none";
+  try{
+    const res = await fetch("/api/system/network-info");
+    const info = await res.json();
+    document.getElementById("shareModeLocal").checked = !info.network_enabled;
+    document.getElementById("shareModeNetwork").checked = info.network_enabled;
+    document.getElementById("sharePortInput").value = info.configured_port;
+    updateShareLinkBox(info.network_enabled, info.share_url || `http://${info.lan_ip}:${info.configured_port}`);
+  } catch(e){
+    toast("Impossible de récupérer les informations réseau");
+  }
+});
+
+document.getElementById("closeShareSanadBtn")?.addEventListener("click", ()=>{
+  document.getElementById("shareSanadOverlay").style.display = "none";
+});
+
+function updateShareLinkBox(enabled, url){
+  const box = document.getElementById("shareLinkBox");
+  const input = document.getElementById("shareLinkValue");
+  box.style.display = enabled ? "" : "none";
+  if(enabled) input.value = url;
+}
+
+document.querySelectorAll('input[name="shareMode"]').forEach(r=>{
+  r.addEventListener("change", async ()=>{
+    const enabled = document.getElementById("shareModeNetwork").checked;
+    if(enabled){
+      try{
+        const res = await fetch("/api/system/network-info");
+        const info = await res.json();
+        const port = document.getElementById("sharePortInput").value || info.configured_port;
+        updateShareLinkBox(true, `http://${info.lan_ip}:${port}`);
+      } catch(e){ /* silencieux */ }
+    } else {
+      updateShareLinkBox(false, "");
+    }
+  });
+});
+
+document.getElementById("sharePortInput")?.addEventListener("input", async ()=>{
+  if(!document.getElementById("shareModeNetwork").checked) return;
+  try{
+    const res = await fetch("/api/system/network-info");
+    const info = await res.json();
+    const port = document.getElementById("sharePortInput").value || info.configured_port;
+    updateShareLinkBox(true, `http://${info.lan_ip}:${port}`);
+  } catch(e){ /* silencieux */ }
+});
+
+document.getElementById("copyShareLinkBtn")?.addEventListener("click", ()=>{
+  const input = document.getElementById("shareLinkValue");
+  input.select();
+  navigator.clipboard?.writeText(input.value).then(()=> toast("Lien copié")).catch(()=>{
+    document.execCommand("copy"); toast("Lien copié");
+  });
+});
+
+document.getElementById("saveShareSanadBtn")?.addEventListener("click", async ()=>{
+  const host = document.getElementById("shareModeNetwork").checked ? "0.0.0.0" : "127.0.0.1";
+  const port = parseInt(document.getElementById("sharePortInput").value, 10) || 5050;
+  try{
+    const res = await fetch("/api/system/network-config", {
+      method: "POST", headers: {"Content-Type": "application/json"},
+      body: JSON.stringify({host, port}),
+    });
+    const data = await res.json();
+    if(data.ok){
+      const hint = document.getElementById("shareRestartHint");
+      hint.style.display = "";
+      hint.textContent = "✅ Paramètres enregistrés. Fermez la fenêtre du terminal et relancez \"python app.py\" pour qu'ils prennent effet.";
+      if(data.share_url) updateShareLinkBox(true, data.share_url);
+      toast("Paramètres réseau enregistrés — redémarrage requis");
+    } else {
+      toast(data.error || "Erreur lors de l'enregistrement");
+    }
+  } catch(e){
+    toast("Erreur réseau lors de l'enregistrement");
   }
 });

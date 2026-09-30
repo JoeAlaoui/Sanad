@@ -237,6 +237,13 @@ def auth_gate():
             return
         if request.method == "GET" and (path == "/api/global-settings" or re.match(r"^/api/[^/]+/settings$", path)):
             return
+        # Vue lecture seule sur le Dashboard et la Vue annuelle Tarkhiss (jamais Moussanada/PCHC,
+        # jamais d'écriture) — la sidebar ne montre que ces deux onglets au hotliner, mais on
+        # verrouille aussi côté API pour ne pas dépendre uniquement du frontend.
+        if request.method == "GET" and re.match(r"^/api/tarkhiss/(month|heatmap|heatmap-png|call-heatmap-hourly-png|"
+                                                  r"email-heatmap-hourly-png|call-meta|call-meta-stats|email-meta|"
+                                                  r"email-meta-stats|months-list|annual|last-sync)(/.*)?$", path):
+            return
         return jsonify({"error": "forbidden"}), 403
     if role == "superviseur":
         if path.startswith("/api/notes"):
@@ -799,8 +806,9 @@ def tarkhiss_call_heatmap_hourly_png(ym):
     meta = _load("tarkhiss", "meta_calls", ym, {})
     if not meta:
         abort(404)
-    buf = chart_heatmap_png(meta["hourly"]["in"], ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"],
-                             [str(h) for h in range(24)], "Appels reçus — jour × heure",
+    sub, hrs = tm.business_hours_view(meta["hourly"]["in"])
+    buf = chart_heatmap_png(sub, ["Lun", "Mar", "Mer", "Jeu", "Ven"], hrs,
+                             "Appels reçus — jour × heure (jours ouvrés, 08h-17h)",
                              figsize=(9, 3), cbar_label="Nb d'appels")
     return send_file(buf, mimetype="image/png")
 
@@ -810,8 +818,9 @@ def tarkhiss_email_heatmap_hourly_png(ym):
     meta = _load("tarkhiss", "meta_emails", ym, {})
     if not meta:
         abort(404)
-    buf = chart_heatmap_png(meta["hourly"]["received"], ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"],
-                             [str(h) for h in range(24)], "Emails reçus — jour × heure",
+    sub, hrs = tm.business_hours_view(meta["hourly"]["received"])
+    buf = chart_heatmap_png(sub, ["Lun", "Mar", "Mer", "Jeu", "Ven"], hrs,
+                             "Emails reçus — jour × heure (jours ouvrés, 08h-17h)",
                              figsize=(9, 3), cbar_label="Nb d'emails")
     return send_file(buf, mimetype="image/png")
 
@@ -918,7 +927,7 @@ def load_global_settings():
         "sanad_logo_filename": None,    # logo SANAD (identité plateforme)
         "app_name": "SANAD",
         "app_subtitle": "Plateforme de pilotage du Helpdesk SI",
-        "ui_theme": "flat",             # "flat", "soft", "neu" ou "clay" — écran uniquement, sans effet sur PDF/Excel
+        "ui_theme": "soft",             # soft / adp / pastel / ammps-vert / ammps-moderne — écran uniquement, sans effet sur PDF/Excel
         "ui_palette": "ammps",          # "ammps", "ocean", "emerald", "slate", "violet", "crimson"
         # Grands titres des rapports (email/PDF/Excel/PPTX) — édition avancée, Administration
         "report_title_tarkhiss": "Rapport Support Tarkhiss",
@@ -3254,9 +3263,10 @@ def build_tarkhiss_advanced_stats_html(meta_calls, meta_emails, show_contact_nam
         c = meta_calls.get("counts", {})
         dur = meta_calls.get("duration", {})
         cb = meta_calls.get("callback", {})
+        _sub, _hrs = tm.business_hours_view(meta_calls["hourly"]["in"])
         hourly_png = base64.b64encode(chart_heatmap_png(
-            meta_calls["hourly"]["in"], ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"], [str(h) for h in range(24)],
-            "Appels reçus — répartition jour × heure", figsize=(9.5, 3), cbar_label="Nb d'appels",
+            _sub, ["Lun", "Mar", "Mer", "Jeu", "Ven"], _hrs,
+            "Appels reçus — répartition jour × heure (jours ouvrés, 08h-17h)", figsize=(9.5, 3), cbar_label="Nb d'appels",
         ).read()).decode()
         callers_rows = [[(e["label"] if show_contact_names else mask_call_label(e)), e["calls"], e["missed"], format_hms(e["duration_sec"])]
                         for e in meta_calls.get("top_callers", [])[:8]]
@@ -3279,9 +3289,10 @@ def build_tarkhiss_advanced_stats_html(meta_calls, meta_emails, show_contact_nam
 
     if meta_emails:
         resp = meta_emails.get("response", {})
+        _sub, _hrs = tm.business_hours_view(meta_emails["hourly"]["received"])
         hourly_png = base64.b64encode(chart_heatmap_png(
-            meta_emails["hourly"]["received"], ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"], [str(h) for h in range(24)],
-            "Emails reçus — répartition jour × heure", figsize=(9.5, 3), cbar_label="Nb d'emails",
+            _sub, ["Lun", "Mar", "Mer", "Jeu", "Ven"], _hrs,
+            "Emails reçus — répartition jour × heure (jours ouvrés, 08h-17h)", figsize=(9.5, 3), cbar_label="Nb d'emails",
         ).read()).decode()
         subj_rows = [[s["subject"][:70], s["count"]] for s in meta_emails.get("top_subjects", [])[:6]]
         words_line = " · ".join(f"{w['word']} ({w['count']})" for w in meta_emails.get("top_words", [])[:10])
@@ -4146,8 +4157,9 @@ def write_tarkhiss_advanced_sheet_xw(workbook, fmts, ym):
         for e in meta_calls.get("top_callers", []):
             label = e["label"] if show_names else mask_call_label(e)
             ws.write(row, 0, label); ws.write(row, 1, e["calls"]); ws.write(row, 2, e["missed"]); ws.write(row, 3, format_hms(e["duration_sec"])); row += 1
-        png = chart_heatmap_png(meta_calls["hourly"]["in"], ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"],
-                                 [str(h) for h in range(24)], "Appels reçus — jour × heure", figsize=(9, 3.2), cbar_label="Nb d'appels")
+        _csub, _chrs = tm.business_hours_view(meta_calls["hourly"]["in"])
+        png = chart_heatmap_png(_csub, ["Lun", "Mar", "Mer", "Jeu", "Ven"], _chrs,
+                                 "Appels reçus — jour × heure (jours ouvrés, 08h-17h)", figsize=(9, 3.2), cbar_label="Nb d'appels")
         xlsx_insert_png(ws, row + 1, 0, png, scale=0.85)
         row += 20
 
@@ -4178,11 +4190,93 @@ def write_tarkhiss_advanced_sheet_xw(workbook, fmts, ym):
         ws.write(row, 0, "Top destinataires", fmts["header"]); ws.write(row, 1, "Emails", fmts["header"]); row += 1
         for r in meta_emails.get("top_recipients", []):
             ws.write(row, 0, r["name"] if show_names else "•••• (masqué)"); ws.write(row, 1, r["count"]); row += 1
-        png = chart_heatmap_png(meta_emails["hourly"]["received"], ["Lun", "Mar", "Mer", "Jeu", "Ven", "Sam", "Dim"],
-                                 [str(h) for h in range(24)], "Emails reçus — jour × heure", figsize=(9, 3.2), cbar_label="Nb d'emails")
+        _esub, _ehrs = tm.business_hours_view(meta_emails["hourly"]["received"])
+        png = chart_heatmap_png(_esub, ["Lun", "Mar", "Mer", "Jeu", "Ven"], _ehrs,
+                                 "Emails reçus — jour × heure (jours ouvrés, 08h-17h)", figsize=(9, 3.2), cbar_label="Nb d'emails")
         xlsx_insert_png(ws, row + 1, 0, png, scale=0.85)
 
 
+def get_lan_ip():
+    """Meilleure estimation de l'adresse IP de ce poste sur le réseau local (celle à utiliser
+    dans le lien de partage). N'émet aucun trafic réel (connect() UDP local à la pile réseau) ;
+    repli sur 127.0.0.1 si la machine n'a pas d'interface réseau exploitable (sandbox, offline)."""
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("10.255.255.255", 1))
+        return s.getsockname()[0]
+    except Exception:
+        try:
+            return socket.gethostbyname(socket.gethostname())
+        except Exception:
+            return "127.0.0.1"
+    finally:
+        s.close()
+
+
+def network_config_file():
+    return os.path.join(DATA_DIR, "network_config.json")
+
+
+def load_network_config():
+    p = network_config_file()
+    default = {"host": "127.0.0.1", "port": 5050}
+    if os.path.exists(p):
+        try:
+            with open(p, "r", encoding="utf-8") as f:
+                cfg = json.load(f)
+            default.update({k: v for k, v in cfg.items() if k in ("host", "port")})
+        except Exception:
+            pass
+    return default
+
+
+@app.route("/api/system/network-info")
+def system_network_info():
+    u = current_user()
+    if not u or u["role"] != "admin":
+        return jsonify({"error": "forbidden"}), 403
+    cfg = load_network_config()
+    lan_ip = get_lan_ip()
+    return jsonify({
+        "configured_host": cfg["host"], "configured_port": cfg["port"],
+        "lan_ip": lan_ip,
+        "share_url": f"http://{lan_ip}:{cfg['port']}" if cfg["host"] == "0.0.0.0" else None,
+        "network_enabled": cfg["host"] == "0.0.0.0",
+    })
+
+
+@app.route("/api/system/network-config", methods=["POST"])
+def system_network_config_save():
+    u = current_user()
+    if not u or u["role"] != "admin":
+        return jsonify({"error": "forbidden"}), 403
+    body = request.json or {}
+    host = body.get("host")
+    if host not in ("127.0.0.1", "0.0.0.0"):
+        return jsonify({"error": "host doit être 127.0.0.1 ou 0.0.0.0"}), 400
+    try:
+        port = int(body.get("port", 5050))
+        if not (1 <= port <= 65535):
+            raise ValueError
+    except (TypeError, ValueError):
+        return jsonify({"error": "Port invalide (doit être un nombre entre 1 et 65535)"}), 400
+    os.makedirs(DATA_DIR, exist_ok=True)
+    write_json_safely(network_config_file(), {"host": host, "port": port})
+    log_audit("network_config_change", {"host": host, "port": port})
+    lan_ip = get_lan_ip()
+    return jsonify({
+        "ok": True, "host": host, "port": port,
+        "share_url": f"http://{lan_ip}:{port}" if host == "0.0.0.0" else None,
+        "restart_required": True,
+    })
+
+
 if __name__ == "__main__":
-    print("Helpdesk Dashboard -> http://127.0.0.1:5050")
-    app.run(host="127.0.0.1", port=5050, debug=True)
+    net_cfg = load_network_config()
+    host, port = net_cfg["host"], net_cfg["port"]
+    if host == "0.0.0.0":
+        print(f"Helpdesk Dashboard -> http://127.0.0.1:{port}  (accessible aussi via http://{get_lan_ip()}:{port} sur le réseau local)")
+    else:
+        print(f"Helpdesk Dashboard -> http://127.0.0.1:{port}")
+    app.run(host=host, port=port, debug=True)
