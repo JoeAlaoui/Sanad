@@ -176,20 +176,22 @@
         </div>
         <div style="padding:0 4px;">
           <p class="hint" style="margin-bottom:14px;">
-            Par défaut, SANAD n'est accessible que depuis cet ordinateur (<code>127.0.0.1</code>).
-            Pour qu'un collègue connecté au <strong>même réseau local</strong> (même Wi-Fi/switch
-            que ce poste) puisse y accéder avec le lien ci-dessous, activez le partage réseau.
-            Chaque utilisateur devra se connecter avec son propre compte SANAD.
+            Par défaut, SANAD n'est accessible que depuis cet ordinateur. Pour qu'un collègue
+            connecté au <strong>même réseau local</strong> (même Wi-Fi/switch que ce poste)
+            puisse y accéder avec le lien ci-dessous, activez le partage réseau. Chaque
+            utilisateur devra se connecter avec son propre compte SANAD. Ce changement
+            s'applique <strong>immédiatement, sans redémarrage</strong>.
           </p>
           <div class="form-row">
-            <label><input type="radio" name="shareMode" value="local" id="shareModeLocal"> Local uniquement (127.0.0.1) — recommandé par défaut</label>
+            <label><input type="radio" name="shareMode" value="local" id="shareModeLocal"> Local uniquement — recommandé par défaut</label>
           </div>
           <div class="form-row">
-            <label><input type="radio" name="shareMode" value="network" id="shareModeNetwork"> Accessible sur le réseau local (0.0.0.0)</label>
+            <label><input type="radio" name="shareMode" value="network" id="shareModeNetwork"> Accessible sur le réseau local</label>
           </div>
           <div class="form-row">
             <label for="sharePortInput">Port</label>
             <input type="text" id="sharePortInput" placeholder="5050" style="max-width:120px;">
+            <p class="hint" style="margin-top:4px;">Changer le port redémarre automatiquement l'application (quelques secondes d'interruption) — laisser inchangé pour une bascule instantanée.</p>
           </div>
           <div class="card" id="shareLinkBox" style="margin:14px 0;display:none;">
             <div class="hint" style="margin-bottom:6px;">Lien à transmettre à vos collègues sur ce réseau :</div>
@@ -836,38 +838,7 @@
           </div>
         </div>
         <div class="form-row">
-          <label>Thème visuel de l'écran (n'affecte pas les PDF/Excel/PPTX)</label>
-          <div class="theme-choice">
-            <label class="theme-option">
-              <input type="radio" name="uiTheme" value="soft" id="themeSoftInput">
-              <span class="theme-swatch theme-swatch--soft"></span>
-              <span>Neumorphism doux</span>
-            </label>
-            <label class="theme-option">
-              <input type="radio" name="uiTheme" value="adp" id="themeAdpInput">
-              <span class="theme-swatch theme-swatch--adp"></span>
-              <span>Ant Design Pro</span>
-            </label>
-            <label class="theme-option">
-              <input type="radio" name="uiTheme" value="pastel" id="themePastelInput">
-              <span class="theme-swatch theme-swatch--pastel"></span>
-              <span>Pastel</span>
-            </label>
-            <label class="theme-option">
-              <input type="radio" name="uiTheme" value="ammps-vert" id="themeAmmpsVertInput">
-              <span class="theme-swatch theme-swatch--ammps-vert"></span>
-              <span>AMMPS Vert Institutionnel</span>
-            </label>
-            <label class="theme-option">
-              <input type="radio" name="uiTheme" value="ammps-moderne" id="themeAmmpsModerneInput">
-              <span class="theme-swatch theme-swatch--ammps-moderne"></span>
-              <span>AMMPS Moderne 2026</span>
-            </label>
-          </div>
-          <p class="hint" style="margin-top:8px;">"Neumorphism doux" est la recommandation par défaut. "Ant Design Pro", "Pastel", "AMMPS Vert Institutionnel" et "AMMPS Moderne 2026" ont chacun leur propre teinte fixe et leur propre style de cartes/menus/sidebar (la palette de couleur ci-dessous ne s'applique pas par-dessus ces quatre thèmes).</p>
-        </div>
-        <div class="form-row">
-          <label>Palette de couleur (indépendante du thème — Neumorphism complet/Claymorphism gardent leur propre teinte)</label>
+          <label>Palette de couleur de l'écran (n'affecte pas les PDF/Excel/PPTX)</label>
           <div class="theme-choice">
             <label class="theme-option"><input type="radio" name="uiPalette" value="ammps" id="palAmmpsInput"><span class="theme-swatch" style="background:#0B4965;"></span><span>AMMPS (défaut)</span></label>
             <label class="theme-option"><input type="radio" name="uiPalette" value="ocean" id="palOceanInput"><span class="theme-swatch" style="background:#0E5C86;"></span><span>Océan</span></label>

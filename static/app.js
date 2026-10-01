@@ -1996,7 +1996,6 @@ document.getElementById("refreshRawImportsBtn")?.addEventListener("click", loadR
 async function loadGlobalSettings(){
   const res = await fetch("/api/global-settings");
   globalSettings = await res.json();
-  applyUiTheme(globalSettings.ui_theme || "soft");
   applyUiPalette(globalSettings.ui_palette || "ammps");
   applyAppBranding();
 }
@@ -2013,14 +2012,6 @@ function applyAppBranding(){
   if(logoText) logoText.textContent = appName;
 }
 
-function applyUiTheme(theme){
-  const valid = ["soft", "adp", "pastel", "ammps-vert", "ammps-moderne"];
-  document.documentElement.dataset.theme = valid.includes(theme) ? theme : "soft";
-  document.querySelectorAll('input[name="uiTheme"]').forEach(input=>{
-    input.checked = (input.value === theme) || (input.value === "soft" && !valid.includes(theme));
-  });
-}
-
 function applyUiPalette(palette){
   const valid = ["ammps", "ocean", "emerald", "slate", "violet", "crimson"];
   const p = valid.includes(palette) ? palette : "ammps";
@@ -2031,21 +2022,16 @@ function applyUiPalette(palette){
   });
 }
 
-// Aperçu live du thème/palette : chaque clic sur une option l'applique immédiatement à
-// l'écran entier, sans attendre "Enregistrer". Si l'admin quitte l'onglet sans enregistrer,
-// on revient au thème/palette réellement sauvegardés (voir activateTab / revertThemePreviewIfUnsaved).
-document.querySelectorAll('input[name="uiTheme"]').forEach(r=>{
-  r.addEventListener("change", ()=> applyUiTheme(r.value));
-});
+// Aperçu live de la palette : chaque clic l'applique immédiatement à l'écran entier, sans
+// attendre "Enregistrer". Si l'admin quitte l'onglet sans enregistrer, on revient à la palette
+// réellement sauvegardée (voir activateTab / revertThemePreviewIfUnsaved).
 document.querySelectorAll('input[name="uiPalette"]').forEach(r=>{
   r.addEventListener("change", ()=> applyUiPalette(r.value));
 });
 
 function revertThemePreviewIfUnsaved(){
-  const savedTheme = globalSettings.ui_theme || "soft";
   const savedPalette = globalSettings.ui_palette || "ammps";
-  if(document.documentElement.dataset.theme !== savedTheme || (document.documentElement.dataset.palette || "ammps") !== savedPalette){
-    applyUiTheme(savedTheme);
+  if((document.documentElement.dataset.palette || "ammps") !== savedPalette){
     applyUiPalette(savedPalette);
   }
 }
@@ -2091,10 +2077,8 @@ document.getElementById("addContactBtn").addEventListener("click", async ()=>{
 
 document.getElementById("saveGlobalSettingsBtn").addEventListener("click", async ()=>{
   globalSettings.agency_name = document.getElementById("agencyNameInput").value.trim();
-  globalSettings.ui_theme = document.querySelector('input[name="uiTheme"]:checked')?.value || "flat";
   globalSettings.ui_palette = document.querySelector('input[name="uiPalette"]:checked')?.value || "ammps";
-  await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({agency_name: globalSettings.agency_name, ui_theme: globalSettings.ui_theme, ui_palette: globalSettings.ui_palette})});
-  applyUiTheme(globalSettings.ui_theme);
+  await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({agency_name: globalSettings.agency_name, ui_palette: globalSettings.ui_palette})});
   applyUiPalette(globalSettings.ui_palette);
   toast("Paramètres généraux enregistrés");
 });
@@ -4527,22 +4511,52 @@ document.getElementById("copyShareLinkBtn")?.addEventListener("click", ()=>{
 document.getElementById("saveShareSanadBtn")?.addEventListener("click", async ()=>{
   const host = document.getElementById("shareModeNetwork").checked ? "0.0.0.0" : "127.0.0.1";
   const port = parseInt(document.getElementById("sharePortInput").value, 10) || 5050;
+  const btn = document.getElementById("saveShareSanadBtn");
+  const hint = document.getElementById("shareRestartHint");
+  btn.disabled = true;
   try{
     const res = await fetch("/api/system/network-config", {
       method: "POST", headers: {"Content-Type": "application/json"},
       body: JSON.stringify({host, port}),
     });
     const data = await res.json();
-    if(data.ok){
-      const hint = document.getElementById("shareRestartHint");
-      hint.style.display = "";
-      hint.textContent = "✅ Paramètres enregistrés. Fermez la fenêtre du terminal et relancez \"python app.py\" pour qu'ils prennent effet.";
-      if(data.share_url) updateShareLinkBox(true, data.share_url);
-      toast("Paramètres réseau enregistrés — redémarrage requis");
-    } else {
+    if(!data.ok){
       toast(data.error || "Erreur lors de l'enregistrement");
+      btn.disabled = false;
+      return;
+    }
+    if(data.share_url) updateShareLinkBox(true, data.share_url); else updateShareLinkBox(false, "");
+    if(data.restart_scheduled){
+      hint.style.display = "";
+      hint.textContent = "🔄 Redémarrage automatique en cours… (quelques secondes)";
+      await waitForServerRestart(host === "0.0.0.0" ? window.location.hostname : "127.0.0.1", port);
+      hint.textContent = "✅ Redémarré — nouvelle page en cours de chargement…";
+      window.location.href = `http://${host === "0.0.0.0" ? window.location.hostname : "127.0.0.1"}:${port}/`;
+    } else {
+      hint.style.display = "";
+      hint.textContent = "✅ Appliqué immédiatement — aucun redémarrage nécessaire.";
+      toast("Paramètres réseau mis à jour");
+      btn.disabled = false;
     }
   } catch(e){
     toast("Erreur réseau lors de l'enregistrement");
+    btn.disabled = false;
   }
 });
+
+// Sonde le nouveau port jusqu'à ce que le serveur (redémarré) réponde à nouveau, pour ne
+// rediriger le navigateur qu'une fois l'application vraiment prête (évite un écran d'erreur
+// de connexion pendant les ~1-2 secondes de redémarrage).
+async function waitForServerRestart(hostname, port, maxWaitMs=20000){
+  const start = Date.now();
+  await new Promise(r=>setTimeout(r, 1500));  // laisse le temps au process de quitter avant de sonder
+  while(Date.now() - start < maxWaitMs){
+    try{
+      const res = await fetch(`http://${hostname}:${port}/`, {mode: "no-cors"});
+      return true;
+    } catch(e){
+      await new Promise(r=>setTimeout(r, 800));
+    }
+  }
+  return false;
+}

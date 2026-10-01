@@ -11,6 +11,8 @@ import os
 import platform
 import re
 import shutil
+import sys
+import time
 import html as html_module
 from glpi_import import (
     glpi_cell_to_seconds, decimal_hours_cell, format_dh, normalize_header,
@@ -54,6 +56,13 @@ BACKUP_RETENTION_PER_FILE = 20
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
+
+# État réseau en mémoire — piloté par /api/system/network-config. Le serveur écoute TOUJOURS sur
+# 0.0.0.0 (voir le lancement en bas de fichier) ; c'est ce flag, vérifié à chaque requête dans
+# auth_gate, qui décide si une IP distante est acceptée ou non. Ainsi, basculer local/réseau est
+# instantané (aucun redémarrage) — seul un changement de PORT nécessite un vrai redémarrage du
+# processus, que l'application effectue alors elle-même (voir restart_app_async()).
+NETWORK_STATE = {"enabled": False, "port": 5050}
 
 
 def write_json_safely(path, data):
@@ -215,6 +224,11 @@ def current_user():
 
 @app.before_request
 def auth_gate():
+    # Garde réseau : le processus écoute toujours sur 0.0.0.0, donc c'est ce contrôle qui fait
+    # réellement office de "local uniquement" tant que le partage n'est pas activé. Whitelist
+    # loopback (IPv4/IPv6) uniquement. Vérifié avant tout autre traitement, y compris "/".
+    if not NETWORK_STATE["enabled"] and request.remote_addr not in ("127.0.0.1", "::1", "localhost"):
+        return jsonify({"error": "SANAD n'est accessible que depuis cet ordinateur pour le moment."}), 403
     path = request.path
     if path == "/" or path.startswith("/static/") or path.startswith("/api/auth/"):
         return
@@ -927,7 +941,8 @@ def load_global_settings():
         "sanad_logo_filename": None,    # logo SANAD (identité plateforme)
         "app_name": "SANAD",
         "app_subtitle": "Plateforme de pilotage du Helpdesk SI",
-        "ui_theme": "soft",             # soft / adp / pastel / ammps-vert / ammps-moderne — écran uniquement, sans effet sur PDF/Excel
+        # Thème unique (Neumorphism doux) — plus de sélection de thème, seule la palette de
+        # couleur reste configurable (ui_palette, ci-dessous).
         "ui_palette": "ammps",          # "ammps", "ocean", "emerald", "slate", "violet", "crimson"
         # Grands titres des rapports (email/PDF/Excel/PPTX) — édition avancée, Administration
         "report_title_tarkhiss": "Rapport Support Tarkhiss",
@@ -4231,18 +4246,32 @@ def load_network_config():
     return default
 
 
+def restart_app_async(delay=1.2):
+    """Relance le processus SANAD lui-même (même interpréteur, mêmes arguments), à utiliser
+    uniquement quand un changement de PORT impose un vrai redémarrage (rebind du socket —
+    impossible à chaud). Lancé dans un thread après un court délai pour laisser le temps à la
+    réponse HTTP en cours d'atteindre le navigateur avant que le processus ne soit remplacé."""
+    import threading
+
+    def _do_restart():
+        time.sleep(delay)
+        os.execv(sys.executable, [sys.executable] + sys.argv)
+
+    threading.Thread(target=_do_restart, daemon=True).start()
+
+
 @app.route("/api/system/network-info")
 def system_network_info():
     u = current_user()
     if not u or u["role"] != "admin":
         return jsonify({"error": "forbidden"}), 403
-    cfg = load_network_config()
     lan_ip = get_lan_ip()
+    port = NETWORK_STATE["port"]
     return jsonify({
-        "configured_host": cfg["host"], "configured_port": cfg["port"],
+        "configured_port": port,
         "lan_ip": lan_ip,
-        "share_url": f"http://{lan_ip}:{cfg['port']}" if cfg["host"] == "0.0.0.0" else None,
-        "network_enabled": cfg["host"] == "0.0.0.0",
+        "share_url": f"http://{lan_ip}:{port}" if NETWORK_STATE["enabled"] else None,
+        "network_enabled": NETWORK_STATE["enabled"],
     })
 
 
@@ -4256,27 +4285,42 @@ def system_network_config_save():
     if host not in ("127.0.0.1", "0.0.0.0"):
         return jsonify({"error": "host doit être 127.0.0.1 ou 0.0.0.0"}), 400
     try:
-        port = int(body.get("port", 5050))
+        port = int(body.get("port", NETWORK_STATE["port"]))
         if not (1 <= port <= 65535):
             raise ValueError
     except (TypeError, ValueError):
         return jsonify({"error": "Port invalide (doit être un nombre entre 1 et 65535)"}), 400
+
+    port_changed = port != NETWORK_STATE["port"]
     os.makedirs(DATA_DIR, exist_ok=True)
     write_json_safely(network_config_file(), {"host": host, "port": port})
-    log_audit("network_config_change", {"host": host, "port": port})
+    log_audit("network_config_change", {"host": host, "port": port, "restart": port_changed})
+
+    # Bascule local/réseau : appliquée immédiatement (le serveur écoute déjà sur 0.0.0.0 — voir
+    # auth_gate). Seul un changement de port force un vrai redémarrage, déclenché par l'app.
+    NETWORK_STATE["enabled"] = (host == "0.0.0.0")
     lan_ip = get_lan_ip()
+    if port_changed:
+        restart_app_async()
+    else:
+        NETWORK_STATE["port"] = port  # déjà à jour (pas de changement de port)
     return jsonify({
         "ok": True, "host": host, "port": port,
         "share_url": f"http://{lan_ip}:{port}" if host == "0.0.0.0" else None,
-        "restart_required": True,
+        "restart_scheduled": port_changed,
     })
 
 
 if __name__ == "__main__":
     net_cfg = load_network_config()
-    host, port = net_cfg["host"], net_cfg["port"]
-    if host == "0.0.0.0":
-        print(f"Helpdesk Dashboard -> http://127.0.0.1:{port}  (accessible aussi via http://{get_lan_ip()}:{port} sur le réseau local)")
+    NETWORK_STATE["enabled"] = (net_cfg["host"] == "0.0.0.0")
+    NETWORK_STATE["port"] = net_cfg["port"]
+    lan_ip = get_lan_ip()
+    if NETWORK_STATE["enabled"]:
+        print(f"Helpdesk Dashboard -> http://127.0.0.1:{net_cfg['port']}  (accessible aussi via http://{lan_ip}:{net_cfg['port']} sur le réseau local)")
     else:
-        print(f"Helpdesk Dashboard -> http://127.0.0.1:{port}")
-    app.run(host=host, port=port, debug=True)
+        print(f"Helpdesk Dashboard -> http://127.0.0.1:{net_cfg['port']}  (accès réseau local désactivé — bouton \"Partager SANAD\")")
+    # Toujours 0.0.0.0 : le contrôle "local uniquement" est fait au niveau applicatif
+    # (NETWORK_STATE, voir auth_gate), pas au niveau du socket, pour permettre la bascule
+    # local/réseau à chaud sans redémarrage.
+    app.run(host="0.0.0.0", port=net_cfg["port"], debug=True, use_reloader=False)

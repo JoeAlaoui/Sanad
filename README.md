@@ -95,39 +95,41 @@ week-ends et heures creuses compris.
 
 ## 5. Partager SANAD sur le réseau local
 
-Bouton **🔗 Partager SANAD** (menu utilisateur, réservé à l'administrateur) : bascule
-l'application entre accès **local uniquement** (`127.0.0.1`, défaut) et accès **réseau local**
-(`0.0.0.0`), avec un port configurable. Une fois enregistré, la fenêtre affiche le lien à
-transmettre (ex. `http://192.168.1.42:5050`) basé sur l'adresse IP détectée du poste. Chaque
-collègue qui ouvre ce lien depuis le **même réseau** (même Wi-Fi/switch) arrive sur l'écran de
-connexion SANAD et utilise son propre compte.
+Bouton **🔗 Partager SANAD** (menu utilisateur, réservé à l'administrateur) : bascule entre accès
+**local uniquement** (défaut) et accès **réseau local**, avec un port configurable. Une fois
+enregistré, la fenêtre affiche le lien à transmettre (ex. `http://192.168.1.42:5050`) basé sur
+l'IP détectée du poste. Chaque collègue qui ouvre ce lien depuis le **même réseau** (même
+Wi-Fi/switch) arrive sur l'écran de connexion SANAD et utilise son propre compte.
 
-**⚠️ Redémarrage requis** : Flask ne peut pas changer d'adresse d'écoute à chaud — après avoir
-enregistré, fermez la fenêtre du terminal et relancez `python app.py` pour que le nouveau
-réglage s'applique. Le réglage est conservé dans `data/network_config.json`.
+**Bascule instantanée, sans redémarrage** : le processus écoute en permanence sur toutes les
+interfaces ; c'est un contrôle applicatif (pas le système d'exploitation) qui refuse les
+connexions non locales tant que le partage n'est pas activé. Activer/désactiver le partage
+réseau prend donc effet immédiatement. **Seul un changement de port** force un vrai redémarrage
+du processus — SANAD le fait alors lui-même automatiquement (quelques secondes d'interruption,
+reconnexion automatique du navigateur), sans jamais vous demander de relancer `python app.py`
+manuellement. Le réglage est conservé dans `data/network_config.json`.
 
 **⚠️ Sécurité** : le mode réseau expose SANAD à quiconque est connecté au même réseau local (pas
 à Internet). L'authentification et les rôles habituels restent en vigueur ; à réserver à un
-réseau de confiance (bureau, VPN d'entreprise).
+réseau de confiance (bureau, VPN d'entreprise). Techniquement, le port reste toujours ouvert sur
+toutes les interfaces réseau de la machine (nécessaire pour la bascule instantanée) — seul
+l'accès applicatif est refusé en mode local, ce qui diffère d'un port réellement fermé.
 
 ## 6. Personnalisation de l'écran (Administration)
 
-- **5 thèmes visuels**, chacun avec sa propre charte cartes/boutons/tableaux/sidebar (pas
-  seulement une couleur) : Neumorphism doux (recommandé, défaut), Ant Design Pro (bleu #1890FF,
-  sidebar marine très sombre), Pastel (sidebar blanche, cartes KPI pastel rotatives, boutons
-  pilule violets — d'après le kit fourni), AMMPS Vert Institutionnel (vert #0D4823/rouge
-  #DF2328, cartes à coins moyens — d'après `ammps-inspired-theme-kit`), AMMPS Moderne 2026 (vert
-  très sombre #052E24 + accent citron vert, coins très arrondis, sidebar foncée — d'après
-  `ammps-modern-2026-theme-kit`). Les kits sources sont conservés dans
-  `static/design-kits/` à titre de référence.
+- **Un seul design, retravaillé en profondeur** (Neumorphism doux — plus de sélection de thème) :
+  sidebar à indicateur d'onglet actif par liseré coloré (plus lisible qu'un bloc plein), cartes
+  KPI avec barre d'accent supérieure selon le statut (normal/alerte/succès), tableaux avec
+  lignes zébrées et survol, boutons et champs avec retour visuel au clic/focus, ombres douces
+  cohérentes sur l'ensemble des cartes. Les kits de thèmes explorés en cours de route (Ant
+  Design Pro, Pastel, AMMPS Vert Institutionnel, AMMPS Moderne 2026) sont conservés dans
+  `static/design-kits/` à titre de référence, mais ne sont plus proposés comme choix actifs.
 - **Aperçu live** : cliquer sur un thème ou une palette l'applique immédiatement à l'écran entier
   (avant même d'enregistrer), pour comparer sans aller-retour. Si vous quittez l'onglet
   Administration sans cliquer sur "Enregistrer", l'écran revient automatiquement au thème/palette
   réellement sauvegardés.
-- **6 palettes de couleur**, indépendantes du thème, mais utilisables uniquement avec
-  Neumorphism doux : AMMPS (défaut), Océan, Émeraude, Ardoise, Violet, Bordeaux. Ant Design Pro,
-  Pastel, AMMPS Vert Institutionnel et AMMPS Moderne 2026 gardent chacun leur teinte fixe (la
-  palette ne s'applique pas par-dessus ces quatre thèmes).
+- **6 palettes de couleur** restent configurables : AMMPS (défaut), Océan, Émeraude, Ardoise,
+  Violet, Bordeaux — avec aperçu live au clic, avant même d'enregistrer.
 - Ces réglages sont **purement visuels côté écran** : aucun effet sur les rapports
   PDF/Excel/PowerPoint, qui conservent toujours la charte AMMPS officielle.
 - **Navigation par mois** : flèches ←/→ à côté du sélecteur de mois pour avancer/reculer d'un
@@ -186,8 +188,11 @@ réseau de confiance (bureau, VPN d'entreprise).
 - **Thème Ant Design Pro**, aperçu live des thèmes/palettes, navigation par flèches ←/→ avec
   transition douce au changement de mois.
 - **Thèmes Pastel / AMMPS Vert Institutionnel / AMMPS Moderne 2026** (d'après kits fournis),
-  retrait de Flat/Neumorphism complet/Claymorphism, heatmap horaire recadrée aux horaires
-  d'ouverture, vue lecture seule Tarkhiss pour le hotliner, partage réseau local.
+  heatmap horaire recadrée aux horaires d'ouverture, vue lecture seule Tarkhiss pour le
+  hotliner, partage réseau local.
+- **Design unifié** : suppression de la sélection de thème (un seul design retravaillé —
+  sidebar, cartes, tableaux, boutons), partage réseau à bascule instantanée avec redémarrage
+  automatique géré par l'application (changement de port uniquement).
 
 ## 10. Limites connues (honnêteté sur les points non vérifiés)
 
