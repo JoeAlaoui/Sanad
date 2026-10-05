@@ -1662,7 +1662,9 @@ function setupEmailPanel(toListId="toCheckList", ccListId="ccCheckList", greetin
 
 document.getElementById("mailToggleBtn").addEventListener("click", ()=>{
   const panel = document.getElementById("emailPanel");
-  panel.style.display = panel.style.display === "none" ? "block" : "none";
+  const opening = panel.style.display === "none";
+  panel.style.display = opening ? "block" : "none";
+  if(opening) renderEmailSectionsGrid("tarkhiss", "tarkhissEmailSectionsGrid");
 });
 
 function getSelectedRecipients(toListId="toCheckList", ccListId="ccCheckList"){
@@ -1996,7 +1998,7 @@ document.getElementById("refreshRawImportsBtn")?.addEventListener("click", loadR
 async function loadGlobalSettings(){
   const res = await fetch("/api/global-settings");
   globalSettings = await res.json();
-  applyUiPalette(globalSettings.ui_palette || "ammps");
+  applyUiPalette(globalSettings.ui_palette || "zinc");
   applyAppBranding();
 }
 
@@ -2013,9 +2015,9 @@ function applyAppBranding(){
 }
 
 function applyUiPalette(palette){
-  const valid = ["ammps", "ocean", "emerald", "slate", "violet", "crimson"];
-  const p = valid.includes(palette) ? palette : "ammps";
-  if(p === "ammps") delete document.documentElement.dataset.palette;
+  const valid = ["zinc", "blue", "green", "orange", "violet", "rose"];
+  const p = valid.includes(palette) ? palette : "zinc";
+  if(p === "zinc") delete document.documentElement.dataset.palette;
   else document.documentElement.dataset.palette = p;
   document.querySelectorAll('input[name="uiPalette"]').forEach(input=>{
     input.checked = input.value === p;
@@ -2030,8 +2032,8 @@ document.querySelectorAll('input[name="uiPalette"]').forEach(r=>{
 });
 
 function revertThemePreviewIfUnsaved(){
-  const savedPalette = globalSettings.ui_palette || "ammps";
-  if((document.documentElement.dataset.palette || "ammps") !== savedPalette){
+  const savedPalette = globalSettings.ui_palette || "zinc";
+  if((document.documentElement.dataset.palette || "zinc") !== savedPalette){
     applyUiPalette(savedPalette);
   }
 }
@@ -2077,7 +2079,7 @@ document.getElementById("addContactBtn").addEventListener("click", async ()=>{
 
 document.getElementById("saveGlobalSettingsBtn").addEventListener("click", async ()=>{
   globalSettings.agency_name = document.getElementById("agencyNameInput").value.trim();
-  globalSettings.ui_palette = document.querySelector('input[name="uiPalette"]:checked')?.value || "ammps";
+  globalSettings.ui_palette = document.querySelector('input[name="uiPalette"]:checked')?.value || "zinc";
   await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({agency_name: globalSettings.agency_name, ui_palette: globalSettings.ui_palette})});
   applyUiPalette(globalSettings.ui_palette);
   toast("Paramètres généraux enregistrés");
@@ -2988,7 +2990,9 @@ document.getElementById("mXlsxBtn").addEventListener("click", ()=>{
 });
 document.getElementById("mMailToggleBtn").addEventListener("click", ()=>{
   const panel = document.getElementById("mEmailPanel");
-  panel.style.display = panel.style.display === "none" ? "block" : "none";
+  const opening = panel.style.display === "none";
+  panel.style.display = opening ? "block" : "none";
+  if(opening) renderEmailSectionsGrid("moussanada", "moussanadaEmailSectionsGrid");
 });
 function collectMoussanadaChartImages(){
   const map = {volume:"volume", delay:"delay", trend:"trend", cat:"cat", srv:"srv", tech:"tech", backlog:"backlog", pareto:"pareto", radar:"radar"};
@@ -4559,4 +4563,61 @@ async function waitForServerRestart(hostname, port, maxWaitMs=20000){
     }
   }
   return false;
+}
+
+// ============================================================
+// SECTIONS DU RAPPORT EMAIL (Tarkhiss / Moussanada) — cases à cocher pour inclure/exclure
+// certaines sections du rapport envoyé par email (PDF/Excel/écran restent toujours complets).
+// La heatmap (et, pour Tarkhiss, les statistiques avancées appels/emails) est TOUJOURS exclue
+// de l'email côté serveur, donc elle n'apparaît pas ici comme option.
+// ============================================================
+const EMAIL_SECTION_LABELS = {
+  tarkhiss: [
+    {key: "graphs", label: "Analyse graphique"},
+    {key: "problems", label: "Problèmes techniques"},
+    {key: "demandes", label: "Demandes d'information"},
+    {key: "weekly", label: "Évolution hebdomadaire"},
+    {key: "synth", label: "Constats & recommandations"},
+  ],
+  moussanada: [
+    {key: "volume", label: "Volume global des tickets"},
+    {key: "delays", label: "Évolution des délais"},
+    {key: "categories", label: "Catégories de demandes"},
+    {key: "services", label: "Services les plus demandeurs"},
+    {key: "team", label: "Charge de l'équipe SI"},
+    {key: "comparative", label: "Analyse comparative"},
+    {key: "synth", label: "Synthèse finale"},
+  ],
+};
+
+async function renderEmailSectionsGrid(module, gridId){
+  const grid = document.getElementById(gridId);
+  if(!grid) return;
+  grid.innerHTML = "Chargement...";
+  let sections = {};
+  try{
+    const res = await fetch(`/api/${module}/settings`);
+    const settings = await res.json();
+    sections = settings.email_sections || {};
+  } catch(e){ /* defaults à true ci-dessous */ }
+  const defs = EMAIL_SECTION_LABELS[module] || [];
+  grid.innerHTML = defs.map(d=>`
+    <label class="email-section-check">
+      <input type="checkbox" data-section-key="${d.key}" ${sections[d.key] !== false ? "checked" : ""}>
+      ${esc(d.label)}
+    </label>
+  `).join("");
+  grid.querySelectorAll('input[type="checkbox"]').forEach(cb=>{
+    cb.addEventListener("change", async ()=>{
+      const payload = {};
+      grid.querySelectorAll('input[type="checkbox"]').forEach(c=>{
+        payload[c.dataset.sectionKey] = c.checked;
+      });
+      await fetch(`/api/${module}/settings`, {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({email_sections: payload}),
+      });
+      toast("Sections du rapport email mises à jour");
+    });
+  });
 }

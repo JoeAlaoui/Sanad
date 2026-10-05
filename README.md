@@ -48,6 +48,15 @@ limité aux jours ouvrés (Lun-Ven) et à la plage 08h-17h (≈08h30-16h30, hora
 sur l'écran, le PDF et l'Excel. Seule la heatmap est recadrée — le taux de décroché, le délai
 de réponse et les autres statistiques restent calculés sur l'intégralité des données importées,
 week-ends et heures creuses compris.
+
+**Sections du rapport email personnalisables** (Tarkhiss et Moussanada) : dans le panneau
+"Envoyer par email" du Dashboard, des cases à cocher permettent d'inclure ou exclure chaque
+section (analyse graphique, problèmes techniques, demandes, évolution hebdomadaire, synthèse
+pour Tarkhiss ; volume, délais, catégories, services, équipe, comparatif, synthèse pour
+Moussanada). Réglage enregistré automatiquement à chaque case cochée/décochée, propre à chaque
+module. **La heatmap et les statistiques avancées (appels/emails) ne sont, elles, jamais
+incluses dans l'email, quel que soit ce réglage** — uniquement dans le PDF, l'Excel et l'écran,
+qui restent toujours complets indépendamment de ce qui est choisi pour l'email.
 - Saisie mensuelle appels/emails, analyse (problèmes, demandes, constats, recommandations),
   dashboard, vue annuelle, heatmap jour de semaine × semaine du mois, comparatif N vs N-1,
   alertes de seuil configurables, prompts Copilot, rapport email/PDF/Excel.
@@ -117,19 +126,23 @@ l'accès applicatif est refusé en mode local, ce qui diffère d'un port réelle
 
 ## 6. Personnalisation de l'écran (Administration)
 
-- **Un seul design, retravaillé en profondeur** (Neumorphism doux — plus de sélection de thème) :
-  sidebar à indicateur d'onglet actif par liseré coloré (plus lisible qu'un bloc plein), cartes
-  KPI avec barre d'accent supérieure selon le statut (normal/alerte/succès), tableaux avec
-  lignes zébrées et survol, boutons et champs avec retour visuel au clic/focus, ombres douces
-  cohérentes sur l'ensemble des cartes. Les kits de thèmes explorés en cours de route (Ant
-  Design Pro, Pastel, AMMPS Vert Institutionnel, AMMPS Moderne 2026) sont conservés dans
-  `static/design-kits/` à titre de référence, mais ne sont plus proposés comme choix actifs.
+- **Design shadcn/ui** : l'écran reprend intégralement les tokens, l'échelle de rayon/ombre et
+  le langage visuel de shadcn/ui (base neutre "Zinc", cartes à bordure fine et ombre très
+  subtile, tableaux minimalistes sans grille ni en-tête coloré, sidebar claire avec item actif
+  par simple changement de fond, boutons/badges aux variants shadcn — default/outline/
+  secondary/ghost/destructive). L'application étant un rendu serveur Jinja + JS (pas React), les
+  composants shadcn (Radix) sont repris fidèlement en CSS pur plutôt qu'importés tels quels.
+  Les kits de thèmes explorés en cours de route (Ant Design Pro, Pastel, AMMPS Vert
+  Institutionnel, AMMPS Moderne 2026) sont conservés dans `static/design-kits/` à titre de
+  référence, mais ne sont plus proposés comme choix actifs.
 - **Aperçu live** : cliquer sur un thème ou une palette l'applique immédiatement à l'écran entier
   (avant même d'enregistrer), pour comparer sans aller-retour. Si vous quittez l'onglet
   Administration sans cliquer sur "Enregistrer", l'écran revient automatiquement au thème/palette
   réellement sauvegardés.
-- **6 palettes de couleur** restent configurables : AMMPS (défaut), Océan, Émeraude, Ardoise,
-  Violet, Bordeaux — avec aperçu live au clic, avant même d'enregistrer.
+- **6 palettes de couleur** restent configurables, reprises des presets officiels shadcn/ui :
+  Zinc (défaut, neutre), Bleu, Vert, Orange, Violet, Rose — avec aperçu live au clic, avant
+  même d'enregistrer. Seule la couleur primaire change ; le fond, les cartes et la sidebar
+  restent toujours neutres (comme sur le sélecteur de thème officiel de shadcn/ui).
 - Ces réglages sont **purement visuels côté écran** : aucun effet sur les rapports
   PDF/Excel/PowerPoint, qui conservent toujours la charte AMMPS officielle.
 - **Navigation par mois** : flèches ←/→ à côté du sélecteur de mois pour avancer/reculer d'un

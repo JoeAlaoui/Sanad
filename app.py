@@ -943,7 +943,7 @@ def load_global_settings():
         "app_subtitle": "Plateforme de pilotage du Helpdesk SI",
         # Thème unique (Neumorphism doux) — plus de sélection de thème, seule la palette de
         # couleur reste configurable (ui_palette, ci-dessous).
-        "ui_palette": "ammps",          # "ammps", "ocean", "emerald", "slate", "violet", "crimson"
+        "ui_palette": "zinc",           # presets shadcn/ui : zinc (défaut), blue, green, orange, violet, rose
         # Grands titres des rapports (email/PDF/Excel/PPTX) — édition avancée, Administration
         "report_title_tarkhiss": "Rapport Support Tarkhiss",
         "report_title_moussanada": "Rapport Support Moussanada",
@@ -990,6 +990,15 @@ def load_module_settings(module):
         "reminder_day": 5,
         "status_colors": {},
         "pchc_thresholds": {"taux_haut": 50, "taux_bas": 20, "backlog_alert": None, "old_dossiers_alert": None},
+        # Sections à inclure dans le rapport EMAIL uniquement (PDF/Excel/écran restent complets).
+        # La heatmap et les statistiques avancées (Tarkhiss) ne sont JAMAIS dans l'email, quel que
+        # soit ce réglage — elles ne sont donc pas listées ici comme choix possibles.
+        "email_sections": {
+            "graphs": True, "problems": True, "demandes": True, "weekly": True, "synth": True,
+        } if module == "tarkhiss" else {
+            "volume": True, "delays": True, "categories": True, "services": True, "team": True,
+            "comparative": True, "synth": True,
+        } if module == "moussanada" else {},
     }
     p = module_settings_file(module)
     if os.path.exists(p):
@@ -3390,6 +3399,13 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
     # Statistiques avancées (journal d'appels + export Outlook brut) — issues de tarkhiss_meta.
     # N'apparaissent PAS dans l'email (for_pdf=False y est toujours utilisé) : uniquement PDF/Excel/écran.
     show_contact_names = load_global_settings().get("report_show_contact_names", False)
+    # Sections activables/désactivables pour le rapport EMAIL uniquement (PDF/Excel/écran
+    # restent toujours complets). La heatmap et les statistiques avancées sont, elles,
+    # TOUJOURS exclues de l'email, sans réglage possible — voir plus bas.
+    email_sections = load_module_settings(module).get("email_sections", {}) if module == "tarkhiss" else {}
+
+    def show_section(key):
+        return for_pdf or email_sections.get(key, True)
     adv_html = ""
     if for_pdf:
         meta_calls = _load("tarkhiss", "meta_calls", ym, {})
@@ -3545,12 +3561,12 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
 
         <a name="sec-graphs"></a>
         <div class="pdf-break"></div>
-        <div style="font-size:15px;font-weight:800;color:#0B4965;margin:4px 0 4px;">Analyse graphique</div>
+        {(lambda: f'''<div style="font-size:15px;font-weight:800;color:#0B4965;margin:4px 0 4px;">Analyse graphique</div>
         {img_tag("weekly", "Évolution hebdomadaire — Bugs vs Demandes")}
-        {img_tag("problems", "Répartition des problèmes techniques")}
+        {img_tag("problems", "Répartition des problèmes techniques")}''')() if show_section("graphs") else ""}
 
         <a name="sec-problems"></a>
-        <div class="pdf-break"></div>
+        {(lambda: f'''<div class="pdf-break"></div>
         <div style="font-size:14px;font-weight:bold;color:#0B4965;margin:4px 0 8px;">Problèmes techniques signalés ({total_problems})</div>
         <table style="width:100%;border-collapse:collapse;border:1px solid #DAE0E7;">
           <tr style="background:#0B4965;">
@@ -3560,10 +3576,10 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
             <td style="padding:8px 10px;color:#fff;font-size:12px;font-weight:bold;">Description</td>
           </tr>
           {rows_cat_problems(problems, total_problems)}
-        </table>
+        </table>''')() if show_section("problems") else ""}
 
         <a name="sec-demandes"></a>
-        <div class="pdf-break"></div>
+        {(lambda: f'''<div class="pdf-break"></div>
         <div style="font-size:14px;font-weight:bold;color:#0B4965;margin:4px 0 8px;">Demandes d'information reçues ({total_demandes})</div>
         <table style="width:100%;border-collapse:collapse;border:1px solid #DAE0E7;">
           <tr style="background:#0B4965;">
@@ -3573,10 +3589,10 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
             <td style="padding:8px 10px;color:#fff;font-size:12px;font-weight:bold;">Description</td>
           </tr>
           {rows_cat_demandes(demandes, total_demandes)}
-        </table>
+        </table>''')() if show_section("demandes") else ""}
 
         <a name="sec-weekly"></a>
-        <div class="pdf-break"></div>
+        {(lambda: f'''<div class="pdf-break"></div>
         <div style="font-size:14px;font-weight:bold;color:#0B4965;margin:4px 0 8px;">Évolution hebdomadaire</div>
         <table style="width:100%;border-collapse:collapse;border:1px solid #DAE0E7;">
           <tr style="background:#0B4965;">
@@ -3587,20 +3603,19 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
           </tr>
           {rows_weekly()}
         </table>
+        {"<div style='font-size:14px;font-weight:bold;color:#0B4965;margin:20px 0 8px;'>Mots-clés fréquents</div><div style='font-size:12.5px;color:#55616B;margin-bottom:16px;'>" + keywords_line + "</div>" if keywords_line else ""}''')() if show_section("weekly") else ""}
 
-        {"<div style='font-size:14px;font-weight:bold;color:#0B4965;margin:20px 0 8px;'>Mots-clés fréquents</div><div style='font-size:12.5px;color:#55616B;margin-bottom:16px;'>" + keywords_line + "</div>" if keywords_line else ""}
-
-        {'<a name="sec-heatmap"></a><div class="pdf-break"></div><div style="font-size:14px;font-weight:bold;color:#0B4965;margin:4px 0 8px;">Heatmap de charge</div><p style="font-size:12px;color:#55616B;margin:0 0 10px;">Volume d\'appels par jour de semaine et semaine du mois (granularité journalière — Tarkhiss ne journalise pas l\'heure des appels).</p><img src="data:image/png;base64,' + heatmap_b64 + '" style="width:100%;max-width:620px;display:block;margin:0 auto 14px;" />' if heatmap_has_data else ""}
+        {'<a name="sec-heatmap"></a><div class="pdf-break"></div><div style="font-size:14px;font-weight:bold;color:#0B4965;margin:4px 0 8px;">Heatmap de charge</div><p style="font-size:12px;color:#55616B;margin:0 0 10px;">Volume d\'appels par jour de semaine et semaine du mois (granularité journalière — Tarkhiss ne journalise pas l\'heure des appels).</p><img src="data:image/png;base64,' + heatmap_b64 + '" style="width:100%;max-width:620px;display:block;margin:0 auto 14px;" />' if (heatmap_has_data and for_pdf) else ""}
 
         {adv_html}
 
         <a name="sec-synth"></a>
-        <div class="pdf-break"></div>
+        {(lambda: f'''<div class="pdf-break"></div>
         <div style="font-size:14px;font-weight:bold;color:#0B4965;margin:4px 0 8px;">Constats clés</div>
         <ul style="padding-left:18px;margin:0 0 16px;">{list_html(constats)}</ul>
 
         <div style="font-size:14px;font-weight:bold;color:#0B4965;margin:16px 0 8px;">Recommandations</div>
-        <ul style="padding-left:18px;margin:0;">{list_html(recommandations)}</ul>
+        <ul style="padding-left:18px;margin:0;">{list_html(recommandations)}</ul>''')() if show_section("synth") else ""}
       </div>
     </div>
     """
@@ -3767,6 +3782,10 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
     sections = notes.get("sections", {})
     global_settings = load_global_settings()
     report_title = global_settings.get("report_title_moussanada") or "Rapport Support Moussanada"
+    email_sections = load_module_settings("moussanada").get("email_sections", {})
+
+    def show_section(key):
+        return for_pdf or email_sections.get(key, True)
 
     html = f"""
     <div style="max-width:760px;margin:0 auto;font-family:Arial,sans-serif;background:#FFFFFF;">
@@ -3779,7 +3798,7 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
 
         {moussanada_toc_html}
 
-        {section_title(1, "Volume global des tickets")}
+        {(lambda: f'''{section_title(1, "Volume global des tickets")}
         <table style="width:100%;border-collapse:collapse;margin-bottom:6px;"><tr>
           {kpi_card("TICKETS OUVERTS", tickets["ouverts"], delta_span(tickets["ouverts"], prev.get("ouverts", 0), "neutral"))}
           {kpi_card("TICKETS RÉSOLUS", tickets["resolus"], delta_span(tickets["resolus"], prev.get("resolus", 0), "positive"))}
@@ -3788,9 +3807,9 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
         </tr></table>
         {img_tag("volume")}
         {img_tag("backlog")}
-        {copilot_box(sections.get("volume", ""))}
+        {copilot_box(sections.get("volume", ""))}''')() if show_section("volume") else ""}
 
-        {section_title(2, "Évolution des délais de traitement")}
+        {(lambda: f'''{section_title(2, "Évolution des délais de traitement")}
         <table style="width:100%;border-collapse:collapse;margin-bottom:6px;"><tr>
           {kpi_card("TAUX DE RÉSOLUTION", f"{taux_resolution}%", delta_span(taux_resolution, prev_taux_resolution, "positive"), bg="#E7F5EE", color="#25935F")}
           {kpi_card("TAUX DE CLÔTURE", f"{taux_cloture}%", delta_span(taux_cloture, prev_taux_cloture, "positive"), bg="#E7F5EE", color="#25935F")}
@@ -3798,9 +3817,9 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
           {kpi_card("DÉLAI MOY. CLÔTURE", format_dh(durations["cloture_h"]), delta_span(durations["cloture_h"], prev.get("cloture_h", 0), "negative"))}
         </tr></table>
         {img_tag("trend")}
-        {copilot_box(sections.get("delays", ""))}
+        {copilot_box(sections.get("delays", ""))}''')() if show_section("delays") else ""}
 
-        {section_title(3, f"Principales catégories de demandes en {month_label}")}
+        {(lambda: f'''{section_title(3, f"Principales catégories de demandes en {month_label}")}
         <table style="width:100%;border-collapse:collapse;border:1px solid #DAE0E7;">
           <tr style="background:#0B4965;">
             <td style="padding:7px 10px;color:#fff;font-size:11.5px;font-weight:bold;">Catégorie</td>
@@ -3812,9 +3831,9 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
         </table>
         {img_tag("cat")}
         {img_tag("pareto")}
-        {copilot_box(sections.get("categories", ""))}
+        {copilot_box(sections.get("categories", ""))}''')() if show_section("categories") else ""}
 
-        {section_title(4, "Services les plus demandeurs")}
+        {(lambda: f'''{section_title(4, "Services les plus demandeurs")}
         <table style="width:100%;border-collapse:collapse;border:1px solid #DAE0E7;">
           <tr style="background:#0B4965;">
             <td style="padding:7px 10px;color:#fff;font-size:11.5px;font-weight:bold;">Service</td>
@@ -3825,9 +3844,9 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
           {rows_top(top_srv)}
         </table>
         {img_tag("srv")}
-        {copilot_box(sections.get("services", ""))}
+        {copilot_box(sections.get("services", ""))}''')() if show_section("services") else ""}
 
-        {section_title(5, "Charge et mobilisation de l'équipe SI")}
+        {(lambda: f'''{section_title(5, "Charge et mobilisation de l'équipe SI")}
         <table style="width:100%;border-collapse:collapse;border:1px solid #DAE0E7;">
           <tr style="background:#0B4965;">
             <td style="padding:7px 10px;color:#fff;font-size:11.5px;font-weight:bold;">Technicien</td>
@@ -3840,21 +3859,21 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
         </table>
         {img_tag("tech")}
         {img_tag("radar")}
-        {copilot_box(sections.get("team", ""))}
+        {copilot_box(sections.get("team", ""))}''')() if show_section("team") else ""}
 
-        {section_title(6, f"Analyse comparative {prev_month_label} / {month_label}")}
+        {(lambda: f'''{section_title(6, f"Analyse comparative {prev_month_label} / {month_label}")}
         <p style="font-size:12.5px;color:#55616B;margin:0 0 4px;">Comparatif des volumes et des délais moyens entre les deux mois.</p>
         {img_tag("volume")}
         {img_tag("delay")}
-        {copilot_box(sections.get("comparative", ""))}
+        {copilot_box(sections.get("comparative", ""))}''')() if show_section("comparative") else ""}
 
-        {section_title(7, "Heatmap de charge (jour x heure)") if heatmap_matrix else ""}
-        {"<p style='font-size:12.5px;color:#55616B;margin:0 0 10px;'>Répartition des tickets ouverts par jour de semaine et heure de la journée — basée sur les tickets bruts importés (colonne Date d'ouverture). Utile pour dimensionner les plages de présence hotline.</p><img src='data:image/png;base64," + heatmap_b64 + "' style='width:100%;max-width:680px;display:block;margin:0 auto 14px;' />" if heatmap_matrix else ""}
+        {section_title(7, "Heatmap de charge (jour x heure)") if (heatmap_matrix and for_pdf) else ""}
+        {"<p style='font-size:12.5px;color:#55616B;margin:0 0 10px;'>Répartition des tickets ouverts par jour de semaine et heure de la journée — basée sur les tickets bruts importés (colonne Date d'ouverture). Utile pour dimensionner les plages de présence hotline.</p><img src='data:image/png;base64," + heatmap_b64 + "' style='width:100%;max-width:680px;display:block;margin:0 auto 14px;' />" if (heatmap_matrix and for_pdf) else ""}
 
-        {section_title(8 if heatmap_matrix else 7, "Synthèse finale et conclusion")}
+        {(lambda: f'''{section_title(8 if heatmap_matrix else 7, "Synthèse finale et conclusion")}
         {("<div style='font-size:13px;font-weight:bold;color:#0B4965;margin:6px 0 6px;'>Constats clés</div><ul style='padding-left:18px;margin:0 0 14px;'>" + list_html(notes.get('constats', [])) + "</ul>") if notes.get('constats') else ""}
         {("<div style='font-size:13px;font-weight:bold;color:#0B4965;margin:6px 0 6px;'>Recommandations</div><ul style='padding-left:18px;margin:0 0 14px;'>" + list_html(notes.get('recommandations', [])) + "</ul>") if notes.get('recommandations') else ""}
-        {copilot_box(sections.get("synthesis", ""))}
+        {copilot_box(sections.get("synthesis", ""))}''')() if show_section("synth") else ""}
 
       </div>
     </div>

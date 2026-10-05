@@ -5,7 +5,7 @@
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>SANAD — Plateforme de pilotage du Helpdesk SI</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
-<link href="https://fonts.googleapis.com/css2?family=Sora:wght@600;700;800&family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/static/style.css">
 </head>
 <body>
@@ -256,6 +256,8 @@
         </div>
         <div class="mini-label" style="margin-top:12px;">Formule d'appel (bonjour)</div>
         <textarea id="greetingInput" rows="2" placeholder="Bonjour M. Himi et Mme. Latifa,"></textarea>
+        <div class="mini-label" style="margin-top:12px;">Sections incluses dans l'email (la heatmap et les statistiques avancées ne sont jamais incluses dans l'email, quel que soit ce réglage)</div>
+        <div class="email-sections-grid" id="tarkhissEmailSectionsGrid"></div>
         <div class="actions-row" style="margin-top:12px;">
           <button class="btn btn-outline" id="previewMailBtn">👁 Aperçu</button>
           <button class="btn btn-primary" id="confirmSendBtn">✉ Confirmer et envoyer (Outlook)</button>
@@ -501,6 +503,8 @@
         </div>
         <div class="mini-label" style="margin-top:12px;">Formule d'appel (bonjour)</div>
         <textarea id="mGreetingInput" rows="2" placeholder="Bonjour M. Himi,"></textarea>
+        <div class="mini-label" style="margin-top:12px;">Sections incluses dans l'email (la heatmap n'est jamais incluse dans l'email, quel que soit ce réglage)</div>
+        <div class="email-sections-grid" id="moussanadaEmailSectionsGrid"></div>
         <div class="actions-row" style="margin-top:12px;">
           <button class="btn btn-outline" id="mPreviewMailBtn">👁 Aperçu</button>
           <button class="btn btn-primary" id="mConfirmSendBtn">✉ Confirmer et envoyer (Outlook)</button>
@@ -840,12 +844,12 @@
         <div class="form-row">
           <label>Palette de couleur de l'écran (n'affecte pas les PDF/Excel/PPTX)</label>
           <div class="theme-choice">
-            <label class="theme-option"><input type="radio" name="uiPalette" value="ammps" id="palAmmpsInput"><span class="theme-swatch" style="background:#0B4965;"></span><span>AMMPS (défaut)</span></label>
-            <label class="theme-option"><input type="radio" name="uiPalette" value="ocean" id="palOceanInput"><span class="theme-swatch" style="background:#0E5C86;"></span><span>Océan</span></label>
-            <label class="theme-option"><input type="radio" name="uiPalette" value="emerald" id="palEmeraldInput"><span class="theme-swatch" style="background:#0F6B4F;"></span><span>Émeraude</span></label>
-            <label class="theme-option"><input type="radio" name="uiPalette" value="slate" id="palSlateInput"><span class="theme-swatch" style="background:#3A4A5C;"></span><span>Ardoise</span></label>
-            <label class="theme-option"><input type="radio" name="uiPalette" value="violet" id="palVioletInput"><span class="theme-swatch" style="background:#5B3FBD;"></span><span>Violet</span></label>
-            <label class="theme-option"><input type="radio" name="uiPalette" value="crimson" id="palCrimsonInput"><span class="theme-swatch" style="background:#8C2233;"></span><span>Bordeaux</span></label>
+            <label class="theme-option"><input type="radio" name="uiPalette" value="zinc" id="palZincInput"><span class="theme-swatch" style="background:#18181B;"></span><span>Zinc (défaut)</span></label>
+            <label class="theme-option"><input type="radio" name="uiPalette" value="blue" id="palBlueInput"><span class="theme-swatch" style="background:#2563EB;"></span><span>Bleu</span></label>
+            <label class="theme-option"><input type="radio" name="uiPalette" value="green" id="palGreenInput"><span class="theme-swatch" style="background:#16A34A;"></span><span>Vert</span></label>
+            <label class="theme-option"><input type="radio" name="uiPalette" value="orange" id="palOrangeInput"><span class="theme-swatch" style="background:#EA580C;"></span><span>Orange</span></label>
+            <label class="theme-option"><input type="radio" name="uiPalette" value="violet" id="palVioletInput"><span class="theme-swatch" style="background:#7C3AED;"></span><span>Violet</span></label>
+            <label class="theme-option"><input type="radio" name="uiPalette" value="rose" id="palRoseInput"><span class="theme-swatch" style="background:#E11D48;"></span><span>Rose</span></label>
           </div>
         </div>
         <button class="btn btn-primary" id="saveGlobalSettingsBtn">Enregistrer</button>
