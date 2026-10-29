@@ -265,11 +265,20 @@ def parse_csv_rows_source_items(rows, headers):
     return records
 
 
-def store_ticket_series(records, ts):
+MONTH_KEY = re.compile(r"^\d{4}-\d{2}$")
+
+
+def store_ticket_series(records, ts, skipped=None):
     """Couche 'stockage' — fusionne une liste de dicts {"mois", ...} dans le dict timeseries
-    (ts), indexé par mois. Indépendante de l'origine des données (CSV ou API GLPI directe)."""
+    (ts), indexé par mois. Indépendante de l'origine des données (CSV ou API GLPI directe).
+    Garde-fou : une ligne dont le « mois » n'est pas AAAA-MM (ex. nom de technicien quand une
+    feuille Techniciens est importée comme série de tickets) est ignorée et ajoutée à `skipped`."""
     for rec in records:
-        m = rec["mois"]
+        m = str(rec.get("mois") or "").strip()
+        if not MONTH_KEY.match(m):
+            if skipped is not None:
+                skipped.append(m)
+            continue
         ts.setdefault(m, {})
         for k, v in rec.items():
             if k != "mois":
@@ -277,10 +286,10 @@ def store_ticket_series(records, ts):
     return ts
 
 
-def store_duration_series(records, ts):
+def store_duration_series(records, ts, skipped=None):
     """Couche 'stockage' — identique à store_ticket_series, séparée pour la lisibilité (les
     deux appels successifs, tickets puis durations, alimentent le même dict ts par mois)."""
-    return store_ticket_series(records, ts)
+    return store_ticket_series(records, ts, skipped)
 
 
 def store_source_items(kind, records, src):
@@ -314,15 +323,15 @@ def import_moussanada_csv(file_storage, kind, ts, src):
         return {"rows": 0}, ts, src
     headers, data_rows = rows[0], rows[1:]
 
-    if kind == "tickets":
-        records = parse_csv_rows_ticket_series(data_rows, headers)
-        store_ticket_series(records, ts)
-        return {"rows": len(records)}, ts, src
-
-    if kind == "durations":
-        records = parse_csv_rows_durations(data_rows, headers)
-        store_duration_series(records, ts)
-        return {"rows": len(records)}, ts, src
+    if kind in ("tickets", "durations"):
+        parse = parse_csv_rows_ticket_series if kind == "tickets" else parse_csv_rows_durations
+        records = parse(data_rows, headers)
+        skipped = []
+        store_ticket_series(records, ts, skipped)
+        result = {"rows": len(records) - len(skipped)}
+        if skipped:
+            result["skipped_non_month"] = skipped  # lignes ignorées : 1re colonne ≠ AAAA-MM
+        return result, ts, src
 
     if kind in ("categories", "services", "techniciens", "demandeurs"):
         records = parse_csv_rows_source_items(data_rows, headers)

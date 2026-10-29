@@ -1,0 +1,79 @@
+{
+ "source": "Rapport Tarkhiss_PCHC_Metier_YTD.xlsx",
+ "sheets": {
+  "Dashboard": "xl/worksheets/sheet1.xml",
+  "KPI Identification": "xl/worksheets/sheet2.xml",
+  "KPI Déclaration": "xl/worksheets/sheet3.xml",
+  "KPI Certificat Enreg.": "xl/worksheets/sheet4.xml",
+  "KPI Certificat LV": "xl/worksheets/sheet5.xml",
+  "KPI Autor. Import.": "xl/worksheets/sheet6.xml",
+  "identificationOpérateur": "xl/worksheets/sheet7.xml",
+  "déclarationActivité": "xl/worksheets/sheet8.xml",
+  "certificatEnregistrement": "xl/worksheets/sheet9.xml",
+  "certificatLibreVente": "xl/worksheets/sheet10.xml",
+  "autorisationImportationMatièreP": "xl/worksheets/sheet11.xml"
+ },
+ "raw": {
+  "identificationOpérateur": {
+   "styles": {
+    "A": "77",
+    "B": null,
+    "C": "77",
+    "D": "77",
+    "E": "77",
+    "F": null
+   },
+   "row_attrs": " ht=\"15\" customHeight=\"1\""
+  },
+  "déclarationActivité": {
+   "styles": {
+    "A": "77",
+    "B": null,
+    "C": "77",
+    "D": "77",
+    "E": "77",
+    "G": null,
+    "H": null
+   },
+   "row_attrs": " ht=\"15\" customHeight=\"1\""
+  },
+  "certificatEnregistrement": {
+   "styles": {
+    "A": "77",
+    "B": null,
+    "C": "77",
+    "D": "77",
+    "E": "77",
+    "F": null,
+    "G": null,
+    "H": null,
+    "J": null,
+    "L": null
+   },
+   "row_attrs": " ht=\"15\" customHeight=\"1\""
+  },
+  "certificatLibreVente": {
+   "styles": {
+    "A": "77",
+    "B": null,
+    "C": "77",
+    "D": "77",
+    "E": "77",
+    "F": null,
+    "H": null
+   },
+   "row_attrs": " ht=\"15\" customHeight=\"1\""
+  },
+  "autorisationImportationMatièreP": {
+   "styles": {
+    "A": "77",
+    "B": null,
+    "C": "77",
+    "D": "77",
+    "E": "77",
+    "F": null
+   },
+   "row_attrs": " ht=\"15\" customHeight=\"1\""
+  }
+ }
+}

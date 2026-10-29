@@ -99,6 +99,9 @@
         <button class="nav-item" data-tab="p-import" data-module="pchc" data-roles="admin,superviseur">
           <span class="nav-ico">📥</span> Import données
         </button>
+        <button class="nav-item" data-tab="p-livrables" data-module="pchc" data-roles="admin,superviseur">
+          <span class="nav-ico">📑</span> Revue de direction
+        </button>
         <button class="nav-item" data-tab="p-analysis" data-module="pchc" data-roles="admin,superviseur">
           <span class="nav-ico">◇</span> Analyse &amp; Copilot
         </button>
@@ -133,6 +136,17 @@
       </button>
       <button class="nav-item" data-tab="knowledge" data-module="shared" data-roles="admin,hotliner">
         <span class="nav-ico">📚</span> Base de connaissances
+      </button>
+
+      <div class="nav-subgroup-title" data-module="shared" data-roles="admin,superviseur">Qualité &amp; conformité</div>
+      <button class="nav-item" data-tab="quality" data-module="shared" data-roles="admin,superviseur">
+        <span class="nav-ico">🩺</span> Qualité des données
+      </button>
+      <button class="nav-item" data-tab="compliance" data-module="shared" data-roles="admin">
+        <span class="nav-ico">📑</span> SOP &amp; preuves d'audit
+      </button>
+      <button class="nav-item" data-tab="backups" data-module="shared" data-roles="admin">
+        <span class="nav-ico">🗄</span> Sauvegardes
       </button>
     </nav>
 
@@ -356,7 +370,7 @@
           </div>
         </div>
         <table class="cat-table" id="problemsTable">
-          <thead><tr><th>Type de problème</th><th>Nombre</th><th>Description</th><th>Action corrective</th><th></th></tr></thead>
+          <thead><tr><th>Type de problème</th><th>Nombre</th><th>Description</th><th></th></tr></thead>
           <tbody></tbody>
         </table>
       </div>
@@ -387,17 +401,6 @@
       </div>
 
       <div class="card">
-        <div class="card-head">
-          <h2>☁️ Nuage de mots-clés</h2>
-          <button class="btn-add" data-add="keywords">+ Ajouter un mot-clé</button>
-        </div>
-        <table class="cat-table" id="keywordsTable">
-          <thead><tr><th>Mot-clé</th><th>Fréquence</th><th></th></tr></thead>
-          <tbody></tbody>
-        </table>
-      </div>
-
-      <div class="card">
         <h2>🔑 Constats clés</h2>
         <textarea id="constatsBox" rows="4" placeholder="Un constat par ligne..."></textarea>
       </div>
@@ -405,11 +408,6 @@
       <div class="card">
         <h2>✅ Recommandations</h2>
         <textarea id="recoBox" rows="4" placeholder="Une recommandation par ligne..."></textarea>
-      </div>
-
-      <div class="card">
-        <h2>🗒️ Notes internes <span class="hint">(non incluses dans le rapport envoyé)</span></h2>
-        <textarea id="internalNotesBox" rows="3" placeholder="Contexte particulier, incident majeur..."></textarea>
       </div>
 
       <div class="actions-row">
@@ -433,6 +431,42 @@
           </div>
         </div>
       </div>
+
+      <div class="dash-actions" id="annualActions" style="margin-bottom:16px;">
+        <button class="btn btn-outline" id="annualXlsxBtn">⬇ Excel</button>
+        <button class="btn btn-outline" id="annualPdfBtn">⬇ PDF</button>
+        <button class="btn btn-outline" id="annualPptxBtn">📊 PPTX</button>
+        <button class="btn btn-primary" id="annualMailToggleBtn">✉ Envoyer par email</button>
+      </div>
+
+      <!-- Panneau d'envoi du rapport de période -->
+      <div class="card email-panel" id="annualEmailPanel" style="display:none;">
+        <h2>Envoi du rapport de la période par email</h2>
+        <p class="hint">Le corps de l'email reprend la Vue annuelle (indicateurs, tendance, charge par jour, top 3, détail par mois). Les pièces jointes contiennent une page de garde (PDF, PPTX), le résumé de la période puis le rapport de chaque mois.</p>
+        <div class="email-panel-grid">
+          <div>
+            <div class="mini-label">Destinataires (À)</div>
+            <div class="contact-check-list" id="annualToCheckList"></div>
+          </div>
+          <div>
+            <div class="mini-label">Copie (Cc)</div>
+            <div class="contact-check-list" id="annualCcCheckList"></div>
+          </div>
+        </div>
+        <div class="mini-label" style="margin-top:12px;">Formule d'appel (bonjour)</div>
+        <textarea id="annualGreetingInput" rows="2" placeholder="Bonjour,"></textarea>
+        <div class="mini-label" style="margin-top:12px;">Rapports joints à l'email</div>
+        <div class="actions-row">
+          <label><input type="checkbox" data-annual-att="pdf" checked> PDF</label>
+          <label><input type="checkbox" data-annual-att="pptx"> PowerPoint (PPTX)</label>
+          <label><input type="checkbox" data-annual-att="xlsx"> Excel</label>
+        </div>
+        <div class="actions-row" style="margin-top:12px;">
+          <button class="btn btn-outline" id="annualPreviewMailBtn">👁 Aperçu</button>
+          <button class="btn btn-primary" id="annualConfirmSendBtn">✉ Confirmer et envoyer (Outlook)</button>
+        </div>
+      </div>
+
       <div id="annualContent"></div>
     </section>
 
@@ -462,13 +496,6 @@
           <button class="btn-add copy-btn" data-copy="promptC">📋 Copier</button>
         </div>
         <pre class="prompt-box" id="promptC"></pre>
-      </div>
-
-      <div class="card">
-        <div class="card-head"><h2>Prompt F — Nuage de mots-clés</h2>
-          <button class="btn-add copy-btn" data-copy="promptF">📋 Copier</button>
-        </div>
-        <pre class="prompt-box" id="promptF"></pre>
       </div>
     </section>
 
@@ -740,6 +767,64 @@
       <div id="pDashboardContent"></div>
     </section>
 
+    <!-- TAB: P-LIVRABLES (Revue de direction : import brut, aperçu, Excel / PPTX / PDF / .eml) -->
+    <section class="tab-panel" id="tab-p-livrables">
+      <div class="panel-head">
+        <h1>Revue de direction — Reporting Métier PCHC</h1>
+        <p>Dernier import : <strong id="plImportInfo">—</strong></p>
+      </div>
+
+      <div class="card" id="plImportCard">
+        <h2>Import du classeur consolidé</h2>
+        <p class="hint">5 feuilles brutes (identificationOpérateur, déclarationActivité, certificatEnregistrement, certificatLibreVente, autorisationImportationMatièreP) — en-têtes en ligne 5, données à partir de la ligne 6. Chaque import est historisé (sauvegarde + journal d'audit).</p>
+        <div class="actions-row">
+          <label class="btn btn-primary file-btn">⬆ Importer un classeur (.xlsx / .xlsm)
+            <input type="file" id="plImportFile" accept=".xlsx,.xlsm" hidden>
+          </label>
+          <button class="btn btn-outline" id="plForceBtn" style="display:none;">⚠ Importer malgré les avertissements</button>
+        </div>
+        <div id="plImportReport" style="margin-top:12px;"></div>
+      </div>
+
+      <div class="card">
+        <h2>Aperçu — synthèse exécutive</h2>
+        <div id="plSynthesis"><p class="hint">Aucun import pour le moment.</p></div>
+        <h2 style="margin-top:18px;">Points d'alerte</h2>
+        <div id="plAlerts"></div>
+      </div>
+
+      <div class="card">
+        <h2>Livrables</h2>
+        <p class="hint">Générés côté serveur à partir du dernier import, avec les mêmes chiffres que l'aperçu ci-dessus.</p>
+        <div class="actions-row">
+          <button class="btn btn-outline" data-pl-export="xlsx">⬇ Excel (.xlsx)</button>
+          <button class="btn btn-outline" data-pl-export="pptx">📊 PowerPoint (.pptx)</button>
+          <button class="btn btn-outline" data-pl-export="pdf">⬇ PDF</button>
+        </div>
+        <h2 style="margin-top:18px;">E-mail (.eml) avec pièces jointes</h2>
+        <div class="actions-row" id="plEmlOptions">
+          <label><input type="checkbox" data-pl-att="xlsx" checked> Excel</label>
+          <label><input type="checkbox" data-pl-att="pptx" checked> PPTX</label>
+          <label><input type="checkbox" data-pl-att="pdf" checked> PDF</label>
+          <label><input type="checkbox" id="plLightXlsx"> Excel allégé (sans les feuilles brutes)</label>
+        </div>
+        <p class="hint" id="plEmlSize">Taille des pièces jointes : —</p>
+        <div class="actions-row">
+          <button class="btn btn-outline" id="plEmlPreviewBtn">👁 Aperçu &amp; taille</button>
+          <button class="btn btn-primary" id="plEmlBtn">✉ Générer le .eml</button>
+        </div>
+        <div id="plEmlPreview" style="display:none;margin-top:12px;border:1px solid var(--border);border-radius:8px;padding:10px;max-height:520px;overflow:auto;background:#fff;"></div>
+      </div>
+
+      <div class="card">
+        <h2>Historique des imports et des générations</h2>
+        <table class="dash-table" id="plHistoryTable">
+          <thead><tr><th>Date</th><th>Utilisateur</th><th>Action</th><th>Fichier</th><th>Détail</th></tr></thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </section>
+
     <!-- TAB: P-IMPORT -->
     <section class="tab-panel" id="tab-p-import">
       <div class="panel-head">
@@ -756,7 +841,7 @@
         <p class="hint">Détection automatique des 5 feuilles : Identification Opérateur, Déclaration d'Activité, Certificat d'Enregistrement, Certificat de Libre Vente, Autorisation d'Importation Matières Premières.</p>
         <label class="btn btn-primary file-btn">
           ⬆ Importer un fichier Excel
-          <input type="file" id="pImportXlsx" accept=".xlsx" hidden>
+          <input type="file" id="pImportXlsx" accept=".xlsx,.xlsm" hidden>
         </label>
         <span class="hint autosave-hint" id="pImportHint"></span>
       </div>
@@ -871,15 +956,33 @@
           <input type="text" id="reportTitleTarkhissInput" placeholder="Rapport Support Tarkhiss">
         </div>
         <div class="form-row">
+          <label>Sous-titre d'en-tête — Tarkhiss <small>(variables : {agence} {sous_titre} {mois} {module} {periode})</small></label>
+          <input type="text" id="reportSubtitleTarkhissInput" placeholder="{agence} — {mois}">
+        </div>
+        <div class="form-row">
           <label>Titre du rapport — Moussanada</label>
           <input type="text" id="reportTitleMoussanadaInput" placeholder="Rapport Support Moussanada">
+        </div>
+        <div class="form-row">
+          <label>Sous-titre d'en-tête — Moussanada <small>(variables : {agence} {sous_titre} {mois} {module} {periode})</small></label>
+          <input type="text" id="reportSubtitleMoussanadaInput" placeholder="{agence} — {mois}">
         </div>
         <div class="form-row">
           <label>Titre du rapport — Reporting Métier (PCHC)</label>
           <input type="text" id="reportTitlePchcInput" placeholder="Reporting Métier — PCHC">
         </div>
         <div class="form-row">
+          <label>Sous-titre d'en-tête — Reporting Métier (PCHC) <small>(variables : {agence} {sous_titre} {mois} {module} {periode})</small></label>
+          <input type="text" id="reportSubtitlePchcInput" placeholder="{agence} — {periode}">
+        </div>
+        <div class="form-row">
           <label><input type="checkbox" id="reportShowContactNamesInput"> Afficher les noms des contacts (appelants / destinataires) dans les rapports PDF/Excel — RGPD, masqué par défaut</label>
+        </div>
+        <div class="form-row">
+          <label><input type="checkbox" id="emailFullWidthInput"> Email pleine largeur (par défaut : couverture d'origine, 760 px centré)</label>
+        </div>
+        <div class="form-row">
+          <label><input type="checkbox" id="pchcEnabledInput"> Reporting Métier PCHC activé (décoché : volet masqué et API fermées pour tous les rôles)</label>
         </div>
         <button class="btn btn-primary" id="saveAdvancedEditingBtn">Enregistrer</button>
       </div>
@@ -1101,6 +1204,12 @@
         </div>
       </div>
 
+      <div class="card" id="kpiLabelsCard">
+        <h2>🏷 Libellés des KPI</h2>
+        <p class="hint">Renommez les indicateurs affichés sur les dashboards <strong>et</strong> dans les rapports (PDF, Excel, email) — ex. « En retard » → « En instance ». Laisser vide = libellé par défaut.</p>
+        <div id="kpiLabelsBody"></div>
+      </div>
+
       <div class="card">
         <h2>🗂 Imports bruts Tarkhiss</h2>
         <p class="hint">Copie archivée de chaque fichier importé (export Outlook .xlsm, journal d'appels .csv) — traçabilité et re-téléchargement. 50 derniers conservés.</p>
@@ -1181,6 +1290,70 @@
           <button class="btn btn-primary" id="notesSendBtn">Envoyer</button>
         </div>
       </div>
+    </section>
+
+
+    <!-- TAB: QUALITÉ DES DONNÉES -->
+    <section class="tab-panel" id="tab-quality">
+      <div class="panel-head"><h1>Qualité des données</h1>
+        <p>Complétude, imports et diffusion par mois. Les mois antérieurs au début d'activité sont ignorés.</p></div>
+      <div id="qualityContent"></div>
+    </section>
+
+    <!-- TAB: SAUVEGARDES -->
+    <section class="tab-panel" id="tab-backups">
+      <div class="panel-head panel-head-row">
+        <div><h1>Sauvegardes &amp; restauration</h1>
+          <p>Archives ZIP de toutes les données (empreintes SHA-256 vérifiées à la restauration) et des logos.</p></div>
+        <div class="dash-actions">
+          <label class="btn btn-outline file-btn">⬆ Importer une archive (.zip)<input type="file" id="snapUploadFile" accept=".zip" hidden></label>
+          <button class="btn btn-primary" id="snapCreateBtn">🗄 Sauvegarder maintenant</button>
+        </div>
+      </div>
+      <div class="card">
+        <h2>Sauvegarde automatique</h2>
+        <p class="hint">Une archive par jour tant que l'application tourne.</p>
+        <div class="form-row"><label><input type="checkbox" id="snapAutoInput"> Activer la sauvegarde automatique quotidienne</label></div>
+        <div class="form-row"><label for="snapRetentionInput">Archives automatiques conservées</label>
+          <input type="number" id="snapRetentionInput" min="1" style="max-width:120px;"></div>
+        <button class="btn btn-primary" id="snapSettingsBtn">Enregistrer</button>
+      </div>
+      <div class="card"><h2>Archives</h2>
+        <table class="dash-table"><thead><tr><th>Date</th><th>Type</th><th>Taille</th><th></th></tr></thead><tbody id="snapTbody"></tbody></table>
+      </div>
+    </section>
+
+    <!-- TAB: SOP & PREUVES D'AUDIT -->
+    <section class="tab-panel" id="tab-compliance">
+      <div class="panel-head"><h1>SOP &amp; preuves d'audit</h1>
+        <p>Procédure d'exploitation standardisée et dossier de preuves mensuel prêts pour l'audit qualité (mois : sélecteur du haut).</p></div>
+      <div class="card"><h2>Contrôle documentaire</h2>
+        <p class="hint">Ces informations alimentent l'en-tête de la SOP et du dossier de preuves.</p>
+        <div class="email-panel-grid">
+          <div class="form-row"><label>Référence</label><input type="text" id="sopRef" placeholder="SOP-SANAD-001"></div>
+          <div class="form-row"><label>Version</label><input type="text" id="sopVersion" placeholder="1.0"></div>
+          <div class="form-row"><label>Date (jj/mm/aaaa)</label><input type="text" id="sopDate"></div>
+          <div class="form-row"><label>Propriétaire</label><input type="text" id="sopOwner"></div>
+          <div class="form-row"><label>Approbateur</label><input type="text" id="sopApprover"></div>
+          <div class="form-row"><label>Jours fériés (AAAA-MM-JJ, séparés par des virgules)</label><input type="text" id="sopHolidays" placeholder="2026-11-06, 2026-11-18"></div>
+        </div>
+        <button class="btn btn-primary" id="sopSaveBtn">Enregistrer</button>
+      </div>
+      <div class="agg-toggle" style="margin-bottom:12px;">
+        <button class="agg-btn active" data-sop-view="pack">Dossier de preuves</button>
+        <button class="agg-btn" data-sop-view="sop">SOP d'exploitation</button>
+      </div>
+      <div class="dash-actions" id="sopActionsPack" style="margin-bottom:10px;">
+        <button class="btn btn-outline" id="packRefreshBtn">↻ Actualiser</button>
+        <a class="btn btn-outline" id="packPdfLink" href="#">⬇ PDF</a>
+        <a class="btn btn-primary" id="packZipLink" href="#">⬇ ZIP preuves (PDF + SOP + CSV + intégrité)</a>
+      </div>
+      <div class="dash-actions" id="sopActionsSop" style="margin-bottom:10px;display:none;">
+        <a class="btn btn-outline" href="/api/admin/sop?format=pdf">⬇ PDF</a>
+        <a class="btn btn-outline" href="/api/admin/sop?format=docx">⬇ Word</a>
+      </div>
+      <p class="hint" id="packSha" style="font-family:monospace;font-size:10px;word-break:break-all;"></p>
+      <div class="card" style="padding:0;"><iframe id="sopFrame" title="Aperçu" style="width:100%;height:70vh;border:0;background:#fff;"></iframe></div>
     </section>
 
     <!-- TAB: BASE DE CONNAISSANCES (admin + hotliner) -->

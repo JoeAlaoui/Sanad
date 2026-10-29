@@ -59,3 +59,17 @@ htmlcov/
 !templates/**
 !static/
 !static/**
+
+# Fichiers locaux contenant des donnees internes
+/reference/3282e5c0-dashboardTarkhisss.xlsx.xlsx
+/reference/dashboardTarkhiss_MAJ_v3_2026-10-28.xlsx
+/reference/Rapport Tarkhiss_PCHC_Metier_YTD.xlsx
+/shot_admin.png
+/shot_appels.png
+/shot_pchc_dashboard.png
+
+# Ancienne interface React retiree du projet
+/frontend/
+
+# References visuelles externes non utilisees par l'application
+/reference/nolvira/

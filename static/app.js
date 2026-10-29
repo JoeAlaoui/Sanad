@@ -73,7 +73,7 @@ let annualChart = null, dailyLoadChart = null, weeklyEmailsChart = null, channel
 // Moussanada
 let mState = { ym: null, month: null, timeseries: {}, notes: {} };
 let mCharts = {};
-let mAggMode = "racine"; // "racine" | "leaf"
+let mAggMode = "leaf"; // "racine" | "leaf" — Nœud final par défaut au chargement
 let mAnnualChart = null, mBacklogChart = null, mCategoryTrendChart = null;
 
 // ---------- API helpers ----------
@@ -262,10 +262,13 @@ function applyModuleBrand(){
   // même : le hotliner ne fait que consulter, jamais générer/envoyer.
   const hotlinerReadOnly = currentUser && currentUser.role === "hotliner";
   document.getElementById("monthPickerWrap").style.display = (hotlinerReadOnly && currentModule !== "tarkhiss") ? "none" : "";
-  ["xlsxBtn", "pdfBtn", "mailToggleBtn"].forEach(id=>{
+  ["xlsxBtn", "pdfBtn", "mailToggleBtn", "annualActions"].forEach(id=>{
     const el = document.getElementById(id);
     if(el) el.style.display = hotlinerReadOnly ? "none" : "";
   });
+  // Envoi d'email (POST) réservé à l'administrateur — le superviseur garde les exports
+  const annualMail = document.getElementById("annualMailToggleBtn");
+  if(annualMail) annualMail.style.display = currentUser && currentUser.role === "admin" ? "" : "none";
 
   // Filtre les items de nav (et titres de sous-groupe) selon le GROUPE de volet actif ET le rôle.
   // Quand le groupe actif est "tarkhiss", les deux sous-volets (Hotline&Emails + Métier) restent
@@ -273,7 +276,8 @@ function applyModuleBrand(){
   const activeParent = parentOf(currentModule);
   document.querySelectorAll(".nav-item, .nav-subgroup-title, .nav-subgroup").forEach(btn=>{
     const m = btn.dataset.module;
-    const modOk = (m === "shared" || parentOf(m) === activeParent);
+    // Volet PCHC désactivé en Administration → ses entrées disparaissent de la sidebar
+    const modOk = (m === "shared" || parentOf(m) === activeParent) && !(m === "pchc" && modulesInfo.pchc && modulesInfo.pchc.ready === false);
     const rolesAttr = btn.dataset.roles;
     const roleOk = !rolesAttr || (currentUser && rolesAttr.split(",").includes(currentUser.role));
     btn.style.display = (modOk && roleOk) ? "" : "none";
@@ -394,7 +398,11 @@ function renderTab(tab){
   if(tab === "knowledge") loadKnowledge();
   if(tab === "p-dashboard") renderPDashboard();
   if(tab === "p-import") renderPImport();
+  if(tab === "p-livrables") renderPLivrables();
   if(tab === "p-analysis") renderPAnalysis();
+  if(tab === "quality") renderQuality();
+  if(tab === "backups") loadBackups();
+  if(tab === "compliance") loadCompliance();
 }
 
 async function switchModule(mod){
@@ -456,12 +464,12 @@ async function withMonthTransition(loaderFn, ym){
 
 function goToMonth(ym){
   monthInput.value = ym;
-  const loader = currentModule === "tarkhiss" ? loadMonth : loadMoussanadaMonth;
+  const loader = currentModule === "tarkhiss" ? loadMonth : loadMoussanadaMonthAndRender;
   withMonthTransition(loader, ym);
 }
 
 monthInput.addEventListener("change", ()=>{
-  withMonthTransition(currentModule === "tarkhiss" ? loadMonth : loadMoussanadaMonth, monthInput.value);
+  withMonthTransition(currentModule === "tarkhiss" ? loadMonth : loadMoussanadaMonthAndRender, monthInput.value);
 });
 
 document.getElementById("monthPrevBtn").addEventListener("click", ()=>{
@@ -889,20 +897,6 @@ function catRow(tableBodySel, kind, item={}){
       <td><textarea class="f-obs" rows="1">${item.obs||''}</textarea></td>
       <td><button class="row-del">✕</button></td>
     `;
-  } else if(kind === "problems"){
-    tr.innerHTML = `
-      <td><input type="text" class="f-label" value="${item.label||''}" placeholder="ex: Problèmes paiement"></td>
-      <td><input type="number" class="f-count" value="${item.count??''}"></td>
-      <td><textarea class="f-desc" rows="1">${item.desc||''}</textarea></td>
-      <td><textarea class="f-action" rows="1" placeholder="Action / responsable">${item.action||''}</textarea></td>
-      <td><button class="row-del">✕</button></td>
-    `;
-  } else if(kind === "keywords"){
-    tr.innerHTML = `
-      <td><input type="text" class="f-word" value="${item.word||''}" placeholder="ex: paiement"></td>
-      <td><input type="number" class="f-kwcount" value="${item.count??''}"></td>
-      <td><button class="row-del">✕</button></td>
-    `;
   } else {
     tr.innerHTML = `
       <td><input type="text" class="f-label" value="${item.label||''}" placeholder="ex: Suivi de dossier"></td>
@@ -911,6 +905,7 @@ function catRow(tableBodySel, kind, item={}){
       <td><button class="row-del">✕</button></td>
     `;
   }
+  if(item.action) tr.dataset.action = item.action;   // ancienne « action corrective » : conservée, non affichée
   tr.querySelector(".row-del").addEventListener("click", ()=>{ tr.remove(); scheduleAnalysisAutosave(); });
   tr.querySelectorAll("input,textarea").forEach(inp=>inp.addEventListener("input", scheduleAnalysisAutosave));
   tbody.appendChild(tr);
@@ -921,14 +916,11 @@ function renderAnalysisForms(){
   document.querySelector("#problemsTable tbody").innerHTML = "";
   document.querySelector("#demandesTable tbody").innerHTML = "";
   document.querySelector("#weeklyTable tbody").innerHTML = "";
-  document.querySelector("#keywordsTable tbody").innerHTML = "";
   (a.problems||[]).forEach(it=>catRow("#problemsTable tbody","problems",it));
   (a.demandes||[]).forEach(it=>catRow("#demandesTable tbody","demandes",it));
   (a.weekly||[]).forEach(it=>catRow("#weeklyTable tbody","weekly",it));
-  (a.keywords||[]).forEach(it=>catRow("#keywordsTable tbody","keywords",it));
   document.getElementById("constatsBox").value = (a.constats||[]).join("\n");
   document.getElementById("recoBox").value = (a.recommandations||[]).join("\n");
-  document.getElementById("internalNotesBox").value = a.internal_notes || "";
 }
 
 document.querySelectorAll(".btn-add[data-add]").forEach(btn=>{
@@ -937,7 +929,6 @@ document.querySelectorAll(".btn-add[data-add]").forEach(btn=>{
     if(kind === "problems") catRow("#problemsTable tbody","problems");
     if(kind === "demandes") catRow("#demandesTable tbody","demandes");
     if(kind === "weekly") catRow("#weeklyTable tbody","weekly");
-    if(kind === "keywords") catRow("#keywordsTable tbody","keywords");
   });
 });
 
@@ -950,7 +941,7 @@ document.getElementById("duplicatePrevBtn").addEventListener("click", ()=>{
   document.querySelector("#problemsTable tbody").innerHTML = "";
   document.querySelector("#demandesTable tbody").innerHTML = "";
   document.querySelector("#weeklyTable tbody").innerHTML = "";
-  (pa.problems||[]).forEach(it=>catRow("#problemsTable tbody","problems",{label:it.label, count:"", desc:it.desc, action:it.action}));
+  (pa.problems||[]).forEach(it=>catRow("#problemsTable tbody","problems",{label:it.label, count:"", desc:it.desc}));
   (pa.demandes||[]).forEach(it=>catRow("#demandesTable tbody","demandes",{label:it.label, count:"", desc:it.desc}));
   (pa.weekly||[]).forEach(it=>catRow("#weeklyTable tbody","weekly",{week:it.week, bugs:"", demandes:"", obs:""}));
   toast("Catégories dupliquées — pensez à mettre à jour les valeurs");
@@ -970,7 +961,7 @@ function attachSearch(inputId, tableSel){
 attachSearch("searchProblems", "#problemsTable");
 attachSearch("searchDemandes", "#demandesTable");
 
-function collectCatTable(sel, withAction){
+function collectCatTable(sel){
   const out = [];
   document.querySelectorAll(sel + " tbody tr").forEach(tr=>{
     const label = tr.querySelector(".f-label").value.trim();
@@ -978,7 +969,7 @@ function collectCatTable(sel, withAction){
     const desc = tr.querySelector(".f-desc").value.trim();
     if(!label) return;
     const item = {label, count, desc};
-    if(withAction) item.action = tr.querySelector(".f-action").value.trim();
+    if(tr.dataset.action) item.action = tr.dataset.action;
     out.push(item);
   });
   return out;
@@ -996,24 +987,17 @@ function collectWeeklyTable(){
   return out;
 }
 
-function collectKeywordsTable(){
-  const out = [];
-  document.querySelectorAll("#keywordsTable tbody tr").forEach(tr=>{
-    const word = tr.querySelector(".f-word").value.trim();
-    const count = Number(tr.querySelector(".f-kwcount").value || 0);
-    if(word) out.push({word, count});
-  });
-  return out;
-}
-
 function collectAnalysisPayload(){
+  // « Action corrective », mots-clés et notes internes ne sont plus saisis ni affichés : les
+  // valeurs déjà enregistrées sont conservées telles quelles dans le fichier (aucune perte).
+  const prevA = state.analysis || {};
   return {
     month_label: monthLabel(state.ym),
-    problems: collectCatTable("#problemsTable", true),
-    demandes: collectCatTable("#demandesTable", false),
+    problems: collectCatTable("#problemsTable"),
+    demandes: collectCatTable("#demandesTable"),
     weekly: collectWeeklyTable(),
-    keywords: collectKeywordsTable(),
-    internal_notes: document.getElementById("internalNotesBox").value,
+    keywords: prevA.keywords || [],
+    internal_notes: prevA.internal_notes || "",
     constats: document.getElementById("constatsBox").value.split("\n").map(s=>s.trim()).filter(Boolean),
     recommandations: document.getElementById("recoBox").value.split("\n").map(s=>s.trim()).filter(Boolean),
   };
@@ -1029,7 +1013,6 @@ async function saveAnalysis(silent){
 const scheduleAnalysisAutosave = debounce(()=>saveAnalysis(true), 1800);
 document.getElementById("constatsBox").addEventListener("input", scheduleAnalysisAutosave);
 document.getElementById("recoBox").addEventListener("input", scheduleAnalysisAutosave);
-document.getElementById("internalNotesBox").addEventListener("input", scheduleAnalysisAutosave);
 
 document.getElementById("saveAnalysisBtn").addEventListener("click", async ()=>{
   await saveAnalysis(false);
@@ -1059,7 +1042,29 @@ function computeMonthMetrics(calls, emails, analysis){
 }
 
 // polarity: "positive" (hausse = bien, vert), "negative" (hausse = mal, rouge), "neutral" (gris, pas de jugement)
-function kpiDelta(current, previous, polarity="neutral"){
+// Libellés KPI par défaut (miroir de TARKHISS_/MOUSSANADA_DEFAULT_KPI_LABELS côté Python) ;
+// chacun peut être surchargé en Administration (moduleSettings.kpi_labels).
+const KPI_DEFAULT_LABELS = {
+  tarkhiss: {
+    emails_received: "Emails reçus", emails_sent: "Emails envoyés", calls: "Total appels",
+    talk_time: "Temps comm. (hh:mm:ss)", problems: "Problèmes techniques", demandes: "Demandes d'info",
+    ratio_bd: "Ratio Bugs / Demandes", critical_week: "Semaine critique",
+    avg_call: "Durée moy./appel", dominant_channel: "Canal dominant",
+  },
+  moussanada: {
+    tickets_ouverts: "Tickets ouverts", tickets_resolus: "Tickets résolus", tickets_clos: "Tickets clos",
+    tickets_retard: "En retard", taux_resolution: "Taux de résolution", taux_cloture: "Taux de clôture",
+    delai_resolution: "Délai moy. résolution", delai_cloture: "Délai moy. clôture",
+  },
+};
+function kpiLabel(key){
+  const custom = (moduleSettings.kpi_labels || {})[key];
+  if(custom && String(custom).trim()) return String(custom).trim();
+  return (KPI_DEFAULT_LABELS[currentModule] || {})[key] || key;
+}
+
+// Affiche l'évolution en % ET la valeur absolue du mois précédent, ex. "+12% vs préc. (180)".
+function kpiDelta(current, previous, polarity="neutral", fmt=null){
   if(previous === 0 && current === 0) return "";
   let txt, color;
   if(previous === 0){
@@ -1067,7 +1072,8 @@ function kpiDelta(current, previous, polarity="neutral"){
   } else {
     const diff = ((current-previous)/previous)*100;
     const sign = diff >= 0 ? "+" : "";
-    txt = `${sign}${diff.toFixed(0)}% vs préc.`;
+    const prevTxt = fmt ? fmt(previous) : (Number.isInteger(previous) ? String(previous) : (Math.round(previous*10)/10).toString());
+    txt = `${sign}${diff.toFixed(0)}% vs préc. (${prevTxt})`;
     if(Math.abs(diff) < 1 || polarity === "neutral"){ color = "var(--muted)"; }
     else {
       const isUp = diff > 0;
@@ -1130,7 +1136,6 @@ function renderDashboard(){
   const problems = a.problems || [];
   const demandes = a.demandes || [];
   const weekly = a.weekly || [];
-  const keywords = a.keywords || [];
 
   const cur = computeMonthMetrics(state.calls, state.emails, a);
   const prev = computeMonthMetrics(prevState.calls, prevState.emails, prevState.analysis || {});
@@ -1159,19 +1164,6 @@ function renderDashboard(){
 
   const logoImg = globalSettings.logo_filename ? `<img src="/static/uploads/${globalSettings.logo_filename}" class="print-only" style="height:34px;margin-bottom:10px;">` : "";
 
-  const maxKw = Math.max(1, ...keywords.map(k=>k.count||0));
-  const wordCloudHtml = keywords.length ? `
-    <div class="dash-table-wrap">
-      <h3>☁️ Nuage de mots-clés</h3>
-      <div class="word-cloud">
-        ${keywords.map(k=>{
-          const size = 12 + (k.count/maxKw)*22;
-          const opacity = 0.55 + (k.count/maxKw)*0.45;
-          return `<span style="font-size:${size}px;opacity:${opacity};">${k.word}</span>`;
-        }).join("")}
-      </div>
-    </div>` : "";
-
   const html = `
     <div class="print-only" style="margin-bottom:10px;">
       ${logoImg}
@@ -1179,20 +1171,20 @@ function renderDashboard(){
     </div>
 
     <div class="kpi-grid">
-      <div class="kpi-card"><div class="kpi-label">📧 Emails reçus</div><div class="kpi-value">${cur.received}</div>${kpiDelta(cur.received, prev.received, "neutral")}</div>
-      <div class="kpi-card"><div class="kpi-label">📤 Emails envoyés</div><div class="kpi-value">${cur.sent}</div>${kpiDelta(cur.sent, prev.sent, "neutral")}</div>
-      <div class="kpi-card"><div class="kpi-label">📞 Total appels</div><div class="kpi-value">${cur.calls}</div>${kpiDelta(cur.calls, prev.calls, "neutral")}</div>
-      <div class="kpi-card"><div class="kpi-label">⏱️ Temps comm. (hh:mm:ss)</div><div class="kpi-value" style="font-size:20px;">${formatHMS(cur.durationSec)}</div></div>
+      <div class="kpi-card"><div class="kpi-label">📧 ${esc(kpiLabel("emails_received"))}</div><div class="kpi-value">${cur.received}</div>${kpiDelta(cur.received, prev.received, "neutral")}</div>
+      <div class="kpi-card"><div class="kpi-label">📤 ${esc(kpiLabel("emails_sent"))}</div><div class="kpi-value">${cur.sent}</div>${kpiDelta(cur.sent, prev.sent, "neutral")}</div>
+      <div class="kpi-card"><div class="kpi-label">📞 ${esc(kpiLabel("calls"))}</div><div class="kpi-value">${cur.calls}</div>${kpiDelta(cur.calls, prev.calls, "neutral")}</div>
+      <div class="kpi-card"><div class="kpi-label">⏱️ ${esc(kpiLabel("talk_time"))}</div><div class="kpi-value" style="font-size:20px;">${formatHMS(cur.durationSec)}</div></div>
     </div>
     <div class="kpi-grid">
-      <div class="kpi-card danger"><div class="kpi-label">🔴 Problèmes techniques</div><div class="kpi-value">${cur.bugs}</div>${kpiDelta(cur.bugs, prev.bugs, "negative")}</div>
-      <div class="kpi-card success"><div class="kpi-label">🟢 Demandes d'info</div><div class="kpi-value">${cur.demandes}</div>${kpiDelta(cur.demandes, prev.demandes, "neutral")}</div>
-      <div class="kpi-card"><div class="kpi-label">Ratio Bugs / Demandes</div><div class="kpi-value">${ratio.toFixed(2)}</div></div>
-      <div class="kpi-card accent"><div class="kpi-label">⚠️ Semaine critique</div><div class="kpi-value" style="font-size:16px;">${critWeek ? critWeek.week : "—"}</div></div>
+      <div class="kpi-card danger"><div class="kpi-label">🔴 ${esc(kpiLabel("problems"))}</div><div class="kpi-value">${cur.bugs}</div>${kpiDelta(cur.bugs, prev.bugs, "negative")}</div>
+      <div class="kpi-card success"><div class="kpi-label">🟢 ${esc(kpiLabel("demandes"))}</div><div class="kpi-value">${cur.demandes}</div>${kpiDelta(cur.demandes, prev.demandes, "neutral")}</div>
+      <div class="kpi-card"><div class="kpi-label">${esc(kpiLabel("ratio_bd"))}</div><div class="kpi-value">${ratio.toFixed(2)}</div></div>
+      <div class="kpi-card accent"><div class="kpi-label">⚠️ ${esc(kpiLabel("critical_week"))}</div><div class="kpi-value" style="font-size:16px;">${critWeek ? critWeek.week : "—"}</div></div>
     </div>
     <div class="kpi-grid">
-      <div class="kpi-card"><div class="kpi-label">⏳ Durée moy./appel</div><div class="kpi-value" style="font-size:20px;">${formatHMS(avgCallSec)}</div></div>
-      <div class="kpi-card"><div class="kpi-label">📊 Canal dominant</div><div class="kpi-value" style="font-size:15px;">☎ ${channelCallsPct}% / ✉ ${channelEmailPct}%</div></div>
+      <div class="kpi-card"><div class="kpi-label">⏳ ${esc(kpiLabel("avg_call"))}</div><div class="kpi-value" style="font-size:20px;">${formatHMS(avgCallSec)}</div></div>
+      <div class="kpi-card"><div class="kpi-label">📊 ${esc(kpiLabel("dominant_channel"))}</div><div class="kpi-value" style="font-size:15px;">☎ ${channelCallsPct}% / ✉ ${channelEmailPct}%</div></div>
     </div>
 
     ${showYoy ? `
@@ -1240,11 +1232,13 @@ function renderDashboard(){
     <div class="charts-row">
       <div class="chart-card">
         <h3>Évolution hebdomadaire — Bugs vs Demandes</h3>
-        <canvas id="weeklyChart" height="140"></canvas>
+        <div class="chart-box"><canvas id="weeklyChart"></canvas></div>
+        <p class="chart-caption">Comparaison du nombre de bugs signalés et de demandes d'information, semaine par semaine.</p>
       </div>
       <div class="chart-card">
         <h3>Répartition des problèmes techniques</h3>
-        <canvas id="problemsChart" height="140"></canvas>
+        <div class="chart-box"><canvas id="problemsChart"></canvas></div>
+        <p class="chart-caption">Répartition des problèmes techniques par type, en proportion du total du mois.</p>
       </div>
     </div>
 
@@ -1252,10 +1246,12 @@ function renderDashboard(){
       <div class="chart-card">
         <h3>Charge quotidienne (appels + emails reçus)</h3>
         <canvas id="dailyLoadChart" height="140"></canvas>
+        <p class="chart-caption">Volume cumulé d'appels et d'emails reçus chaque jour, pour repérer les pics de charge.</p>
       </div>
       <div class="chart-card">
         <h3>Emails reçus/envoyés par semaine</h3>
         <canvas id="weeklyEmailsChart" height="140"></canvas>
+        <p class="chart-caption">Comparaison des emails reçus et envoyés, semaine par semaine.</p>
       </div>
     </div>
 
@@ -1265,12 +1261,10 @@ function renderDashboard(){
       <img src="/api/tarkhiss/heatmap-png/${state.ym}?_=${Date.now()}" style="width:100%;max-width:720px;display:block;margin:0 auto;" alt="Heatmap de charge Tarkhiss">
     </div>
 
-    ${wordCloudHtml}
-
     <div class="dash-table-wrap">
       <h3>🔴 Problèmes techniques signalés (${cur.bugs})</h3>
       <table class="dash-table">
-        <thead><tr><th>Type</th><th>Nb</th><th>%</th><th>Description</th><th>Action corrective</th></tr></thead>
+        <thead><tr><th>Type</th><th>Nb</th><th>%</th><th>Description</th></tr></thead>
         <tbody>
           ${problems.map(p=>{
             const pct = cur.bugs ? (p.count/cur.bugs*100) : 0;
@@ -1278,9 +1272,8 @@ function renderDashboard(){
               <td>${esc(p.label)}</td><td><strong>${p.count}</strong></td>
               <td><span class="pct-bar-bg"><span class="pct-bar-fill" style="width:${pct}%;background:var(--danger);"></span></span>${pct.toFixed(1)}%</td>
               <td style="color:var(--muted);font-size:12.5px;">${esc(p.desc)||''}</td>
-              <td style="color:var(--muted);font-size:12.5px;">${esc(p.action)||''}</td>
             </tr>`;
-          }).join("") || `<tr><td colspan="5" style="color:var(--muted);">Aucune donnée — à saisir dans l'onglet Analyse mensuelle</td></tr>`}
+          }).join("") || `<tr><td colspan="4" style="color:var(--muted);">Aucune donnée — à saisir dans l'onglet Analyse mensuelle</td></tr>`}
         </tbody>
       </table>
     </div>
@@ -1345,7 +1338,7 @@ function renderDashboard(){
         { label:"Demandes", data: weekly.map(w=>w.demandes), backgroundColor:"#25935F", borderRadius:5 },
       ]
     },
-    options: { responsive:true, animation:{duration:700, easing:'easeOutQuart'}, plugins:{legend:{position:"bottom"}}, scales:{ x:{grid:{display:false}}, y:{beginAtZero:true} } }
+    options: { responsive:true, maintainAspectRatio:false, animation:{duration:700, easing:'easeOutQuart'}, plugins:{legend:{position:"bottom"}}, scales:{ x:{grid:{display:false}}, y:{beginAtZero:true} } }
   });
 
   const ctxP = document.getElementById("problemsChart");
@@ -1356,7 +1349,8 @@ function renderDashboard(){
       labels: problems.map(p=>p.label),
       datasets: [{ data: problems.map(p=>p.count), backgroundColor: problems.map((_,i)=>palette[i%palette.length]) }]
     },
-    options: { responsive:true, animation:{duration:700, easing:'easeOutQuart'}, plugins:{legend:{position:"bottom", labels:{boxWidth:10, font:{size:11}}}} }
+    // Hauteur fixe (.chart-box) + légende à droite : le donut reste proportionné au reste de la page
+    options: { responsive:true, maintainAspectRatio:false, cutout:"62%", animation:{duration:700, easing:'easeOutQuart'}, plugins:{legend:{position:"right", labels:{boxWidth:10, font:{size:11}}}} }
   });
 
   const days = businessDaysOfMonth(state.ym);
@@ -1573,6 +1567,15 @@ function downloadCanvas(canvas, filename){
 
 // ---------- PDF / Excel ----------
 let _pdfPreviewBlobUrl = null;
+// Nom de fichier proposé par le serveur (Content-Disposition), sinon nom de repli
+function filenameFromResponse(res, fallback){
+  const cd = res.headers.get("Content-Disposition") || "";
+  const star = cd.match(/filename\*=UTF-8''([^;]+)/i);
+  if(star) return decodeURIComponent(star[1]);
+  const plain = cd.match(/filename="?([^";]+)"?/i);
+  return plain ? plain[1] : fallback;
+}
+
 async function downloadPdfFromServer(url, payload, filename){
   showBusy("Génération du PDF en cours...");
   let res;
@@ -1582,6 +1585,7 @@ async function downloadPdfFromServer(url, payload, filename){
     hideBusy();
   }
   if(!res.ok){ toast("Erreur génération PDF"); return; }
+  filename = filename || filenameFromResponse(res, "rapport.pdf");
   const blob = await res.blob();
   if(_pdfPreviewBlobUrl) URL.revokeObjectURL(_pdfPreviewBlobUrl);
   _pdfPreviewBlobUrl = URL.createObjectURL(blob);
@@ -1832,9 +1836,13 @@ async function loadAnnual(){
     <div class="chart-card" style="margin-bottom:16px;">
       <h3>Tendance mensuelle</h3>
       <canvas id="annualChart" height="90"></canvas>
+      <p class="chart-caption">Évolution mensuelle des emails, appels, bugs et demandes sur la période sélectionnée.</p>
     </div>
+    <div class="annual-note" data-block="indicateurs"></div>
     ${heatmapHtml}
+    <div class="annual-note" data-block="charge"></div>
     ${topHtml}
+    <div class="annual-note" data-block="top3"></div>
     <div class="dash-table-wrap">
       <h3>Détail par mois</h3>
       <table class="dash-table">
@@ -1844,7 +1852,14 @@ async function loadAnnual(){
         </tbody>
       </table>
     </div>
+    <div class="annual-note" data-block="detail"></div>
+    <div class="annual-note" data-block="synthese"></div>
+    <div class="actions-row" id="annualNotesActions" style="display:none;">
+      <button class="btn btn-primary" id="saveAnnualNotesBtn">Enregistrer les descriptifs</button>
+      <span class="hint autosave-hint" id="annualNotesHint"></span>
+    </div>
   `;
+  renderAnnualNotes(start, end);
 
   if(annualChart) annualChart.destroy();
   const ctx = document.getElementById("annualChart");
@@ -1863,6 +1878,118 @@ async function loadAnnual(){
   });
   addPngExportButtons({annualChart});
 }
+
+// ---------- Descriptifs de la Vue annuelle : un texte par bloc + prompt Copilot à copier ----------
+let annualNotesPeriod = null;
+async function renderAnnualNotes(start, end){
+  if(!currentUser || currentUser.role === "hotliner") return;   // vue écran seule pour le hotliner
+  annualNotesPeriod = {start, end};
+  const res = await fetch(`/api/tarkhiss/annual-notes?start=${start}&end=${end}`);
+  if(!res.ok) return;
+  const d = await res.json();
+  if(annualNotesPeriod.start !== start || annualNotesPeriod.end !== end) return;   // période changée entre-temps
+  const editable = currentUser.role === "admin";
+  d.blocks.forEach(b=>{
+    const slot = document.querySelector(`.annual-note[data-block="${b.key}"]`);
+    if(!slot) return;
+    slot.innerHTML = `
+      <div class="dash-table-wrap" style="border-left:4px solid var(--primary, #0B4965);">
+        <div class="card-head">
+          <h3>📝 Descriptif — ${esc(b.label)}</h3>
+          <button class="btn-add" data-copy-prompt="${b.key}">📋 Copier le prompt</button>
+        </div>
+        <details style="margin:0 0 8px;"><summary class="hint" style="cursor:pointer;">Voir le prompt (à coller dans Copilot, puis coller la réponse ci-dessous)</summary>
+          <pre class="prompt-box" id="annualPrompt_${b.key}">${esc(d.prompts[b.key] || "")}</pre></details>
+        <textarea rows="4" data-note="${b.key}" ${editable ? "" : "readonly"}
+          placeholder="${editable ? "Texte inclus dans l'email, le PDF, le PowerPoint et l'Excel de la période…" : "Aucun descriptif rédigé."}">${esc((d.notes||{})[b.key] || "")}</textarea>
+      </div>`;
+    slot.querySelector("[data-copy-prompt]").addEventListener("click", ()=>{
+      navigator.clipboard.writeText(d.prompts[b.key] || "").then(()=>toast("Prompt copié"));
+    });
+    if(editable) slot.querySelector("textarea").addEventListener("input", debounce(()=>saveAnnualNotes(true), 1500));
+  });
+  document.getElementById("annualNotesActions").style.display = editable ? "" : "none";
+  const btn = document.getElementById("saveAnnualNotesBtn");
+  if(btn) btn.onclick = ()=>saveAnnualNotes(false);
+}
+async function saveAnnualNotes(silent){
+  if(!annualNotesPeriod) return;
+  const notes = {};
+  document.querySelectorAll("#annualContent textarea[data-note]").forEach(t=>{ notes[t.dataset.note] = t.value; });
+  const res = await fetch("/api/tarkhiss/annual-notes", {method:"POST", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({...annualNotesPeriod, notes})});
+  if(!res.ok){ toast("Enregistrement refusé"); return; }
+  if(silent) pulseAutosave("annualNotesHint"); else toast("Descriptifs enregistrés");
+}
+
+// ---------- Rapport de la période (Vue annuelle) : exports PDF / PPTX / Excel et envoi par email ----------
+function annualPeriod(){
+  const y = new Date().getFullYear();
+  return {start: document.getElementById("periodStart").value || `${y}-01`, end: document.getElementById("periodEnd").value || `${y}-12`};
+}
+async function flushAnnualNotes(){
+  // les rapports lisent les descriptifs enregistrés : on enregistre la saisie en cours avant de générer
+  if(currentUser?.role === "admin" && document.querySelector("#annualContent textarea[data-note]")) await saveAnnualNotes(true);
+}
+async function annualDownload(fmt){
+  await flushAnnualNotes();
+  const {start, end} = annualPeriod();
+  showBusy("Génération du rapport de la période...");
+  try{
+    const res = await fetch(`/api/tarkhiss/annual-report/${fmt}?start=${start}&end=${end}`);
+    if(!res.ok){ const e = await res.json().catch(()=>({})); toast(e.error || e.description || "Erreur de génération"); return; }
+    const name = filenameFromResponse(res, `Rapport_Tarkhiss_${start}_${end}.${fmt}`);
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+  } finally { hideBusy(); }
+}
+document.getElementById("annualXlsxBtn").addEventListener("click", ()=>annualDownload("xlsx"));
+document.getElementById("annualPdfBtn").addEventListener("click", ()=>annualDownload("pdf"));
+document.getElementById("annualPptxBtn").addEventListener("click", ()=>annualDownload("pptx"));
+document.getElementById("annualMailToggleBtn").addEventListener("click", ()=>{
+  const panel = document.getElementById("annualEmailPanel");
+  const opening = panel.style.display === "none";
+  panel.style.display = opening ? "block" : "none";
+  if(opening) setupEmailPanel("annualToCheckList", "annualCcCheckList", "annualGreetingInput");
+});
+document.getElementById("annualPreviewMailBtn").addEventListener("click", async ()=>{
+  await flushAnnualNotes();
+  const {start, end} = annualPeriod();
+  const greeting = document.getElementById("annualGreetingInput").value.trim();
+  showBusy("Préparation de l'aperçu...");
+  try{
+    const res = await fetch(`/api/tarkhiss/annual-email-preview?start=${start}&end=${end}&greeting=${encodeURIComponent(greeting)}`);
+    const data = await res.json();
+    openPreviewModal(data.subject, data.html);
+  } finally { hideBusy(); }
+});
+document.getElementById("annualConfirmSendBtn").addEventListener("click", async ()=>{
+  const {to, cc} = getSelectedRecipients("annualToCheckList", "annualCcCheckList");
+  if(!to.length){ toast("Sélectionnez au moins un destinataire (À)"); return; }
+  await flushAnnualNotes();
+  const {start, end} = annualPeriod();
+  const attachments = {};
+  document.querySelectorAll("[data-annual-att]").forEach(c=>{ attachments[c.dataset.annualAtt] = c.checked; });
+  const greeting = document.getElementById("annualGreetingInput").value.trim();
+  showBusy("Génération du rapport et des pièces jointes...");
+  let data;
+  try{
+    const res = await fetch("/api/tarkhiss/annual-send-email", {
+      method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({start, end, to, cc, greeting, attachments})
+    });
+    data = await res.json();
+    if(!res.ok){ toast(data.error || "Envoi refusé"); return; }
+  } finally { hideBusy(); }
+  toast(data.opened ? "Ouverture dans Outlook..." : `Fichier .eml généré (${data.attachments.length} pièce(s) jointe(s)) — téléchargement`);
+  if(!data.opened && data.download){
+    const a = document.createElement("a"); a.href = data.download; a.download = data.file; a.click();
+  }
+  document.getElementById("annualEmailPanel").style.display = "none";
+});
 
 // ============================================================
 // PROMPTS COPILOT
@@ -1912,17 +2039,6 @@ Présente le résultat sous forme de tableaux distincts, faciles à copier-colle
 3. Nouvelles catégories apparues ce mois-ci, catégories disparues.
 4. Une phrase de synthèse sur la tendance générale (amélioration ou dégradation du support).
 Présente sous forme de tableau comparatif à 2 colonnes (mois précédent / mois courant).`;
-
-  document.getElementById("promptF").textContent =
-`Pour les emails du mois de ${label} dans la feuille "Mail" (colonnes Subject et Preview) :
-1. Extrais les mots ou expressions clés les plus fréquents (hors mots vides comme "bonjour",
-   "merci", "cordialement", articles, prépositions).
-2. Regroupe les synonymes/variantes proches sous un seul terme représentatif (ex: "paiement",
-   "payer", "paiements" → "paiement").
-3. Donne la liste des 15 à 20 mots-clés les plus fréquents avec leur nombre d'occurrences,
-   triée par fréquence décroissante.
-Présente sous forme de tableau "Mot-clé | Fréquence", prêt à recopier dans le Nuage de
-mots-clés de l'application (un mot-clé par ligne).`;
 }
 
 document.querySelectorAll(".copy-btn").forEach(btn=>{
@@ -2092,10 +2208,17 @@ document.getElementById("saveAdvancedEditingBtn").addEventListener("click", asyn
     report_title_tarkhiss: document.getElementById("reportTitleTarkhissInput").value.trim(),
     report_title_moussanada: document.getElementById("reportTitleMoussanadaInput").value.trim(),
     report_title_pchc: document.getElementById("reportTitlePchcInput").value.trim(),
+    report_subtitle_tarkhiss: document.getElementById("reportSubtitleTarkhissInput").value.trim(),
+    report_subtitle_moussanada: document.getElementById("reportSubtitleMoussanadaInput").value.trim(),
+    report_subtitle_pchc: document.getElementById("reportSubtitlePchcInput").value.trim(),
     report_show_contact_names: document.getElementById("reportShowContactNamesInput").checked,
+    email_full_width: document.getElementById("emailFullWidthInput").checked,
+    pchc_enabled: document.getElementById("pchcEnabledInput").checked,
   };
+  const pchcToggled = (globalSettings.pchc_enabled !== false) !== payload.pchc_enabled;
   Object.assign(globalSettings, payload);
   await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify(payload)});
+  if(pchcToggled) await loadModules();
   applyAppBranding();
   toast("Identité et grands titres enregistrés");
 });
@@ -2379,12 +2502,18 @@ document.getElementById("csvWeeklyBtn").addEventListener("click", ()=>{
 async function loadAdmin(){
   await loadGlobalSettings();
   await loadModuleSettings();
+  renderKpiLabelsAdmin();
   document.getElementById("agencyNameInput").value = globalSettings.agency_name || "";
   document.getElementById("appNameInput").value = globalSettings.app_name || "";
   document.getElementById("appSubtitleInput").value = globalSettings.app_subtitle || "";
   document.getElementById("reportTitleTarkhissInput").value = globalSettings.report_title_tarkhiss || "";
   document.getElementById("reportTitleMoussanadaInput").value = globalSettings.report_title_moussanada || "";
   document.getElementById("reportTitlePchcInput").value = globalSettings.report_title_pchc || "";
+  document.getElementById("reportSubtitleTarkhissInput").value = globalSettings.report_subtitle_tarkhiss || "";
+  document.getElementById("reportSubtitleMoussanadaInput").value = globalSettings.report_subtitle_moussanada || "";
+  document.getElementById("reportSubtitlePchcInput").value = globalSettings.report_subtitle_pchc || "";
+  document.getElementById("emailFullWidthInput").checked = !!globalSettings.email_full_width;
+  document.getElementById("pchcEnabledInput").checked = globalSettings.pchc_enabled !== false;
   document.getElementById("reportShowContactNamesInput").checked = !!globalSettings.report_show_contact_names;
   document.getElementById("smtpHostInput").value = globalSettings.smtp_host || "";
   document.getElementById("smtpPortInput").value = globalSettings.smtp_port || 587;
@@ -2541,6 +2670,15 @@ async function loadMoussanadaMonth(ym){
   mState.notes = data.notes;
 }
 
+// Changement de mois Moussanada : charge PUIS redessine l'onglet actif (comme loadMonth côté
+// Tarkhiss). Sans ce rendu, le dashboard restait sur le mois précédent — catégories, services et
+// Pareto vides tant qu'on ne cliquait pas sur Racine / Nœud final.
+async function loadMoussanadaMonthAndRender(ym){
+  await loadMoussanadaMonth(ym);
+  const tab = document.querySelector(".nav-item.active")?.dataset.tab;
+  if(tab && tab.startsWith("m-")) renderTab(tab);
+}
+
 function prevYmM(ym){ return prevYm(ym); }
 
 function mMetricsFor(ym){
@@ -2594,7 +2732,9 @@ function renderMDashboard(){
   const showYoy = currentUser && (currentUser.role === "admin" || currentUser.role === "superviseur");
   const cat = aggregateItems(mState.month.categories);
   const srv = aggregateItems(mState.month.services);
-  const techs = [...mState.month.techniciens].sort((a,b)=>b.ouverts-a.ouverts);
+  // Charge d'un technicien = volume de sollicitation (ouverts + résolus) — même calcul que tech_volume() côté serveur
+  const techVol = t=> (t.ouverts||0) + (t.resolus||0);
+  const techs = [...mState.month.techniciens].sort((a,b)=>techVol(b)-techVol(a));
 
   const tauxResolution = cur.ouverts ? Math.round(cur.resolus/cur.ouverts*100) : 0;
   const tauxCloture = cur.ouverts ? Math.round(cur.clos/cur.ouverts*100) : 0;
@@ -2625,16 +2765,16 @@ function renderMDashboard(){
     </div>
 
     <div class="kpi-grid">
-      <div class="kpi-card"><div class="kpi-label">🎫 Tickets ouverts</div><div class="kpi-value">${cur.ouverts}</div>${kpiDelta(cur.ouverts, prev.ouverts, "neutral")}</div>
-      <div class="kpi-card success"><div class="kpi-label">✅ Tickets résolus</div><div class="kpi-value">${cur.resolus}</div>${kpiDelta(cur.resolus, prev.resolus, "positive")}</div>
-      <div class="kpi-card"><div class="kpi-label">📦 Tickets clos</div><div class="kpi-value">${cur.clos}</div>${kpiDelta(cur.clos, prev.clos, "positive")}</div>
-      <div class="kpi-card danger"><div class="kpi-label">⚠️ En retard</div><div class="kpi-value">${cur.en_retard}</div>${kpiDelta(cur.en_retard, prev.en_retard, "negative")}</div>
+      <div class="kpi-card"><div class="kpi-label">🎫 ${esc(kpiLabel("tickets_ouverts"))}</div><div class="kpi-value">${cur.ouverts}</div>${kpiDelta(cur.ouverts, prev.ouverts, "neutral")}</div>
+      <div class="kpi-card success"><div class="kpi-label">✅ ${esc(kpiLabel("tickets_resolus"))}</div><div class="kpi-value">${cur.resolus}</div>${kpiDelta(cur.resolus, prev.resolus, "positive")}</div>
+      <div class="kpi-card"><div class="kpi-label">📦 ${esc(kpiLabel("tickets_clos"))}</div><div class="kpi-value">${cur.clos}</div>${kpiDelta(cur.clos, prev.clos, "positive")}</div>
+      <div class="kpi-card danger"><div class="kpi-label">⚠️ ${esc(kpiLabel("tickets_retard"))}</div><div class="kpi-value">${cur.en_retard}</div>${kpiDelta(cur.en_retard, prev.en_retard, "negative")}</div>
     </div>
     <div class="kpi-grid">
-      <div class="kpi-card success"><div class="kpi-label">Taux de résolution</div><div class="kpi-value">${tauxResolution}%</div>${kpiDelta(tauxResolution, prevTauxResolution, "positive")}</div>
-      <div class="kpi-card success"><div class="kpi-label">Taux de clôture</div><div class="kpi-value">${tauxCloture}%</div>${kpiDelta(tauxCloture, prevTauxCloture, "positive")}</div>
-      <div class="kpi-card"><div class="kpi-label">⏱️ Délai moy. résolution</div><div class="kpi-value" style="font-size:20px;">${formatDH(cur.resolution_h)}</div>${kpiDelta(cur.resolution_h, prev.resolution_h, "negative")}</div>
-      <div class="kpi-card"><div class="kpi-label">⏱️ Délai moy. clôture</div><div class="kpi-value" style="font-size:20px;">${formatDH(cur.cloture_h)}</div>${kpiDelta(cur.cloture_h, prev.cloture_h, "negative")}</div>
+      <div class="kpi-card success"><div class="kpi-label">${esc(kpiLabel("taux_resolution"))}</div><div class="kpi-value">${tauxResolution}%</div>${kpiDelta(tauxResolution, prevTauxResolution, "positive", v=>v+"%")}</div>
+      <div class="kpi-card success"><div class="kpi-label">${esc(kpiLabel("taux_cloture"))}</div><div class="kpi-value">${tauxCloture}%</div>${kpiDelta(tauxCloture, prevTauxCloture, "positive", v=>v+"%")}</div>
+      <div class="kpi-card"><div class="kpi-label">⏱️ ${esc(kpiLabel("delai_resolution"))}</div><div class="kpi-value" style="font-size:20px;">${formatDH(cur.resolution_h)}</div>${kpiDelta(cur.resolution_h, prev.resolution_h, "negative", formatDH)}</div>
+      <div class="kpi-card"><div class="kpi-label">⏱️ ${esc(kpiLabel("delai_cloture"))}</div><div class="kpi-value" style="font-size:20px;">${formatDH(cur.cloture_h)}</div>${kpiDelta(cur.cloture_h, prev.cloture_h, "negative", formatDH)}</div>
     </div>
 
     ${showYoy ? `
@@ -2653,10 +2793,12 @@ function renderMDashboard(){
       <div class="chart-card">
         <h3>Comparatif Volumes — ${monthLabel(prevYmM(mState.ym))} / ${monthLabel(mState.ym)}</h3>
         <canvas id="mVolumeChart" height="150"></canvas>
+        <p class="chart-caption">Évolution du nombre de tickets ouverts, résolus et clos entre les deux mois comparés.</p>
       </div>
       <div class="chart-card">
         <h3>Comparatif Délais moyens (heures)</h3>
         <canvas id="mDelayChart" height="150"></canvas>
+        <p class="chart-caption">Comparaison des délais moyens de résolution et de clôture entre les deux mois.</p>
       </div>
     </div>
 
@@ -2670,10 +2812,12 @@ function renderMDashboard(){
       <div class="chart-card">
         <h3>Répartition par Type</h3>
         <canvas id="mTypeChart" height="150"></canvas>
+        <p class="chart-caption">Répartition des tickets par type de demande (incident, demande de service, etc.).</p>
       </div>
       <div class="chart-card">
         <h3>Distribution des délais de résolution</h3>
         <canvas id="mDelayDistChart" height="150"></canvas>
+        <p class="chart-caption">Nombre de tickets selon leur durée de résolution, par tranche de délai.</p>
       </div>
     </div>
 
@@ -2689,10 +2833,12 @@ function renderMDashboard(){
       <div class="chart-card">
         <h3>Tendance ouverts/résolus/clos (12 mois)</h3>
         <canvas id="mTrendChart" height="140"></canvas>
+        <p class="chart-caption">Évolution mensuelle des tickets ouverts, résolus et clos sur les 12 derniers mois.</p>
       </div>
       <div class="chart-card">
         <h3>Évolution du stock en retard (backlog)</h3>
         <canvas id="mBacklogChart2" height="140"></canvas>
+        <p class="chart-caption">Évolution du stock de tickets en retard (backlog) au fil des mois.</p>
       </div>
     </div>
 
@@ -2705,45 +2851,56 @@ function renderMDashboard(){
         </div>
       </div>
       <canvas id="mCatChart" height="130"></canvas>
+      <p class="chart-caption">Répartition des tickets par catégorie de demande.</p>
     </div>
 
     <div class="chart-card" style="margin-bottom:16px;">
       <h3>Top 10 services demandeurs</h3>
       <canvas id="mSrvChart" height="130"></canvas>
+      <p class="chart-caption">Répartition des tickets par service demandeur.</p>
     </div>
 
     <div class="chart-card" style="margin-bottom:16px;">
       <h3>Analyse Pareto — catégories (80% des tickets)</h3>
       <canvas id="mParetoChart" height="140"></canvas>
+      <p class="chart-caption">Contribution cumulée des catégories au volume total (principe des 80/20).</p>
     </div>
 
     <div class="charts-row">
       <div class="chart-card">
-        <h3>Charge par technicien (ouverts vs résolus)</h3>
-        <canvas id="mTechChart" height="150"></canvas>
+        <h3>Volume de sollicitation par technicien</h3>
+        <div class="chart-box"><canvas id="mTechVolChart"></canvas></div>
+        <p class="chart-caption">Charge = tickets ouverts + résolus sur le mois.<span id="mTechHighlight"></span></p>
       </div>
       <div class="chart-card">
-        <h3>Performance techniciens</h3>
-        <canvas id="mRadarChart" height="150"></canvas>
+        <h3>Détail des sollicitations (ouverts / résolus)</h3>
+        <div class="chart-box"><canvas id="mTechChart"></canvas></div>
+        <p class="chart-caption">Répartition du volume de chaque technicien entre tickets ouverts et tickets résolus.</p>
       </div>
+    </div>
+
+    <div class="chart-card" style="margin-bottom:16px;">
+      <h3>Performance techniciens</h3>
+      <div class="chart-box" style="height:300px;"><canvas id="mRadarChart"></canvas></div>
+      <p class="chart-caption">Comparaison multi-critères de la performance de chaque technicien.</p>
     </div>
 
     <div class="dash-table-wrap">
       <h3>👤 Comparaison technicien vs moyenne équipe</h3>
       <table class="dash-table">
-        <thead><tr><th>Technicien</th><th>Ouverts</th><th>Résolus</th><th>vs Moy. ouverts</th><th>vs Moy. résolus</th></tr></thead>
+        <thead><tr><th>Technicien</th><th>Sollicitations</th><th>Ouverts</th><th>Résolus</th><th>vs Moy. ouverts</th><th>vs Moy. résolus</th></tr></thead>
         <tbody>
           ${techs.map(t=>{
             const dO = teamAvgOuverts ? Math.round(((t.ouverts-teamAvgOuverts)/teamAvgOuverts)*100) : 0;
             const dR = teamAvgResolus ? Math.round(((t.resolus-teamAvgResolus)/teamAvgResolus)*100) : 0;
             return `<tr>
-              <td>${esc(t.label)}</td><td>${t.ouverts}</td><td>${t.resolus}</td>
+              <td>${esc(t.label)}</td><td><strong>${techVol(t)}</strong></td><td>${t.ouverts}</td><td>${t.resolus}</td>
               <td style="color:${dO>=0?'var(--success)':'var(--danger)'};font-weight:700;">${dO>=0?'+':''}${dO}%</td>
               <td style="color:${dR>=0?'var(--success)':'var(--danger)'};font-weight:700;">${dR>=0?'+':''}${dR}%</td>
             </tr>`;
-          }).join("") || `<tr><td colspan="5" style="color:var(--muted);">Aucune donnée</td></tr>`}
+          }).join("") || `<tr><td colspan="6" style="color:var(--muted);">Aucune donnée</td></tr>`}
           <tr style="background:var(--primary-pale);font-weight:700;">
-            <td>Moyenne équipe</td><td>${teamAvgOuverts.toFixed(1)}</td><td>${teamAvgResolus.toFixed(1)}</td><td></td><td></td>
+            <td>Moyenne équipe</td><td>${(teamAvgOuverts + teamAvgResolus).toFixed(1)}</td><td>${teamAvgOuverts.toFixed(1)}</td><td>${teamAvgResolus.toFixed(1)}</td><td></td><td></td>
           </tr>
         </tbody>
       </table>
@@ -2803,7 +2960,14 @@ function renderMDashboard(){
   });
 
   // Tendance 12 mois
-  const months = Object.keys(mState.timeseries).sort();
+  // Seulement de vrais mois (AAAA-MM, pas les lignes « Total » d'un export GLPI), avec données,
+  // jusqu'au mois en cours — sinon libellés « undefined NaN » sur l'axe.
+  const nowYm = defaultMonth();
+  const months = Object.keys(mState.timeseries).sort().filter(m=>{
+    if(!/^\d{4}-\d{2}$/.test(m) || m > nowYm) return false;
+    const r = mState.timeseries[m]||{};
+    return (r.ouverts||0)+(r.resolus||0)+(r.clos||0)+(r.en_retard||0) > 0;
+  });
   mCharts.trend = new Chart(document.getElementById("mTrendChart"), {
     type:"line",
     data:{
@@ -2824,30 +2988,48 @@ function renderMDashboard(){
   });
 
   const topCat = cat.slice(0,10), topSrv = srv.slice(0,10);
-  mCharts.cat = new Chart(document.getElementById("mCatChart"), {
+  // Configs construites par fonction : le dashboard et l'image envoyée par email (rendue plus
+  // grande, texte agrandi — cf. collectMoussanadaChartImages) partagent exactement le même graphique.
+  // Axe de valeurs borné aux données (bounds:'data') + petite marge : pas de vide perdu au-delà de la plus longue barre.
+  const catConfig = (fs={})=>({
     type:"bar",
     data:{ labels: topCat.map(c=>c.label), datasets:[
       {label:"Ouverts", data: topCat.map(c=>c.ouverts), backgroundColor:"#0B4965", borderRadius:4},
       {label:"Résolus", data: topCat.map(c=>c.resolus), backgroundColor:"#25935F", borderRadius:4},
     ]},
-    options:{indexAxis:"y", responsive:true, animation:{duration:700}, plugins:{legend:{position:"bottom"}, datalabels:{display:true, anchor:'end', align:'end', font:{weight:'bold',size:10}, color:'#0D1926'}}, scales:{x:{beginAtZero:true, grace:'15%'}}}
+    options:{indexAxis:"y", responsive: fs.export ? false : true, animation: fs.export ? false : {duration:700}, devicePixelRatio: fs.export ? 2 : undefined,
+      layout:{padding:{right: fs.export ? 34 : 26}},
+      plugins:{legend:{position:"bottom", labels:{font:{size: fs.legend||12}}},
+        datalabels:{display:true, anchor:'end', align:'end', clamp:true, font:{weight:'bold', size: fs.label||10}, color:'#0D1926'}},
+      scales:{x:{beginAtZero:true, bounds:'data', grace:'4%', afterBuildTicks: keepRoundTicks, ticks:{font:{size: fs.tick||11}}},
+              y:{ticks:{font:{size: fs.tick||11}}}}}
   });
+  mCharts.cat = new Chart(document.getElementById("mCatChart"), catConfig());
+  mExportConfigs.cat = ()=> catConfig({export:true, tick:15, label:14, legend:15});
 
-  mCharts.srv = new Chart(document.getElementById("mSrvChart"), {
+  // Même traitement que les catégories : texte agrandi dans l'email, pas de vide au-delà de la plus longue barre
+  const srvConfig = (fs={})=>({
     type:"bar",
     data:{ labels: topSrv.map(c=>c.label), datasets:[
       {label:"Ouverts", data: topSrv.map(c=>c.ouverts), backgroundColor:"#1794CF", borderRadius:4},
       {label:"Résolus", data: topSrv.map(c=>c.resolus), backgroundColor:"#25935F", borderRadius:4},
     ]},
-    options:{indexAxis:"y", responsive:true, animation:{duration:700}, plugins:{legend:{position:"bottom"}, datalabels:{display:true, anchor:'end', align:'end', font:{weight:'bold',size:10}, color:'#0D1926'}}, scales:{x:{beginAtZero:true, grace:'15%'}}}
+    options:{indexAxis:"y", responsive: fs.export ? false : true, animation: fs.export ? false : {duration:700}, devicePixelRatio: fs.export ? 2 : undefined,
+      layout:{padding:{right: fs.export ? 34 : 26}},
+      plugins:{legend:{position:"bottom", labels:{font:{size: fs.legend||12}}},
+        datalabels:{display:true, anchor:'end', align:'end', clamp:true, font:{weight:'bold', size: fs.label||10}, color:'#0D1926'}},
+      scales:{x:{beginAtZero:true, bounds:'data', grace:'4%', afterBuildTicks: keepRoundTicks, ticks:{font:{size: fs.tick||11}}},
+              y:{ticks:{font:{size: fs.tick||11}}}}}
   });
+  mCharts.srv = new Chart(document.getElementById("mSrvChart"), srvConfig());
+  mExportConfigs.srv = ()=> srvConfig({export:true, tick:15, label:14, legend:15});
 
   // Pareto
   const paretoSorted = [...cat].sort((a,b)=>b.ouverts-a.ouverts).slice(0,12);
   const totalCat = cat.reduce((s,c)=>s+c.ouverts,0) || 1;
   let cum = 0;
   const cumPct = paretoSorted.map(c=>{ cum += c.ouverts; return Math.round(cum/totalCat*100); });
-  mCharts.pareto = new Chart(document.getElementById("mParetoChart"), {
+  const paretoConfig = (fs={})=>({
     data:{
       labels: paretoSorted.map(c=>c.label),
       datasets:[
@@ -2855,19 +3037,67 @@ function renderMDashboard(){
         {type:"line", label:"% cumulé", data: cumPct, borderColor:"#F59F0A", backgroundColor:"#F59F0A", yAxisID:"y1", tension:.3, order:1},
       ]
     },
-    options:{responsive:true, animation:{duration:700}, plugins:{legend:{position:"bottom"}},
-      scales:{ y:{beginAtZero:true}, y1:{position:"right", min:0, max:100, grid:{drawOnChartArea:false}, ticks:{callback:v=>v+"%"}} }}
+    options:{responsive: fs.export ? false : true, animation: fs.export ? false : {duration:700}, devicePixelRatio: fs.export ? 2 : undefined,
+      plugins:{legend:{position:"bottom", labels:{font:{size: fs.legend||12}}}},
+      scales:{ x:{ticks:{font:{size: fs.tick||11}}},
+               y:{beginAtZero:true, bounds:'data', grace:'4%', afterBuildTicks: keepRoundTicks, ticks:{font:{size: fs.tick||11}}},
+               y1:{position:"right", min:0, max:100, grid:{drawOnChartArea:false}, ticks:{callback:v=>v+"%", font:{size: fs.tick||11}}} }}
   });
+  mCharts.pareto = new Chart(document.getElementById("mParetoChart"), paretoConfig());
+  mExportConfigs.pareto = ()=> paretoConfig({export:true, tick:15, legend:15});
 
-  // Charge techniciens
+  // Charge techniciens en deux graphiques :
+  //  1) Volume de sollicitation (ouverts + résolus) — sert au classement ; plus chargé ▲ (ambre) et
+  //     moins chargé ▼ (teal) signalés par leur seul libellé, sans halo ni changement de barre ;
+  //  2) Détail du volume : Ouverts (ambre = reçus) vs Résolus (indigo = traités).
+  const TECH_VOL = "#0D9488", TECH_OPEN = "#F59E0B", TECH_DONE = "#6366F1";
+  const techVols = techs.map(techVol);
+  const techMax = techs.length > 1 ? techVols.indexOf(Math.max(...techVols)) : -1;
+  const techMin = techs.length > 1 ? techVols.lastIndexOf(Math.min(...techVols)) : -1;
+  const hasSpread = techMax !== -1 && techVols[techMax] !== techVols[techMin];
+  const iMax = hasSpread ? techMax : -1, iMin = hasSpread ? techMin : -1;
+  const inkColor = ()=> getComputedStyle(document.documentElement).getPropertyValue("--ink").trim() || '#3F3F46';
+  const techTicks = {
+    callback(v, i){ const l = this.getLabelForValue(v); return i === iMax ? "▲ " + l : i === iMin ? "▼ " + l : l; },
+    color:c=> c.index === iMax ? "#B45309" : c.index === iMin ? "#0F766E" : Chart.defaults.color,
+    font:c=>({weight: c.index === iMax || c.index === iMin ? "600" : "normal"}),
+  };
+  const techTooltip = {callbacks:{afterTitle:items=>{
+    const i = items[0]?.dataIndex;
+    const tag = i === iMax ? "▲ Technicien le plus chargé" : i === iMin ? "▼ Technicien le moins chargé" : "";
+    return [`Sollicitations : ${techVols[i]}`, tag].filter(Boolean);
+  }}};
+  mCharts.techvol = new Chart(document.getElementById("mTechVolChart"), {
+    type:"bar",
+    data:{ labels: techs.map(t=>t.label), datasets:[
+      {label:"Sollicitations (ouverts + résolus)", data: techVols, backgroundColor: TECH_VOL, borderRadius:6, maxBarThickness:36},
+    ]},
+    options:{responsive:true, maintainAspectRatio:false, animation:{duration:700},
+      plugins:{
+        legend:{display:false},
+        datalabels:{display:true, anchor:'end', align:'top', font:{weight:'bold', size:10}, color:inkColor},
+        tooltip:techTooltip,
+      },
+      scales:{ y:{beginAtZero:true, grace:'15%'}, x:{grid:{display:false}, ticks:techTicks} }}
+  });
   mCharts.tech = new Chart(document.getElementById("mTechChart"), {
     type:"bar",
     data:{ labels: techs.map(t=>t.label), datasets:[
-      {label:"Ouverts", data: techs.map(t=>t.ouverts), backgroundColor:"#0B4965", borderRadius:4},
-      {label:"Résolus", data: techs.map(t=>t.resolus), backgroundColor:"#25935F", borderRadius:4},
+      {label:"Ouverts", data: techs.map(t=>t.ouverts||0), backgroundColor: TECH_OPEN, borderRadius:6, maxBarThickness:28},
+      {label:"Résolus", data: techs.map(t=>t.resolus||0), backgroundColor: TECH_DONE, borderRadius:6, maxBarThickness:28},
     ]},
-    options:{responsive:true, animation:{duration:700}, plugins:{legend:{position:"bottom"}, datalabels:{display:true, anchor:'end', align:'top', font:{weight:'bold',size:10}, color:'#0D1926'}}, scales:{y:{beginAtZero:true, grace:'15%'}}}
+    options:{responsive:true, maintainAspectRatio:false, animation:{duration:700},
+      plugins:{
+        legend:{position:"bottom"},
+        datalabels:{display:true, anchor:'end', align:'top', font:{weight:'bold', size:10}, color:inkColor},
+        tooltip:techTooltip,
+      },
+      scales:{ y:{beginAtZero:true, grace:'15%'}, x:{grid:{display:false}} }}
   });
+  const techHl = document.getElementById("mTechHighlight");
+  if(techHl) techHl.innerHTML = iMax < 0 ? "" :
+    `<br><span style="color:#B45309;font-weight:600;">▲ Plus chargé : ${esc(techs[iMax].label)} (${techVols[iMax]})</span>`
+    + ` · <span style="color:#0F766E;font-weight:600;">▼ Moins chargé : ${esc(techs[iMin].label)} (${techVols[iMin]})</span>`;
 
   // Radar techniciens (top 6)
   const radarTechs = techs.slice(0,6);
@@ -2882,14 +3112,15 @@ function renderMDashboard(){
         label: t.label,
         data:[
           Math.round(t.ouverts/maxOuverts*100),
-          t.ouverts ? Math.round(t.resolus/t.ouverts*100) : 0,
-          t.ouverts ? Math.round(t.resolus/t.ouverts*100) : 0,
+          // Taux plafonnés à 100 % : les résolus du mois peuvent inclure des tickets ouverts avant
+          t.ouverts ? Math.min(100, Math.round(t.resolus/t.ouverts*100)) : 0,
+          t.ouverts ? Math.min(100, Math.round(t.resolus/t.ouverts*100)) : 0,
           t.delai_resolution_s ? Math.round(100 - (t.delai_resolution_s/maxDelai*100)) : 100,
         ],
         borderColor: palette[i%palette.length], backgroundColor: palette[i%palette.length]+"22",
       }))
     },
-    options:{responsive:true, animation:{duration:700}, plugins:{legend:{position:"bottom", labels:{boxWidth:10,font:{size:10}}}}, scales:{r:{min:0,max:100}}}
+    options:{responsive:true, maintainAspectRatio:false, animation:{duration:700}, plugins:{legend:{position:"bottom", labels:{boxWidth:10,font:{size:10}}}}, scales:{r:{min:0,max:100}}}
   });
 
   setupEmailPanel("mToCheckList","mCcCheckList","mGreetingInput");
@@ -2994,11 +3225,53 @@ document.getElementById("mMailToggleBtn").addEventListener("click", ()=>{
   panel.style.display = opening ? "block" : "none";
   if(opening) renderEmailSectionsGrid("moussanada", "moussanadaEmailSectionsGrid");
 });
+// Axe borné aux données (bounds:'data') : Chart.js ajoute une graduation finale « irrégulière »
+// (ex. 0,10,…,50,57) — on ne garde que les multiples du pas pour un axe propre.
+function keepRoundTicks(scale){
+  const t = scale.ticks;
+  if(t.length < 3) return;
+  const step = t[1].value - t[0].value;
+  if(!(step > 0)) return;
+  const seen = new Set();
+  scale.ticks = t.filter(x=>{
+    const k = Math.round(x.value/step);
+    if(Math.abs(x.value/step - k) > 1e-6 || seen.has(k)) return false;   // irrégulière ou doublon (ex. 70, 70)
+    seen.add(k); return true;
+  });
+}
+
+// Rend une config Chart.js hors écran à une taille fixe (pixels CSS, ×2 en densité) et renvoie le PNG :
+// utilisé pour les images d'email dont le texte serait illisible à la taille du dashboard.
+function renderChartPng(config, width, height){
+  const host = document.createElement("div");
+  host.style.cssText = `position:fixed;left:-10000px;top:0;width:${width}px;height:${height}px;`;
+  const canvas = document.createElement("canvas");
+  canvas.width = width; canvas.height = height;
+  host.appendChild(canvas); document.body.appendChild(host);
+  let chart;
+  try{
+    chart = new Chart(canvas, config);
+    chart.ctx.save(); chart.ctx.globalCompositeOperation = "destination-over";
+    chart.ctx.fillStyle = "#FFFFFF"; chart.ctx.fillRect(0, 0, canvas.width, canvas.height); chart.ctx.restore();
+    return canvas.toDataURL("image/png");
+  }finally{
+    if(chart) chart.destroy();
+    host.remove();
+  }
+}
+// Graphiques Moussanada rendus spécialement pour l'email (clé → {config, largeur, hauteur})
+let mExportConfigs = {};
+const M_EXPORT_SIZES = {cat:[900, 540], srv:[900, 540], pareto:[900, 520]};
+
 function collectMoussanadaChartImages(){
-  const map = {volume:"volume", delay:"delay", trend:"trend", cat:"cat", srv:"srv", tech:"tech", backlog:"backlog", pareto:"pareto", radar:"radar"};
+  const map = {volume:"volume", delay:"delay", trend:"trend", cat:"cat", srv:"srv", techvol:"techvol", tech:"tech", backlog:"backlog", pareto:"pareto", radar:"radar"};
   const out = {};
   Object.entries(map).forEach(([key, chartKey])=>{
     const chart = mCharts[chartKey];
+    if(mExportConfigs[key] && chart){
+      try{ const [w, h] = M_EXPORT_SIZES[key]; out[key] = renderChartPng(mExportConfigs[key](), w, h); return; }
+      catch(e){ console.warn("export email", key, e); }
+    }
     if(chart && chart.toBase64Image){
       try{ out[key] = chart.toBase64Image('image/png', 1); }catch(e){}
     }
@@ -3400,14 +3673,17 @@ async function loadMAnnual(){
     <div class="chart-card" style="margin-bottom:16px;">
       <h3>Tendance annuelle</h3>
       <canvas id="mAnnualChartCanvas" height="90"></canvas>
+      <p class="chart-caption">Évolution mensuelle des tickets ouverts, résolus et clos sur la période.</p>
     </div>
     <div class="chart-card" style="margin-bottom:16px;">
       <h3>Évolution du backlog</h3>
       <canvas id="mBacklogAnnualCanvas" height="90"></canvas>
+      <p class="chart-caption">Évolution du stock de tickets en retard sur la période.</p>
     </div>
     <div class="chart-card" style="margin-bottom:16px;">
       <h3>Tendance des catégories (Top 8, sur la période)</h3>
       <canvas id="mCategoryTrendCanvas" height="100"></canvas>
+      <p class="chart-caption">Évolution du volume des principales catégories de demandes dans le temps.</p>
     </div>
     <div class="dash-table-wrap">
       <h3>Détail par mois</h3>
@@ -3854,7 +4130,7 @@ async function runGlobalSearch(q){
     try{
       const monthsRes = await fetch(apiM("/months-list"));
       const months = await monthsRes.json();
-      months.forEach(m=>{ if(m.label.toLowerCase().includes(ql)) items.push({cat:"Mois", label:m.label, action:()=>{ if(currentModule==='tarkhiss'){loadMonth(m.ym);activateTab("dashboard");} else {loadMoussanadaMonth(m.ym);activateTab("m-dashboard");} }}); });
+      months.forEach(m=>{ if(m.label.toLowerCase().includes(ql)) items.push({cat:"Mois", label:m.label, action:()=>{ if(currentModule==='tarkhiss'){loadMonth(m.ym);activateTab("dashboard");} else {loadMoussanadaMonth(m.ym).then(()=>activateTab("m-dashboard"));} }}); });
     } catch(e){}
   }
 
@@ -4058,21 +4334,25 @@ async function renderPDashboard(){
       <div class="chart-card">
         <h3>Répartition globale des statuts</h3>
         <canvas id="pSummaryChart" height="150"></canvas>
+        <p class="chart-caption">Répartition des dossiers par statut (délivrés, en cours, bloqués/refusés).</p>
       </div>
       <div class="chart-card">
         <h3>Ancienneté du backlog (dossiers en cours)</h3>
         <canvas id="pBacklogChart" height="150"></canvas>
+        <p class="chart-caption">Ancienneté des dossiers encore en cours de traitement.</p>
       </div>
     </div>
 
     <div class="chart-card" style="margin-bottom:16px;">
       <h3>Synthèse par module — volume &amp; taux de délivrance</h3>
       <canvas id="pCategoriesChart" height="120"></canvas>
+      <p class="chart-caption">Répartition des dossiers par catégorie de traitement.</p>
     </div>
 
     <div class="chart-card" style="margin-bottom:16px;">
       <h3>Top 10 opérateurs par volume de dossiers</h3>
       <canvas id="pTop10Chart" height="140"></canvas>
+      <p class="chart-caption">Les dix opérateurs ayant déposé le plus de dossiers.</p>
     </div>
 
     ${catCards}
@@ -4128,7 +4408,8 @@ async function renderPDashboard(){
 }
 
 document.getElementById("pPdfBtn").addEventListener("click", ()=>{
-  downloadPdfFromServer("/api/pchc/export-pdf", {start: pState.start, end: pState.end, charts: collectPchcChartImages()}, `rapport_pchc_${pState.start}_${pState.end}.pdf`);
+  // Nom fourni par le serveur : Reporting_PCHC_<période>.pdf (livrable officiel) ou rapport_pchc_<début>_<fin>.pdf
+  downloadPdfFromServer("/api/pchc/export-pdf", {start: pState.start, end: pState.end, charts: collectPchcChartImages()}, null);
 });
 document.getElementById("pXlsxBtn").addEventListener("click", ()=>{
   window.location.href = `/api/pchc/export-xlsx?start=${pState.start}&end=${pState.end}`;
@@ -4157,10 +4438,11 @@ document.getElementById("pPptxBtn").addEventListener("click", async ()=>{
     body: JSON.stringify({start: pState.start, end: pState.end, charts})
   });
   if(!res.ok){ toast("Erreur génération PPTX"); return; }
+  const name = filenameFromResponse(res, `PCHC_RevueDirection_${pState.end}.pptx`);
   const blob = await res.blob();
   const a = document.createElement("a");
   a.href = URL.createObjectURL(blob);
-  a.download = `SANAD_PCHC_RevueDirection_${pState.end}.pptx`;
+  a.download = name;
   a.click();
 });
 
@@ -4300,6 +4582,163 @@ document.getElementById("pSaveStatusColorsBtn").addEventListener("click", async 
   document.querySelectorAll(".status-color-select").forEach(sel=>{ mapping[sel.dataset.statut] = sel.value; });
   await fetch("/api/pchc/status-colors", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({mapping})});
   toast("Correspondance enregistrée");
+});
+
+// ---------- P-LIVRABLES (Revue de direction : import brut, aperçu, Excel / PPTX / PDF / .eml) ----------
+let plPendingFile = null;
+const PL_ALERT_BG = {CRITIQUE:"#FFCCCC", ATTENTION:"#FFE699", OK:"#C6EFCE"};
+function plPct(x){ return (x*100).toFixed(1).replace(".", ",") + " %"; }
+function plInt(n){ return Number(n||0).toLocaleString("fr-FR"); }
+function plSize(b){ return b > 1048576 ? (b/1048576).toFixed(1).replace(".", ",") + " Mo" : Math.round(b/1024) + " Ko"; }
+
+async function renderPLivrables(){
+  document.getElementById("plImportCard").style.display = currentUser?.role === "admin" ? "" : "none";
+  const res = await fetch("/api/pchc/summary");
+  const d = await res.json();
+  if(!res.ok){ toast(d.message || d.error || "Erreur"); return; }
+  renderPlHistory(d.history || []);
+  if(!d.has_data){
+    document.getElementById("plImportInfo").textContent = "Aucun import";
+    document.getElementById("plSynthesis").innerHTML = `<p class="hint">Aucun import pour le moment : importez le classeur consolidé.</p>`;
+    document.getElementById("plAlerts").innerHTML = "";
+    return;
+  }
+  const m = d.meta;
+  document.getElementById("plImportInfo").textContent =
+    `${m.source_file} — ${new Date(m.imported_at).toLocaleString("fr-FR")} par ${m.user} (SHA-256 ${m.sha256.slice(0,12)}…)`;
+  const s = d.summary;
+  document.getElementById("plSynthesis").innerHTML = `<div class="dash-table-wrap"><table class="dash-table">
+    <thead><tr><th>Module</th><th>Total</th><th>Délivrés / Validés</th><th>Taux</th><th>En cours*</th><th>Bloqués / Refusés</th><th>Voyant</th></tr></thead>
+    <tbody>${s.synthesis.map(r=>`<tr><td>${esc(r.module)}</td><td>${plInt(r.total)}</td><td>${plInt(r.delivered)}</td><td>${plPct(r.taux)}</td>
+      <td>${plInt(r.encours)}</td><td>${r.bloques === null ? "–" : plInt(r.bloques)}</td><td>${esc(r.voyant)}</td></tr>`).join("")}
+      <tr style="font-weight:bold;"><td>TOTAL</td><td>${plInt(s.totals.total)}</td><td>${plInt(s.totals.delivered)}</td><td>${plPct(s.totals.taux)}</td>
+      <td>${plInt(s.totals.encours)}</td><td>${plInt(s.totals.bloques)}</td><td></td></tr></tbody></table></div>
+    <p class="hint">* En cours = statuts de traitement + statuts non listés. Bloqués/Refusés = Non conforme + Irrecevable + Rejeté.</p>`;
+  document.getElementById("plAlerts").innerHTML = `<div class="dash-table-wrap"><table class="dash-table">
+    <thead><tr><th>Indicateur</th><th>Module</th><th>Valeur</th><th>Seuil attention</th><th>Seuil critique</th><th>Statut</th><th>Priorité</th></tr></thead>
+    <tbody>${s.alerts.map(a=>{
+      const k = ["CRITIQUE","ATTENTION","OK"].find(x=>a.status.includes(x));
+      const fmt = v => a.type === "taux" ? Math.round(v*100) + " %" : plInt(v);
+      return `<tr><td>${esc(a.indicator)}</td><td>${esc(a.module)}</td><td>${a.type === "taux" ? plPct(a.value) : plInt(a.value)}</td>
+        <td>${fmt(a.warn)}</td><td>${fmt(a.crit)}</td><td style="background:${PL_ALERT_BG[k]||"#ECEFF3"};">${esc(a.status)}</td><td>${esc(a.priority)}</td></tr>`;
+    }).join("")}</tbody></table></div>`;
+  if(d.report) renderPlReport(d.report, false);
+}
+
+function renderPlReport(rep, blocking){
+  const li = arr => arr.map(x=>`<li>${esc(x)}</li>`).join("");
+  const order = ["identification", "declaration", "ce", "clv", "aimp"];  // ordre du classeur (Flask trie les clés JSON)
+  const rows = Object.entries(rep.sheets || {}).sort((a,b)=>order.indexOf(a[0]) - order.indexOf(b[0])).map(([k,v])=>`<tr><td>${esc(v.source_sheet)}</td><td>${plInt(v.rows)}</td>
+    <td>${Object.entries(v.cols||{}).map(([f,l])=>`${f} = ${l}`).join(", ")}</td><td>${esc((v.notes||[]).join(" "))}</td></tr>`).join("");
+  const typos = Object.values(rep.typos || {}).flatMap(o=>Object.entries(o).map(([l,n])=>`${l} (${n})`));
+  let html = "";
+  if(rep.blocking && rep.blocking.length){
+    html += `<div class="banner danger" style="display:block;">⛔ <strong>${blocking ? "Import bloqué" : "Importé malgré"} :</strong><ul>${li(rep.blocking)}</ul></div>`;
+  }
+  if(rep.warnings && rep.warnings.length) html += `<div class="banner info" style="display:block;">⚠ Avertissements :<ul>${li(rep.warnings)}</ul></div>`;
+  html += `<div class="dash-table-wrap"><table class="dash-table"><thead><tr><th>Feuille</th><th>Lignes</th><th>Colonnes détectées</th><th>Remarques</th></tr></thead><tbody>${rows}</tbody></table></div>`;
+  html += `<p class="hint">Feuilles manquantes : ${esc((rep.missing||[]).join(", ") || "aucune")} · vides : ${esc((rep.empty||[]).join(", ") || "aucune")} · ignorées : ${esc((rep.ignored||[]).join(", ") || "aucune")}</p>`;
+  html += `<p class="hint">Coquilles normalisées : ${esc(typos.join(" ; ") || "aucune")}</p>`;
+  document.getElementById("plImportReport").innerHTML = html;
+}
+
+function renderPlHistory(items){
+  const label = {import:"Import", export:"Export", eml:"E-mail .eml"};
+  document.querySelector("#plHistoryTable tbody").innerHTML = items.map(h=>{
+    const detail = h.type === "import" ? Object.entries(h.rows||{}).map(([k,v])=>`${k} : ${plInt(v)}`).join(" · ") + (h.forced ? " (forcé)" : "")
+      : h.type === "eml" ? (h.attachments||[]).join(", ") + " — " + plSize(h.size)
+      : `${(h.format||"").toUpperCase()}${h.light ? " allégé" : ""} — ${plSize(h.size)}`;
+    return `<tr><td>${new Date(h.ts).toLocaleString("fr-FR")}</td><td>${esc(h.user||"")}</td><td>${label[h.type]||esc(h.type)}</td><td>${esc(h.file||"")}</td><td>${esc(detail)}</td></tr>`;
+  }).join("") || `<tr><td colspan="5" style="color:var(--muted);">Aucun historique</td></tr>`;
+}
+
+async function plImport(file, force){
+  const fd = new FormData();
+  fd.append("file", file);
+  if(force) fd.append("force", "1");
+  showBusy("Import du classeur PCHC en cours...");
+  let res, data;
+  try{
+    res = await fetch("/api/pchc/import", {method:"POST", body: fd});
+    data = await res.json();
+  } finally { hideBusy(); }
+  const forceBtn = document.getElementById("plForceBtn");
+  if(data.ok){
+    plPendingFile = null; forceBtn.style.display = "none";
+    toast("Import réussi" + (data.snapshot ? " — sauvegarde créée" : ""));
+    await renderPLivrables();
+    renderPlReport(data.report, false);
+  } else {
+    if(data.report) renderPlReport(data.report, true);
+    plPendingFile = data.can_force ? file : null;
+    forceBtn.style.display = data.can_force ? "" : "none";
+    toast(data.error || "Erreur d'import");
+  }
+}
+document.getElementById("plImportFile").addEventListener("change", e=>{
+  const f = e.target.files[0];
+  if(f) plImport(f, false);
+  e.target.value = "";
+});
+document.getElementById("plForceBtn").addEventListener("click", ()=>{
+  if(plPendingFile && confirm("Importer malgré les avertissements bloquants ? Les indicateurs concernés seront faux tant que le fichier n'est pas corrigé.")) plImport(plPendingFile, true);
+});
+
+async function plDownload(url, fallbackName){
+  showBusy("Génération en cours...");
+  try{
+    const res = await fetch(url);
+    if(!res.ok){ const e = await res.json().catch(()=>({})); toast(e.error || e.message || "Erreur de génération"); return; }
+    const blob = await res.blob();
+    const cd = res.headers.get("Content-Disposition") || "";
+    const m = cd.match(/filename\*?=(?:UTF-8'')?"?([^";]+)"?/i);
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = m ? decodeURIComponent(m[1]) : fallbackName;
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+  } finally { hideBusy(); }
+  renderPLivrables();
+}
+document.querySelectorAll("[data-pl-export]").forEach(b=>b.addEventListener("click", ()=>{
+  plDownload(`/api/pchc/export/${b.dataset.plExport}`, `Reporting_PCHC.${b.dataset.plExport}`);
+}));
+
+function plEmlQuery(){
+  const q = new URLSearchParams();
+  document.querySelectorAll("[data-pl-att]").forEach(c=>q.set(c.dataset.plAtt, c.checked ? "1" : "0"));
+  q.set("light", document.getElementById("plLightXlsx").checked ? "1" : "0");
+  return q.toString();
+}
+document.getElementById("plEmlPreviewBtn").addEventListener("click", async ()=>{
+  showBusy("Calcul de l'aperçu et de la taille...");
+  let res, d;
+  try{ res = await fetch(`/api/pchc/eml-preview?${plEmlQuery()}`); d = await res.json(); } finally { hideBusy(); }
+  if(!d.ok){ toast(d.error || "Erreur"); return; }
+  const sizeEl = document.getElementById("plEmlSize");
+  sizeEl.innerHTML = `Taille des pièces jointes : <strong>${plSize(d.total_size)}</strong> (${d.attachments.map(a=>`${esc(a.file)} ${plSize(a.size)}`).join(" · ")})`
+    + (d.too_big ? ` — <strong style="color:var(--danger);">⚠ au-delà de ${plSize(d.limit)} : cochez « Excel allégé » pour réduire le poids.</strong>` : "");
+  const box = document.getElementById("plEmlPreview");
+  box.style.display = "block";
+  box.innerHTML = `<div class="hint">Objet : <strong>${esc(d.subject)}</strong> · À : ${esc(d.to.join("; ") || "(aucun destinataire configuré)")}${d.cc.length ? " · Cc : " + esc(d.cc.join("; ")) : ""}</div><iframe id="plEmlFrame" style="width:100%;height:460px;border:0;"></iframe>`;
+  document.getElementById("plEmlFrame").srcdoc = d.html;
+});
+document.getElementById("plEmlBtn").addEventListener("click", async ()=>{
+  if(![...document.querySelectorAll("[data-pl-att]")].some(c=>c.checked)){ toast("Cochez au moins une pièce jointe"); return; }
+  showBusy("Génération de l'email et des pièces jointes...");
+  let res;
+  try{ res = await fetch(`/api/pchc/eml?${plEmlQuery()}`); } finally { hideBusy(); }
+  if(!res.ok){ const e = await res.json().catch(()=>({})); toast(e.error || "Erreur de génération"); return; }
+  if(res.headers.get("X-Eml-Opened") === "1"){
+    toast("Ouverture dans Outlook...");   // brouillon prêt à envoyer
+  } else {   // Outlook indisponible : téléchargement du .eml
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = filenameFromResponse(res, "Reporting_PCHC.eml");
+    a.click();
+  }
+  renderPLivrables();
 });
 
 // ---------- P-ANALYSIS ----------
@@ -4578,6 +5017,9 @@ const EMAIL_SECTION_LABELS = {
     {key: "demandes", label: "Demandes d'information"},
     {key: "weekly", label: "Évolution hebdomadaire"},
     {key: "synth", label: "Constats & recommandations"},
+    {group: "Graphiques individuels (dans la section « Analyse graphique »)"},
+    {key: "chart_weekly", label: "Évolution hebdomadaire — Bugs vs Demandes"},
+    {key: "chart_problems", label: "Répartition des problèmes techniques"},
   ],
   moussanada: [
     {key: "volume", label: "Volume global des tickets"},
@@ -4587,6 +5029,17 @@ const EMAIL_SECTION_LABELS = {
     {key: "team", label: "Charge de l'équipe SI"},
     {key: "comparative", label: "Analyse comparative"},
     {key: "synth", label: "Synthèse finale"},
+    {group: "Graphiques individuels (un graphique reste masqué si sa section l'est)"},
+    {key: "chart_volume", label: "Volumes de tickets"},
+    {key: "chart_backlog", label: "Backlog (stock en retard)"},
+    {key: "chart_trend", label: "Tendance des délais"},
+    {key: "chart_cat", label: "Catégories"},
+    {key: "chart_pareto", label: "Pareto des catégories"},
+    {key: "chart_srv", label: "Services demandeurs"},
+    {key: "chart_techvol", label: "Volume de sollicitation par technicien"},
+    {key: "chart_tech", label: "Détail des sollicitations (ouverts / résolus)"},
+    {key: "chart_radar", label: "Radar de performance"},
+    {key: "chart_delay", label: "Comparatif des délais"},
   ],
 };
 
@@ -4601,7 +5054,9 @@ async function renderEmailSectionsGrid(module, gridId){
     sections = settings.email_sections || {};
   } catch(e){ /* defaults à true ci-dessous */ }
   const defs = EMAIL_SECTION_LABELS[module] || [];
-  grid.innerHTML = defs.map(d=>`
+  grid.innerHTML = defs.map(d=> d.group
+    ? `<div class="email-sections-subtitle">${esc(d.group)}</div>`
+    : `
     <label class="email-section-check">
       <input type="checkbox" data-section-key="${d.key}" ${sections[d.key] !== false ? "checked" : ""}>
       ${esc(d.label)}
@@ -4621,3 +5076,162 @@ async function renderEmailSectionsGrid(module, gridId){
     });
   });
 }
+
+
+// ============================================================
+// LIBELLÉS DES KPI (Administration) — renommer les indicateurs affichés à l'écran et dans les
+// rapports. Stockés dans les paramètres de chaque module (clé "kpi_labels").
+// ============================================================
+async function renderKpiLabelsAdmin(){
+  const body = document.getElementById("kpiLabelsBody");
+  if(!body) return;
+  body.innerHTML = "Chargement...";
+  const modules = [["tarkhiss", "Tarkhiss"], ["moussanada", "Moussanada"]];
+  const loaded = {};
+  for(const [m] of modules){
+    try{ loaded[m] = await (await fetch(`/api/${m}/settings`)).json(); }catch(e){ loaded[m] = {}; }
+  }
+  body.innerHTML = modules.map(([m, title])=>{
+    const defs = KPI_DEFAULT_LABELS[m];
+    const custom = (loaded[m] && loaded[m].kpi_labels) || {};
+    return `
+      <h3 style="margin:14px 0 8px;font-size:14px;">${title}</h3>
+      <div class="kpi-labels-grid" data-module="${m}">
+        ${Object.entries(defs).map(([k, def])=>`
+          <label class="kpi-label-edit">
+            <span>${esc(def)}</span>
+            <input type="text" data-kpi-key="${k}" value="${esc(custom[k] || "")}" placeholder="${esc(def)}">
+          </label>`).join("")}
+      </div>
+      <button class="btn btn-primary" data-save-kpi-labels="${m}" style="margin-top:10px;">Enregistrer — ${title}</button>
+    `;
+  }).join("");
+  body.querySelectorAll("[data-save-kpi-labels]").forEach(btn=>{
+    btn.addEventListener("click", async ()=>{
+      const m = btn.dataset.saveKpiLabels;
+      const kpi_labels = {};
+      body.querySelectorAll(`.kpi-labels-grid[data-module="${m}"] input`).forEach(inp=>{
+        const v = inp.value.trim();
+        if(v) kpi_labels[inp.dataset.kpiKey] = v;
+      });
+      await fetch(`/api/${m}/settings`, {
+        method: "POST", headers: {"Content-Type": "application/json"},
+        body: JSON.stringify({kpi_labels}),
+      });
+      if(m === currentModule){ await loadModuleSettings(); }
+      toast("Libellés KPI enregistrés — appliqués aux dashboards et aux rapports");
+    });
+  });
+}
+
+
+// ============================================================
+// QUALITÉ DES DONNÉES / SAUVEGARDES / SOP & PREUVES D'AUDIT (Lot 8)
+// ============================================================
+const Q_MOIS = ["janv.","févr.","mars","avr.","mai","juin","juil.","août","sept.","oct.","nov.","déc."];
+const qShort = ym => `${Q_MOIS[Number(ym.slice(5))-1]} ${ym.slice(2,4)}`;
+const qTone = s => s === null ? "background:#EEF1F4;color:#55616B;" : s >= 95 ? "background:#E3F4EB;color:#1D7A4D;" : s >= 70 ? "background:#FDF1DC;color:#9A6A07;" : "background:#FCE9E9;color:#B01E1E;";
+let qualityData = null;
+
+async function renderQuality(){
+  const box = document.getElementById("qualityContent");
+  box.innerHTML = "Chargement...";
+  try{ qualityData = await (await fetch("/api/quality/overview?months=12")).json(); }
+  catch(e){ box.innerHTML = '<div class="card">Données indisponibles.</div>'; return; }
+  const d = qualityData, mods = Object.entries(d.modules);
+  const cards = mods.map(([k,m])=>{
+    const cur = m.months.find(x=>x.ym === d.current);
+    return `<div class="kpi-card"><div class="kpi-label">${esc(m.label)} — mois en cours</div><div class="kpi-value">${cur && cur.score != null ? cur.score+" %" : "—"}</div>
+      <div class="kpi-delta" style="color:var(--muted);">Dernière écriture : ${m.last_sync ? esc(m.last_sync.replace("T"," ")) : "aucune"}</div></div>`;
+  }).join("") + `<div class="kpi-card"><div class="kpi-label">Dernière sauvegarde</div><div class="kpi-value" style="font-size:16px;">${d.last_snapshot ? esc(d.last_snapshot.created.replace("T"," ")) : "Aucune"}</div>
+      <div class="kpi-delta" style="color:var(--muted);">Dernier import : ${d.last_import ? esc(`${d.last_import.kind} ${d.last_import.ym} (${d.last_import.date.slice(0,10)})`) : "—"}</div></div>`;
+  const icon = l => l === "danger" ? "🔴" : l === "warning" ? "🟠" : "🔵";
+  const alerts = d.alerts.length ? d.alerts.map(a=>`<div style="margin:6px 0;">${icon(a.level)} <strong>${esc(a.module)}</strong> ${esc(a.ym)} — ${esc(a.label)}${a.detail ? ` <span style="color:var(--muted);">— ${esc(a.detail)}</span>` : ""}</div>`).join("") : '<div style="color:var(--success);">✓ Aucun écart détecté.</div>';
+  const grids = mods.map(([k,m])=>`<div class="dash-table-wrap"><h3>${esc(m.label)} — score par mois</h3>
+      <p class="hint">Cliquez sur un mois pour voir les contrôles.</p>
+      <div style="display:flex;flex-wrap:wrap;gap:8px;">${m.months.length ? m.months.map(r=>`<button class="q-month" data-q="${k}|${r.ym}" style="${qTone(r.score)}border:0;border-radius:8px;padding:8px 12px;cursor:pointer;font-size:12px;font-weight:600;">
+        <div>${qShort(r.ym)}</div><div style="font-size:16px;">${r.score ?? "—"}${r.score != null ? "%" : ""}</div></button>`).join("") : "Aucune donnée."}</div></div>`).join("");
+  box.innerHTML = `<div class="kpi-grid">${cards}</div><div class="dash-table-wrap"><h3>Alertes</h3>${alerts}</div>${grids}<div id="qualityDetail"></div>`;
+  box.querySelectorAll(".q-month").forEach(b=>b.addEventListener("click", ()=>{
+    const [k, ym] = b.dataset.q.split("|");
+    const r = d.modules[k].months.find(x=>x.ym === ym);
+    document.getElementById("qualityDetail").innerHTML = `<div class="dash-table-wrap"><h3>${esc(d.modules[k].label)} — ${qShort(ym)}</h3>
+      <table class="dash-table"><thead><tr><th>Contrôle</th><th>Résultat</th><th>Détail</th></tr></thead><tbody>${r.checks.map(c=>`<tr><td>${esc(c.label)}</td>
+        <td>${c.ok ? '<span style="color:var(--success);font-weight:700;">Conforme</span>' : '<span style="color:var(--danger);font-weight:700;">Écart</span>'}</td><td style="color:var(--muted);">${esc(c.detail)}</td></tr>`).join("")}</tbody></table>
+      ${(r.missing_calls||[]).length ? `<p><strong>Appels manquants :</strong> ${esc(r.missing_calls.join(", "))}</p>` : ""}
+      ${(r.missing_emails||[]).length ? `<p><strong>Emails manquants :</strong> ${esc(r.missing_emails.join(", "))}</p>` : ""}</div>`;
+  }));
+}
+
+// ---------- Sauvegardes ----------
+const SNAP_REASONS = {auto:"Automatique", manual:"Manuelle", "pre-restore":"Avant restauration", import:"Importée"};
+async function loadBackups(){
+  const d = await (await fetch("/api/admin/snapshots")).json();
+  document.getElementById("snapAutoInput").checked = !!d.auto;
+  document.getElementById("snapRetentionInput").value = d.retention;
+  const tb = document.getElementById("snapTbody");
+  tb.innerHTML = (d.items||[]).map(s=>`<tr><td>${esc(s.created.replace("T"," "))}</td><td>${esc(SNAP_REASONS[s.reason]||s.reason)}</td><td>${Math.max(1, Math.round(s.size/1024))} Ko</td>
+    <td style="text-align:right;white-space:nowrap;"><a class="btn-add" href="/api/admin/snapshots/${encodeURIComponent(s.name)}/download">⬇</a>
+    <button class="btn-add" data-snap-restore="${esc(s.name)}" data-snap-date="${esc(s.created.replace("T"," "))}">↺ Restaurer</button>
+    <button class="btn-add" data-snap-del="${esc(s.name)}">🗑</button></td></tr>`).join("") || '<tr><td colspan="4" style="color:var(--muted);">Aucune archive</td></tr>';
+  tb.querySelectorAll("[data-snap-restore]").forEach(b=>b.addEventListener("click", async ()=>{
+    if(!confirm(`Restaurer la sauvegarde du ${b.dataset.snapDate} ?\nLes données actuelles seront remplacées. Une sauvegarde de sécurité est créée avant l'opération (tracée dans le journal d'audit).`)) return;
+    const r = await (await fetch(`/api/admin/snapshots/${encodeURIComponent(b.dataset.snapRestore)}/restore`, {method:"POST"})).json();
+    if(r.ok === false || r.error){ toast(r.error || "Restauration impossible"); return; }
+    toast(`Restauré (${r.files} fichiers). Sauvegarde de sécurité : ${r.safety_snapshot}`);
+    loadBackups();
+  }));
+  tb.querySelectorAll("[data-snap-del]").forEach(b=>b.addEventListener("click", async ()=>{
+    if(!confirm(`Supprimer ${b.dataset.snapDel} ?`)) return;
+    await fetch(`/api/admin/snapshots/${encodeURIComponent(b.dataset.snapDel)}`, {method:"DELETE"}); loadBackups();
+  }));
+}
+document.getElementById("snapCreateBtn").addEventListener("click", async ()=>{
+  const r = await (await fetch("/api/admin/snapshots", {method:"POST"})).json();
+  toast(r.error ? r.error : `Sauvegarde créée (${r.files} fichiers)`); loadBackups();
+});
+document.getElementById("snapUploadFile").addEventListener("change", async (e)=>{
+  const f = e.target.files[0]; if(!f) return;
+  const fd = new FormData(); fd.append("file", f);
+  const r = await (await fetch("/api/admin/snapshots/upload", {method:"POST", body: fd})).json();
+  toast(r.ok ? "Archive importée — restaurez-la depuis la liste" : (r.error || "Erreur")); e.target.value = ""; loadBackups();
+});
+document.getElementById("snapSettingsBtn").addEventListener("click", async ()=>{
+  await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({snapshot_auto: document.getElementById("snapAutoInput").checked, snapshot_retention: Number(document.getElementById("snapRetentionInput").value) || 14})});
+  toast("Paramètres enregistrés"); loadBackups();
+});
+
+// ---------- SOP & preuves d'audit ----------
+let sopView = "pack";
+async function loadCompliance(){
+  try{
+    const m = await (await fetch("/api/admin/sop-settings")).json();
+    document.getElementById("sopRef").value = m.ref||""; document.getElementById("sopVersion").value = m.version||"";
+    document.getElementById("sopDate").value = m.date||""; document.getElementById("sopOwner").value = m.owner||"";
+    document.getElementById("sopApprover").value = m.approver||""; document.getElementById("sopHolidays").value = m.holidays||"";
+  }catch(e){}
+  refreshSopView();
+}
+async function refreshSopView(){
+  const frame = document.getElementById("sopFrame");
+  document.getElementById("sopActionsPack").style.display = sopView === "pack" ? "" : "none";
+  document.getElementById("sopActionsSop").style.display = sopView === "sop" ? "" : "none";
+  document.querySelectorAll("[data-sop-view]").forEach(b=>b.classList.toggle("active", b.dataset.sopView === sopView));
+  const ym = monthInput.value || defaultMonth();
+  document.getElementById("packPdfLink").href = `/api/admin/audit-pack/${ym}?format=pdf`;
+  document.getElementById("packZipLink").href = `/api/admin/audit-pack/${ym}?format=zip`;
+  frame.srcdoc = "<body style='font-family:Arial;color:#55616B;padding:20px'>Chargement…</body>";
+  try{
+    const r = await (await fetch(sopView === "pack" ? `/api/admin/audit-pack/${ym}?format=html` : "/api/admin/sop?format=html")).json();
+    document.getElementById("packSha").textContent = sopView === "pack" && r.sha256 ? `SHA-256 : ${r.sha256}` : "";
+    frame.srcdoc = `<body style="margin:0">${r.html}</body>`;
+  }catch(e){ frame.srcdoc = "<body style='padding:20px'>Document indisponible.</body>"; }
+}
+document.querySelectorAll("[data-sop-view]").forEach(b=>b.addEventListener("click", ()=>{ sopView = b.dataset.sopView; refreshSopView(); }));
+document.getElementById("packRefreshBtn").addEventListener("click", refreshSopView);
+document.getElementById("sopSaveBtn").addEventListener("click", async ()=>{
+  await fetch("/api/global-settings", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({
+    sop_ref: document.getElementById("sopRef").value, sop_version: document.getElementById("sopVersion").value, sop_owner: document.getElementById("sopOwner").value,
+    sop_approver: document.getElementById("sopApprover").value, sop_date: document.getElementById("sopDate").value, quality_holidays: document.getElementById("sopHolidays").value})});
+  toast("Paramètres enregistrés"); refreshSopView();
+});

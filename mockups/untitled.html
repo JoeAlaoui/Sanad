@@ -1,0 +1,87 @@
+<!doctype html><html lang="fr"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SANAD — maquette Untitled UI</title><style>
+*{box-sizing:border-box;margin:0}body{font-family:var(--font);background:var(--bg);color:var(--ink);font-size:14px;line-height:1.5}
+.app{display:grid;grid-template-columns:248px 1fr;min-height:100vh}
+.side{background:var(--side-bg);border-right:1px solid var(--side-line);padding:18px 14px;display:flex;flex-direction:column;gap:4px;position:sticky;top:0;height:100vh;overflow:auto;color:var(--side-ink)}
+.brand{display:flex;align-items:center;gap:10px;padding:4px 8px 14px;font-weight:700;font-size:16px}
+.logo{width:32px;height:32px;display:grid;place-items:center;background:var(--accent);color:var(--on-accent);font-weight:800;border-radius:var(--r-sm)}
+.mod{display:flex;background:var(--mod-bg);border-radius:var(--r-sm);padding:3px;margin:0 4px 12px}.mod b{flex:1;text-align:center;padding:6px;border-radius:calc(var(--r-sm) - 2px);font-size:12px;font-weight:600;color:var(--muted)}.mod b.on{background:var(--mod-on);color:var(--ink);box-shadow:var(--sh-sm)}
+.grp{font-size:11px;text-transform:uppercase;letter-spacing:.06em;color:var(--side-muted);padding:12px 10px 4px;font-weight:600}
+.nav{display:flex;align-items:center;gap:10px;padding:8px 10px;border-radius:var(--r-sm);color:var(--side-ink);font-weight:500;font-size:13.5px}.nav:hover{background:var(--nav-hover)}.nav.on{background:var(--nav-on);color:var(--nav-on-ink);font-weight:600}
+.nav em{margin-left:auto;font-style:normal;font-size:11px;padding:1px 7px;border-radius:99px;background:var(--warn-soft);color:var(--warn)}
+.main{min-width:0}.top{display:flex;align-items:center;gap:12px;padding:12px 28px;background:var(--top-bg);border-bottom:1px solid var(--line);position:sticky;top:0;z-index:5;backdrop-filter:blur(10px)}
+.crumb{color:var(--muted);font-size:13px}.crumb b{color:var(--ink)}.sp{flex:1}
+.pick{display:flex;align-items:center;gap:4px;border:1px solid var(--line);background:var(--card);border-radius:var(--r-sm);padding:3px;box-shadow:var(--sh-sm)}.pick span{padding:3px 12px;font-weight:600;font-size:13px}.pick i{font-style:normal;width:26px;height:26px;display:grid;place-items:center;border-radius:calc(var(--r-sm) - 2px);color:var(--muted)}
+.search{border:1px solid var(--line);background:var(--card);border-radius:var(--r-sm);padding:7px 12px;color:var(--muted);width:240px;font-size:13px}
+.pill{font-size:12px;padding:3px 10px;border-radius:99px;background:var(--accent-soft);color:var(--accent-ink);font-weight:600}
+.avatar{width:32px;height:32px;border-radius:99px;background:var(--accent);color:var(--on-accent);display:grid;place-items:center;font-weight:700;font-size:12px}
+.page{padding:26px 28px 48px;max-width:1500px}
+.head{display:flex;align-items:flex-end;justify-content:space-between;gap:16px;margin-bottom:20px;flex-wrap:wrap}.head h1{font-size:var(--h1);letter-spacing:-.02em;font-weight:700}.head p{color:var(--muted);margin-top:2px}
+.acts{display:flex;gap:8px;flex-wrap:wrap}
+.btn{display:inline-flex;align-items:center;gap:6px;padding:8px 14px;border-radius:var(--r-sm);border:1px solid var(--line);background:var(--card);font-weight:600;font-size:13px;color:var(--ink);box-shadow:var(--sh-sm)}.btn.pri{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.alert{background:var(--warn-soft);color:var(--warn);border:1px solid var(--warn-line);border-radius:var(--r);padding:10px 14px;margin-bottom:16px;font-weight:500}
+.kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:14px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:var(--r);box-shadow:var(--sh);padding:18px}
+.kpi .l{color:var(--muted);font-size:12.5px;font-weight:500}.kpi .v{font-size:var(--kv);font-weight:700;letter-spacing:-.02em;margin:4px 0 6px;font-variant-numeric:tabular-nums}
+.kpi.red{--k:var(--bad)}.kpi.green{--k:var(--good)}.kpi.amber{--k:var(--warn)}.kpi[class*=" "]{border-left:3px solid var(--k)}
+.tr{display:inline-flex;align-items:center;gap:4px;font-size:12px;font-weight:600;padding:1px 8px;border-radius:99px}.tr.up{background:var(--good-soft);color:var(--good)}.tr.dn{background:var(--bad-soft);color:var(--bad)}.tr.fl{background:var(--mod-bg);color:var(--muted)}
+.row2{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin:14px 0}
+.card h3{font-size:15px;font-weight:600;margin-bottom:12px;display:flex;justify-content:space-between;align-items:center}.card h3 small{font-weight:500;color:var(--muted);font-size:12px}
+.yoy{display:grid;grid-template-columns:repeat(4,1fr);gap:12px}.yoy div{border:1px solid var(--line);border-radius:var(--r-sm);padding:12px}.yoy small{color:var(--muted);display:block}.yoy b{font-size:20px}
+table{width:100%;border-collapse:collapse}th{text-align:left;font-size:12px;color:var(--muted);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line);background:var(--th-bg)}td{padding:11px 10px;border-bottom:1px solid var(--line)}tr:last-child td{border-bottom:0}
+.bar{display:inline-block;width:90px;height:6px;border-radius:9px;background:var(--mod-bg);vertical-align:middle;margin-right:8px;overflow:hidden}.bar i{display:block;height:100%;background:var(--bad)}.bar.g i{background:var(--good)}
+.badge{display:inline-flex;align-items:center;gap:6px;padding:2px 10px;border-radius:99px;font-size:12px;font-weight:600;background:var(--good-soft);color:var(--good)}.badge:before{content:"";width:6px;height:6px;border-radius:9px;background:currentColor}
+.cols{display:grid;grid-template-columns:1fr 1fr;gap:14px;margin-top:14px}ul.l{padding-left:18px;color:var(--ink)}
+.cv{position:relative;height:250px}
+@media(max-width:1000px){.app{grid-template-columns:1fr}.side{display:none}.kpis,.yoy{grid-template-columns:1fr 1fr}.row2,.cols{grid-template-columns:1fr}}
+
+:root{--font:Inter,system-ui,sans-serif;--bg:#fcfcfd;--card:#fff;--ink:#101828;--muted:#667085;--line:#eaecf0;--accent:#7f56d9;--on-accent:#fff;--accent-soft:#f4ebff;--accent-ink:#6941c6;
+--side-bg:#fff;--side-line:#eaecf0;--side-ink:#344054;--side-muted:#98a2b3;--nav-hover:#f9fafb;--nav-on:#f9f5ff;--nav-on-ink:#6941c6;--mod-bg:#f2f4f7;--mod-on:#fff;--top-bg:#fff;--th-bg:#f9fafb;
+--good:#067647;--good-soft:#ecfdf3;--bad:#b42318;--bad-soft:#fef3f2;--warn:#b54708;--warn-soft:#fffaeb;--warn-line:#fedf89;--r:12px;--r-sm:8px;--h1:24px;--kv:32px;
+--sh:0 1px 3px rgba(16,24,40,.1),0 1px 2px rgba(16,24,40,.06);--sh-sm:0 1px 2px rgba(16,24,40,.05);--c1:#7f56d9;--c2:#f04438;--c3:#12b76a;--c4:#f79009}
+.btn{font-weight:600}.kpi .l{font-weight:600;color:#475467}.tr{border-radius:16px}.kpi.red,.kpi.green,.kpi.amber{border-left:1px solid var(--line)}</style></head><body><div class="app">
+<aside class="side"><div class="brand"><div class="logo">S</div>SANAD</div>
+<div class="mod"><b class="on">Tarkhiss</b><b>Moussanada</b></div>
+<div class="grp">Reporting Hotline &amp; Emails</div>
+<a class="nav on">▦ Dashboard</a><a class="nav">☎ Appels <em>10/22</em></a><a class="nav">✉ Emails <em>10/22</em></a><a class="nav">◇ Analyse mensuelle</a><a class="nav">📈 Vue annuelle</a><a class="nav">✦ Prompts Copilot</a>
+<div class="grp">Reporting Métier</div><a class="nav">▦ Dashboard</a><a class="nav">📥 Import données</a><a class="nav">◇ Analyse &amp; Copilot</a>
+<div class="grp">Administration</div><a class="nav">⚙ Administration</a><a class="nav">👤 Utilisateurs</a><a class="nav">💬 Notes</a><a class="nav">📚 Base de connaissances</a>
+<div class="grp">Qualité &amp; conformité</div><a class="nav">🩺 Qualité des données</a><a class="nav">📑 SOP &amp; preuves d'audit</a><a class="nav">🗄 Sauvegardes</a></aside>
+<div class="main"><div class="top"><span class="crumb">Tarkhiss › Reporting Hotline &amp; Emails › <b>Dashboard</b></span><span class="sp"></span>
+<div class="pick"><i>‹</i><span>octobre 2026</span><i>›</i></div><div class="search">🔍 Recherche globale…</div><span class="pill">Synchro à l'instant</span><span class="pill">Administrateur</span><div class="avatar">YA</div></div>
+<div class="page"><div class="head"><div><h1>Dashboard — Tarkhiss — octobre 2026</h1><p>Vue interactive, codes couleur automatiques.</p></div>
+<div class="acts"><span class="btn">⬇ Excel</span><span class="btn">⬇ PDF</span><span class="btn">🖼 One-pager</span><span class="btn pri">✉ Envoyer par email</span></div></div>
+<div class="alert">⚠️ <b>Seuils dépassés :</b> Variation de volume anormale : baisse de 55% (seuil : 40%)</div>
+<div class="kpis">
+<div class="card kpi"><div class="l">📧 Emails reçus</div><div class="v">457</div><span class="tr up">▲ +12% vs préc. (408)</span></div>
+<div class="card kpi"><div class="l">📤 Emails envoyés</div><div class="v">364</div><span class="tr up">▲ +8% vs préc. (337)</span></div>
+<div class="card kpi"><div class="l">📞 Total appels</div><div class="v">363</div><span class="tr dn">▼ −5% vs préc. (382)</span></div>
+<div class="card kpi"><div class="l">⏱️ Temps comm.</div><div class="v">11:42:08</div><span class="tr fl">→ stable</span></div></div>
+<div class="kpis">
+<div class="card kpi red"><div class="l">🔴 Problèmes techniques</div><div class="v">13</div><span class="tr dn">▲ +30% vs préc. (10)</span></div>
+<div class="card kpi green"><div class="l">🟢 Demandes d'info</div><div class="v">29</div><span class="tr fl">→ stable</span></div>
+<div class="card kpi"><div class="l">Ratio Bugs / Demandes</div><div class="v">0,45</div><span class="tr fl">—</span></div>
+<div class="card kpi amber"><div class="l">⚠️ Semaine critique</div><div class="v">S2</div><span class="tr dn">13 tickets</span></div></div>
+<div class="card"><h3>📆 Comparatif octobre 2026 vs octobre 2025 (N-1) <small>admin / superviseur</small></h3>
+<div class="yoy"><div><small>Emails reçus</small><b>457</b> <small style="display:inline">(402)</small><br><span class="tr up">▲ +14%</span></div><div><small>Appels</small><b>363</b> <small style="display:inline">(390)</small><br><span class="tr dn">▼ −7%</span></div><div><small>Problèmes tech.</small><b>13</b> <small style="display:inline">(9)</small><br><span class="tr dn">▲ +44%</span></div><div><small>Demandes info</small><b>29</b> <small style="display:inline">(31)</small><br><span class="tr fl">→ −6%</span></div></div></div>
+<div class="row2"><div class="card"><h3>Évolution hebdomadaire — Bugs vs Demandes <small>⬇ PNG</small></h3><div class="cv"><canvas id="c1"></canvas></div></div>
+<div class="card"><h3>Répartition des problèmes techniques <small>⬇ PNG</small></h3><div class="cv"><canvas id="c2"></canvas></div></div></div>
+<div class="row2"><div class="card"><h3>Charge quotidienne (appels + emails reçus) <small>⬇ PNG</small></h3><div class="cv"><canvas id="c3"></canvas></div></div>
+<div class="card"><h3>Emails reçus / envoyés par semaine <small>⬇ PNG</small></h3><div class="cv"><canvas id="c4"></canvas></div></div></div>
+<div class="card"><h3>🔴 Problèmes techniques signalés (13)</h3><table><thead><tr><th>Type</th><th>Nb</th><th>%</th><th>Description</th><th>Statut</th></tr></thead><tbody>
+<tr><td>Connexion / authentification</td><td><b>6</b></td><td><span class="bar"><i style="width:46%"></i></span>46,2%</td><td>Échecs de login portail</td><td><span class="badge">Suivi Karaz</span></td></tr>
+<tr><td>Upload de pièces jointes</td><td><b>4</b></td><td><span class="bar"><i style="width:31%"></i></span>30,8%</td><td>Fichiers &gt; 5 Mo rejetés</td><td><span class="badge">En cours</span></td></tr>
+<tr><td>Génération de certificat</td><td><b>3</b></td><td><span class="bar"><i style="width:23%"></i></span>23,1%</td><td>PDF non généré</td><td><span class="badge">Corrigé</span></td></tr></tbody></table></div>
+<div class="cols"><div class="card"><h3>🔑 Constats clés</h3><ul class="l"><li>Pic de charge en semaine 2 (13 tickets).</li><li>Les échecs de connexion dominent (46 %).</li></ul></div>
+<div class="card"><h3>✅ Recommandations</h3><ul class="l"><li>Escalader le correctif d'authentification auprès de Karaz.</li><li>Publier un guide « pièces jointes » pour les opérateurs.</li></ul></div></div>
+</div></div></div>
+<script src="chart.umd.js"></script>
+<script>
+const css=getComputedStyle(document.documentElement),v=n=>css.getPropertyValue(n).trim();
+Chart.defaults.font.family=v('--font');Chart.defaults.color=v('--muted');Chart.defaults.borderColor=v('--line');
+const base={responsive:true,maintainAspectRatio:false,plugins:{legend:{position:'bottom',labels:{usePointStyle:true,boxWidth:8}}}};
+new Chart(c1,{type:'bar',data:{labels:['S1','S2','S3','S4'],datasets:[{label:'Bugs',data:[4,9,3,2],backgroundColor:v('--c2'),borderRadius:6},{label:'Demandes',data:[7,11,6,5],backgroundColor:v('--c3'),borderRadius:6}]},options:{...base,scales:{x:{grid:{display:false}},y:{beginAtZero:true}}}});
+new Chart(c2,{type:'doughnut',data:{labels:['Connexion','Upload','Certificat'],datasets:[{data:[6,4,3],backgroundColor:[v('--c1'),v('--c2'),v('--c4')],borderWidth:0}]},options:{...base,cutout:'68%'}});
+const d=[...Array(22)].map((_,i)=>i+1),load=[30,42,38,25,0,0,33,47,40,36,29,0,0,22,35,41,38,27,0,0,31,28];
+new Chart(c3,{type:'line',data:{labels:d,datasets:[{label:'Charge',data:load,borderColor:v('--c1'),backgroundColor:v('--c1')+'22',fill:true,tension:.35,pointRadius:0}]},options:{...base,plugins:{legend:{display:false}},scales:{y:{beginAtZero:true}}}});
+new Chart(c4,{type:'bar',data:{labels:['Sem. 1','Sem. 2','Sem. 3','Sem. 4'],datasets:[{label:'Reçus',data:[111,93,128,125],backgroundColor:v('--c1'),stack:'e',borderRadius:4},{label:'Envoyés',data:[80,70,110,104],backgroundColor:v('--c4'),stack:'e',borderRadius:4}]},options:{...base,scales:{x:{stacked:true,grid:{display:false}},y:{stacked:true,beginAtZero:true}}}});
+</script></body></html>

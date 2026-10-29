@@ -1,0 +1,380 @@
+/* ===================================================================================
+   THÈME NOLVIRA — couche de présentation chargée UNIQUEMENT sur /nolvira (préversion).
+   Se pose par-dessus style.css sans le modifier : on redéfinit les tokens (--bg, --primary…)
+   puis on retouche les composants. Toutes les règles sont préfixées .ui-nolvira pour qu'aucune
+   ne puisse fuiter sur "/" (rollback = simplement rester sur "/").
+   Tokens repris de nolvira.netlify.app (fond pierre chaude, primaire teal, mode sombre propre).
+   =================================================================================== */
+:root.ui-nolvira{
+  --nv-bg:#f6f6f3; --nv-fg:#1b1b19; --nv-muted:#62615b; --nv-subtle:#706e66;
+  --nv-surface:#fff; --nv-surface-2:#f1f1ed;
+  --nv-border:#e5e4de; --nv-border-strong:#d3d1c9;
+  --nv-primary:#0f766e; --nv-primary-hover:#0b5f59; --nv-primary-fg:#fff; --nv-primary-soft:#e0f1ee;
+  --nv-success:#137536; --nv-success-soft:#e2f4e7;
+  --nv-warning:#8a5206; --nv-warning-soft:#fbf0d3;
+  --nv-danger:#b42318;  --nv-danger-soft:#fbe5e2;
+  --nv-info:#1d5fb4;    --nv-info-soft:#e1ecfa;
+  --nv-neutral-soft:#ebeae5;
+  --nv-shadow-sm:0 1px 2px #14140f0d;
+  --nv-shadow-md:0 4px 16px -4px #14140f1a, 0 1px 3px #14140f0f;
+  --nv-shadow-lg:0 16px 40px -8px #14140f2e, 0 2px 6px #14140f0f;
+  --nv-topbar-h:60px; --nv-sidebar-w:264px; --nv-sidebar-w-collapsed:72px;
+
+  /* Mappage vers les tokens consommés par style.css / app.js */
+  --bg:var(--nv-bg); --surface:var(--nv-surface); --ink:var(--nv-fg); --muted:var(--nv-muted);
+  --muted-bg:var(--nv-surface-2);
+  --primary:var(--nv-primary); --primary-light:var(--nv-primary-hover); --primary-foreground:var(--nv-primary-fg);
+  --primary-pale:var(--nv-primary-soft);
+  --accent:#b45309; --accent-pale:var(--nv-warning-soft);
+  --danger:var(--nv-danger); --danger-pale:var(--nv-danger-soft);
+  --success:var(--nv-success); --success-pale:var(--nv-success-soft);
+  --info:var(--nv-info); --info-pale:var(--nv-info-soft);
+  --border:var(--nv-border); --ring:var(--nv-primary);
+  --sidebar-bg:var(--nv-surface); --sidebar-bg2:var(--nv-surface); --sidebar-ink:var(--nv-fg);
+  --sidebar-muted:var(--nv-muted); --sidebar-accent:var(--nv-surface-2); --sidebar-active:var(--nv-primary-soft);
+  --sidebar-border:var(--nv-border);
+  --radius:10px; --radius-sm:8px; --radius-lg:12px;
+  --shadow:var(--nv-shadow-sm); --shadow-md:var(--nv-shadow-md); --shadow-lg:var(--nv-shadow-lg);
+  --ring-shadow:0 0 0 3px color-mix(in srgb, var(--nv-primary) 22%, transparent);
+  color-scheme:light;
+}
+/* Mode sombre : palette dédiée (pas d'inversion), comme Nolvira */
+:root.ui-nolvira.dark{
+  --nv-bg:#0d0e0d; --nv-fg:#ecebe6; --nv-muted:#a3a29b; --nv-subtle:#8e8d86;
+  --nv-surface:#151716; --nv-surface-2:#1c1f1d;
+  --nv-border:#262a28; --nv-border-strong:#363b38;
+  --nv-primary:#2dd4bf; --nv-primary-hover:#5eead4; --nv-primary-fg:#06201d; --nv-primary-soft:#12302d;
+  --nv-success:#5fd38a; --nv-success-soft:#11291a;
+  --nv-warning:#e9b949; --nv-warning-soft:#2e2410;
+  --nv-danger:#f48a7f;  --nv-danger-soft:#341815;
+  --nv-info:#7fb2f2;    --nv-info-soft:#14263d;
+  --nv-neutral-soft:#242725;
+  --nv-shadow-sm:0 1px 2px #0006; --nv-shadow-md:0 6px 20px -4px #00000080; --nv-shadow-lg:0 20px 48px -8px #000000a6;
+  --accent:#e9b949;
+  color-scheme:dark;
+}
+/* Palettes de l'Administration (data-palette posé par app.js) → accents Nolvira */
+:root.ui-nolvira[data-palette="blue"]  {--nv-primary:#2563eb;--nv-primary-hover:#1d4ed8;--nv-primary-soft:#e2ecfd;}
+:root.ui-nolvira[data-palette="violet"]{--nv-primary:#7c3aed;--nv-primary-hover:#6d28d9;--nv-primary-soft:#efe7fd;}
+:root.ui-nolvira[data-palette="green"] {--nv-primary:#15803d;--nv-primary-hover:#166534;--nv-primary-soft:#e2f4e7;}
+:root.ui-nolvira[data-palette="rose"]  {--nv-primary:#e11d48;--nv-primary-hover:#be123c;--nv-primary-soft:#fde4ea;}
+:root.ui-nolvira[data-palette="orange"]{--nv-primary:#c2410c;--nv-primary-hover:#9a3412;--nv-primary-soft:#fde8dc;}
+:root.ui-nolvira.dark[data-palette="blue"]  {--nv-primary:#60a5fa;--nv-primary-hover:#93c5fd;--nv-primary-soft:#14243d;--nv-primary-fg:#08152b;}
+:root.ui-nolvira.dark[data-palette="violet"]{--nv-primary:#a78bfa;--nv-primary-hover:#c4b5fd;--nv-primary-soft:#271f45;--nv-primary-fg:#120a26;}
+:root.ui-nolvira.dark[data-palette="green"] {--nv-primary:#5fd38a;--nv-primary-hover:#86efac;--nv-primary-soft:#11291a;--nv-primary-fg:#06200f;}
+:root.ui-nolvira.dark[data-palette="rose"]  {--nv-primary:#fb7185;--nv-primary-hover:#fda4af;--nv-primary-soft:#3a1620;--nv-primary-fg:#2a0610;}
+:root.ui-nolvira.dark[data-palette="orange"]{--nv-primary:#fb923c;--nv-primary-hover:#fdba74;--nv-primary-soft:#3a2010;--nv-primary-fg:#261203;}
+
+.ui-nolvira body{background:var(--nv-bg);color:var(--nv-fg);font-size:14px;line-height:1.5;}
+.ui-nolvira ::selection{background:var(--nv-primary-soft);}
+
+/* Icônes SVG injectées par nolvira.js */
+.ui-nolvira .nv-i{width:18px;height:18px;flex-shrink:0;stroke:currentColor;fill:none;stroke-width:1.75;stroke-linecap:round;stroke-linejoin:round;}
+
+/* ---------------------------------------------------------------- SIDEBAR */
+.ui-nolvira .sidebar{
+  width:var(--nv-sidebar-w);padding:0;background:var(--nv-surface);
+  border-right:1px solid var(--nv-border);box-shadow:none;transition:width .18s ease;
+}
+.ui-nolvira .sanad-brand{
+  height:var(--nv-topbar-h);margin:0;padding:0 20px;gap:10px;flex-shrink:0;
+  font-size:17px;font-weight:600;letter-spacing:-.2px;color:var(--nv-fg);
+}
+.ui-nolvira .nv-mark{
+  width:32px;height:32px;border-radius:8px;background:var(--nv-primary);color:var(--nv-primary-fg);
+  display:flex;align-items:center;justify-content:center;font-weight:700;font-size:16px;flex-shrink:0;
+}
+.ui-nolvira .sanad-brand:has(img:not([style*="none"])) .nv-mark{display:none;}
+.ui-nolvira .module-switch{margin:8px 14px 10px;padding:3px;background:var(--nv-surface-2);border-radius:8px;border:1px solid var(--nv-border);}
+.ui-nolvira .module-switch button{font-size:13px;padding:6px;border-radius:6px;color:var(--nv-muted);}
+.ui-nolvira .module-switch button.active{background:var(--nv-surface);color:var(--nv-fg);box-shadow:var(--nv-shadow-sm);}
+.ui-nolvira .brand{margin:0 14px 6px;padding:8px 6px 12px;border-bottom:1px solid var(--nv-border);}
+.ui-nolvira .brand-mark{background:var(--nv-primary-soft);color:var(--nv-primary);border-radius:8px;}
+.ui-nolvira .brand-title{font-size:14px;font-weight:600;color:var(--nv-fg);}
+.ui-nolvira .brand-sub{font-size:12px;color:var(--nv-subtle);}
+.ui-nolvira .nav{padding:6px 14px 12px;gap:2px;scrollbar-color:var(--nv-border-strong) transparent;}
+.ui-nolvira .nav-item{
+  gap:12px;padding:8px 10px;min-height:36px;border-radius:8px;
+  font-size:14px;font-weight:500;color:var(--nv-fg);
+}
+.ui-nolvira .nav-item .nav-ico{width:18px;height:18px;opacity:1;color:var(--nv-muted);display:flex;align-items:center;justify-content:center;font-size:14px;}
+.ui-nolvira .nav-item:hover{background:var(--nv-surface-2);color:var(--nv-fg);}
+.ui-nolvira .nav-item:hover .nav-ico{color:var(--nv-fg);}
+.ui-nolvira .nav-item.active{background:var(--nv-primary-soft);color:var(--nv-primary);font-weight:500;}
+.ui-nolvira .nav-item.active .nav-ico{color:var(--nv-primary);}
+.ui-nolvira .nav-subgroup-title{
+  font-size:12px;font-weight:500;letter-spacing:0;color:var(--nv-subtle);padding:16px 10px 6px;
+}
+.ui-nolvira .nav-subgroup-title .nav-subgroup-ico{display:none;}
+.ui-nolvira .nav-subgroup{gap:2px;}
+.ui-nolvira .nav-badge{background:var(--nv-neutral-soft);color:var(--nv-muted);font-size:11px;font-weight:600;min-width:20px;text-align:center;}
+.ui-nolvira .nav-item.active .nav-badge{background:var(--nv-primary);color:var(--nv-primary-fg);}
+.ui-nolvira .nav-badge.warn{background:var(--nv-danger);color:#fff;}
+.ui-nolvira .sidebar-footer{
+  margin:0;padding:12px 16px;border-top:1px solid var(--nv-border);
+  display:flex;align-items:center;gap:10px;font-size:11.5px;color:var(--nv-subtle);letter-spacing:0;
+}
+.ui-nolvira .nv-user{display:flex;flex-direction:column;min-width:0;line-height:1.3;}
+.ui-nolvira .nv-user #userMenuName{font-size:13.5px;font-weight:600;color:var(--nv-fg);white-space:nowrap;overflow:hidden;text-overflow:ellipsis;}
+.ui-nolvira .nv-user .nv-org{font-size:11.5px;color:var(--nv-subtle);}
+.ui-nolvira .nv-avatar{
+  width:34px;height:34px;border-radius:50%;flex-shrink:0;
+  background:var(--nv-warning-soft);color:var(--nv-warning);
+  display:flex;align-items:center;justify-content:center;font-size:12px;font-weight:600;
+}
+
+/* Sidebar repliée (bouton ⟦ du topbar) */
+.ui-nolvira.nv-collapsed .sidebar{width:var(--nv-sidebar-w-collapsed);}
+.ui-nolvira.nv-collapsed .sanad-brand{padding:0;justify-content:center;}
+.ui-nolvira.nv-collapsed .sanad-brand #sanadLogoText,
+.ui-nolvira.nv-collapsed .sanad-brand img,
+.ui-nolvira.nv-collapsed .module-switch,
+.ui-nolvira.nv-collapsed .brand > div:last-child,
+.ui-nolvira.nv-collapsed .nav-subgroup-title,
+.ui-nolvira.nv-collapsed .nv-user,
+.ui-nolvira.nv-collapsed .nav-badge{display:none !important;}
+.ui-nolvira.nv-collapsed .sanad-brand .nv-mark{display:flex !important;}
+.ui-nolvira.nv-collapsed .brand{justify-content:center;padding:8px 0 12px;margin:0 10px 6px;}
+.ui-nolvira.nv-collapsed .nav{padding:6px 10px;}
+.ui-nolvira.nv-collapsed .nav-item{font-size:0;justify-content:center;padding:9px 0;gap:0;}
+.ui-nolvira.nv-collapsed .sidebar-footer{justify-content:center;padding:12px 0;}
+
+/* ---------------------------------------------------------------- MAIN + TOPBAR */
+.ui-nolvira .main{padding:0 32px 64px;max-width:none;min-width:0;}
+.ui-nolvira .topbar{
+  position:sticky;top:0;z-index:40;height:var(--nv-topbar-h);
+  margin:0 -32px;padding:0 20px;gap:8px;justify-content:flex-start;
+  background:color-mix(in srgb, var(--nv-surface) 85%, transparent);
+  backdrop-filter:saturate(1.4) blur(8px);-webkit-backdrop-filter:saturate(1.4) blur(8px);
+  border-bottom:1px solid var(--nv-border);
+}
+.ui-nolvira .nv-spacer{flex:1;}
+.ui-nolvira .nv-icon-btn{
+  width:36px;height:36px;border-radius:8px;border:none;background:transparent;color:var(--nv-muted);
+  display:inline-flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;
+  transition:background .12s ease,color .12s ease;padding:0;
+}
+.ui-nolvira .nv-icon-btn:hover{background:var(--nv-surface-2);color:var(--nv-fg);}
+.ui-nolvira .nv-icon-btn:focus-visible{outline:none;box-shadow:var(--ring-shadow);}
+
+/* Recherche globale façon Nolvira (icône + raccourci Ctrl K) */
+.ui-nolvira .global-search-wrap{flex:0 1 470px;max-width:470px;margin-left:4px;}
+.ui-nolvira .global-search-wrap .nv-search-ico{position:absolute;left:12px;top:50%;transform:translateY(-50%);width:16px;height:16px;color:var(--nv-subtle);pointer-events:none;}
+.ui-nolvira .global-search-wrap kbd{
+  position:absolute;right:10px;top:50%;transform:translateY(-50%);pointer-events:none;
+  font-family:'JetBrains Mono',ui-monospace,monospace;font-size:10.5px;color:var(--nv-subtle);
+  border:1px solid var(--nv-border);background:var(--nv-surface);border-radius:4px;padding:1px 6px;
+}
+.ui-nolvira #globalSearch{
+  height:40px;padding:0 70px 0 36px;border-radius:8px;font-size:14px;
+  background:var(--nv-surface-2);border:1px solid var(--nv-border);color:var(--nv-fg);
+}
+.ui-nolvira #globalSearch::placeholder{color:var(--nv-subtle);}
+.ui-nolvira #globalSearch:focus{outline:none;background:var(--nv-surface);border-color:var(--nv-primary);box-shadow:var(--ring-shadow);}
+.ui-nolvira .global-search-results{background:var(--nv-surface);border-color:var(--nv-border);border-radius:10px;box-shadow:var(--nv-shadow-lg);}
+.ui-nolvira .gsr-item{border-color:var(--nv-border);}
+.ui-nolvira .gsr-item:hover{background:var(--nv-surface-2);}
+
+.ui-nolvira .month-picker{
+  height:36px;padding:0 6px 0 12px;gap:6px;border-radius:8px;box-shadow:none;
+  background:var(--nv-surface);border:1px solid var(--nv-border-strong);
+}
+.ui-nolvira .month-picker label{font-size:12px;text-transform:none;letter-spacing:0;font-weight:500;color:var(--nv-subtle);}
+.ui-nolvira .month-picker input[type=month]{font-size:13.5px;font-weight:500;color:var(--nv-fg);color-scheme:inherit;}
+.ui-nolvira .month-nav-btn{width:26px;height:26px;border:none;border-radius:6px;background:transparent;color:var(--nv-muted);}
+.ui-nolvira .month-nav-btn .nv-i{width:16px;height:16px;}
+.ui-nolvira .global-search-wrap{min-width:220px;}
+.ui-nolvira .month-nav-btn:hover{background:var(--nv-surface-2);color:var(--nv-fg);}
+.ui-nolvira .last-sync-indicator{background:transparent;border-color:var(--nv-border);font-size:12px;height:28px;}
+.ui-nolvira .user-menu{margin-left:0;gap:2px;}
+.ui-nolvira .user-menu .role-pill{display:none;}
+.ui-nolvira .nv-topbar-sep{width:1px;height:24px;background:var(--nv-border);margin:0 6px;}
+.ui-nolvira .topbar .nv-avatar{width:34px;height:34px;}
+
+/* Boutons texte du user-menu → boutons-icônes (le texte, réécrit par app.js, est masqué ;
+   l'icône est un masque CSS pour survivre aux textContent = …) */
+.ui-nolvira .user-menu .btn-add{
+  width:36px;height:36px;padding:0;border:none;background:transparent;font-size:0;color:var(--nv-muted);
+  display:inline-flex;align-items:center;justify-content:center;border-radius:8px;
+}
+.ui-nolvira .user-menu .btn-add[style*="none"]{display:none !important;}
+.ui-nolvira .user-menu .btn-add:hover{background:var(--nv-surface-2);color:var(--nv-fg);}
+.ui-nolvira .user-menu .btn-add::before{
+  content:"";width:18px;height:18px;background:currentColor;
+  -webkit-mask:var(--nv-mask) center/18px no-repeat;mask:var(--nv-mask) center/18px no-repeat;
+}
+.ui-nolvira #shareSanadBtn{--nv-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71'/%3E%3Cpath d='M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 0 0 7.07 7.07l1.71-1.71'/%3E%3C/svg%3E");}
+.ui-nolvira #densityToggleBtn{--nv-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M3 6h18M3 12h18M3 18h18'/%3E%3C/svg%3E");}
+.ui-nolvira #helpBtn{--nv-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Ccircle cx='12' cy='12' r='10'/%3E%3Cpath d='M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3M12 17h.01'/%3E%3C/svg%3E");}
+.ui-nolvira #logoutBtn{--nv-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='1.75' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9'/%3E%3C/svg%3E");}
+
+/* Bandeau de page : fil d'Ariane + favori, au-dessus du titre (comme Nolvira) */
+.ui-nolvira .nv-pagebar{display:flex;align-items:center;gap:8px;padding:22px 0 6px;min-height:20px;}
+.ui-nolvira .breadcrumb{font-size:13px;color:var(--nv-muted);gap:6px;}
+.ui-nolvira .breadcrumb .bc-sep{opacity:1;color:var(--nv-subtle);font-size:0;width:14px;height:14px;
+  background:currentColor;
+  -webkit-mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E") center/14px no-repeat;
+          mask:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='black' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpath d='m9 18 6-6-6-6'/%3E%3C/svg%3E") center/14px no-repeat;}
+.ui-nolvira .breadcrumb .bc-current{color:var(--nv-fg);font-weight:500;}
+.ui-nolvira #favoriteToggleBtn{border:none;background:transparent;color:var(--nv-subtle);padding:2px 6px;font-size:15px;border-radius:6px;}
+.ui-nolvira #favoriteToggleBtn:hover{background:var(--nv-surface-2);color:var(--nv-fg);}
+.ui-nolvira #favoriteToggleBtn.is-favorited{background:transparent;color:#d97706;}
+
+/* ---------------------------------------------------------------- EN-TÊTES DE PAGE */
+.ui-nolvira .panel-head{margin:8px 0 24px;}
+.ui-nolvira .panel-head h1{font-size:22px;font-weight:600;letter-spacing:-.22px;line-height:32px;color:var(--nv-fg);margin:0 0 2px;}
+.ui-nolvira .panel-head p{font-size:14px;color:var(--nv-muted);}
+.ui-nolvira .panel-head-row{align-items:center;}
+.ui-nolvira .dash-actions{gap:8px;flex-wrap:wrap;}
+
+/* ---------------------------------------------------------------- BOUTONS */
+.ui-nolvira .btn{height:36px;padding:0 14px;border-radius:8px;font-size:14px;font-weight:500;gap:8px;}
+.ui-nolvira .btn-primary{background:var(--nv-primary);color:var(--nv-primary-fg);box-shadow:var(--nv-shadow-sm);}
+.ui-nolvira .btn-primary:hover{background:var(--nv-primary-hover);}
+.ui-nolvira .btn-outline{background:var(--nv-surface);color:var(--nv-fg);border-color:var(--nv-border-strong);box-shadow:var(--nv-shadow-sm);}
+.ui-nolvira .btn-outline:hover{background:var(--nv-surface-2);}
+.ui-nolvira .btn-secondary{background:var(--nv-surface-2);color:var(--nv-fg);}
+.ui-nolvira .btn-secondary:hover{background:var(--nv-neutral-soft);}
+.ui-nolvira .btn-ghost:hover{background:var(--nv-surface-2);}
+.ui-nolvira .btn-destructive{background:var(--nv-danger);color:#fff;}
+.ui-nolvira .btn-add{background:var(--nv-surface);color:var(--nv-fg);border-color:var(--nv-border-strong);border-radius:8px;height:32px;padding:0 12px;font-size:13px;}
+.ui-nolvira .btn-add:hover{background:var(--nv-surface-2);}
+.ui-nolvira .btn:focus-visible,.ui-nolvira .btn-add:focus-visible{outline:none;box-shadow:var(--ring-shadow);}
+
+/* ---------------------------------------------------------------- CARTES / KPI / GRAPHES */
+.ui-nolvira .card,
+.ui-nolvira .chart-card,
+.ui-nolvira .dash-table-wrap,
+.ui-nolvira .gauge-row,
+.ui-nolvira .kb-card{
+  background:var(--nv-surface);border:1px solid var(--nv-border);border-radius:12px;
+  box-shadow:var(--nv-shadow-sm);padding:24px;
+}
+.ui-nolvira .card:hover,.ui-nolvira .chart-card:hover,.ui-nolvira .dash-table-wrap:hover,.ui-nolvira .gauge-row:hover{border-color:var(--nv-border);}
+.ui-nolvira .card h2{font-size:16px;font-weight:600;letter-spacing:-.1px;}
+.ui-nolvira .chart-card h3,.ui-nolvira .dash-table-wrap h3{font-size:16px;font-weight:600;letter-spacing:-.1px;margin-bottom:4px;}
+.ui-nolvira .chart-caption,.ui-nolvira .hint{color:var(--nv-muted);}
+/* KPI compacts : la carte épouse son contenu (libellé + valeur + delta), sans grand vide */
+.ui-nolvira .kpi-grid{grid-template-columns:repeat(4,minmax(0,1fr));gap:12px;margin-bottom:12px;}
+@media (max-width:900px){ .ui-nolvira .kpi-grid{grid-template-columns:repeat(2,minmax(0,1fr));} }
+.ui-nolvira .kpi-card{
+  background:var(--nv-surface);border:1px solid var(--nv-border);border-radius:10px;
+  padding:12px 16px;box-shadow:var(--nv-shadow-sm);
+  display:flex;flex-direction:column;justify-content:center;gap:4px;
+}
+.ui-nolvira .kpi-card:hover{border-color:var(--nv-border-strong);box-shadow:var(--nv-shadow-md);}
+.ui-nolvira .kpi-label{font-size:12.5px;font-weight:500;color:var(--nv-muted);margin:0;line-height:1.35;}
+.ui-nolvira .kpi-value{font-size:22px;font-weight:600;letter-spacing:-.4px;line-height:1.2;color:var(--nv-fg);}
+.ui-nolvira .kpi-value[style*="font-size"]{font-size:18px !important;}  /* valeurs textuelles (semaine, canal…) */
+.ui-nolvira .kpi-delta{font-size:12px;color:var(--nv-muted);margin:0;}
+.ui-nolvira .kpi-grid + .charts-row,.ui-nolvira .kpi-grid + .dash-table-wrap,.ui-nolvira .kpi-grid + div{margin-top:8px;}
+.ui-nolvira[data-density="compact"] .kpi-card{padding:8px 12px;}
+.ui-nolvira .charts-row{gap:16px;margin-bottom:20px;}
+.ui-nolvira .chart-png-btn{background:var(--nv-surface);border:1px solid var(--nv-border-strong);color:var(--nv-muted);border-radius:6px;padding:3px 9px;top:20px;right:20px;}
+.ui-nolvira .chart-png-btn:hover{background:var(--nv-surface-2);color:var(--nv-fg);}
+.ui-nolvira .synth-card.constats{border-left:3px solid #d97706;}
+.ui-nolvira .synth-card.reco{border-left:3px solid var(--nv-success);}
+.ui-nolvira .yoy-card{border-left:3px solid var(--nv-primary);}
+.ui-nolvira .yoy-chip{background:var(--nv-surface-2);border-color:var(--nv-border);border-radius:10px;}
+.ui-nolvira .yoy-chip-label{text-transform:none;letter-spacing:0;font-weight:500;font-size:12px;}
+.ui-nolvira .compare-chip{background:var(--nv-surface);border-color:var(--nv-border);box-shadow:none;font-weight:500;}
+
+/* ---------------------------------------------------------------- TABLEAUX (DataTable Nolvira) */
+.ui-nolvira .dash-table th,
+.ui-nolvira .input-table th,
+.ui-nolvira .cat-table th{
+  background:var(--nv-surface-2);color:var(--nv-muted);font-size:12.5px;font-weight:500;
+  padding:10px 12px;border-bottom:1px solid var(--nv-border);
+}
+.ui-nolvira .dash-table td,
+.ui-nolvira .input-table td,
+.ui-nolvira .cat-table td{padding:12px;border-bottom:1px solid var(--nv-border);font-size:13.5px;}
+.ui-nolvira .dash-table thead th:first-child,.ui-nolvira .input-table thead th:first-child,.ui-nolvira .cat-table thead th:first-child{border-top-left-radius:8px;}
+.ui-nolvira .dash-table thead th:last-child,.ui-nolvira .input-table thead th:last-child,.ui-nolvira .cat-table thead th:last-child{border-top-right-radius:8px;}
+.ui-nolvira .dash-table tbody tr:hover td,
+.ui-nolvira .input-table tbody tr:hover td,
+.ui-nolvira .cat-table tbody tr:hover td{background:color-mix(in srgb, var(--nv-surface-2) 60%, transparent);}
+.ui-nolvira .input-table tr.weekend td{color:var(--nv-subtle);background:color-mix(in srgb, var(--nv-surface-2) 55%, transparent);}
+.ui-nolvira[data-density="compact"] .dash-table th{padding:6px 10px;font-size:11.5px;}
+.ui-nolvira[data-density="compact"] .dash-table td{padding:7px 10px;font-size:12.5px;}
+.ui-nolvira .table-scroll{border-color:var(--nv-border);border-radius:10px;}
+.ui-nolvira .table-scroll thead th{background:var(--nv-surface-2);}
+.ui-nolvira .pct-bar-bg{background:var(--nv-neutral-soft);}
+
+/* ---------------------------------------------------------------- CHAMPS */
+.ui-nolvira input[type=text],.ui-nolvira input[type=password],.ui-nolvira input[type=number],
+.ui-nolvira input[type=email],.ui-nolvira input[type=date],.ui-nolvira input[type=month]:not(#monthSelect),
+.ui-nolvira select,.ui-nolvira textarea{
+  background:var(--nv-surface);color:var(--nv-fg);border:1px solid var(--nv-border-strong);border-radius:8px;
+}
+.ui-nolvira input:focus,.ui-nolvira select:focus,.ui-nolvira textarea:focus{outline:none;border-color:var(--nv-primary);box-shadow:var(--ring-shadow);}
+.ui-nolvira #monthSelect:focus{box-shadow:none;}
+.ui-nolvira .form-row label{font-weight:500;color:var(--nv-fg);font-size:13px;}
+.ui-nolvira .table-filter-input{height:38px;border-radius:8px;border-color:var(--nv-border-strong);font-size:13.5px;max-width:390px;}
+.ui-nolvira .mini-label{font-weight:500;color:var(--nv-muted);font-size:12.5px;}
+.ui-nolvira .prompt-box{background:var(--nv-surface-2);border:1px solid var(--nv-border);border-radius:10px;}
+.ui-nolvira .contact-check-item{background:var(--nv-surface-2);}
+
+/* ---------------------------------------------------------------- BADGES / PILLS (soft + point) */
+.ui-nolvira .role-pill,.ui-nolvira .completude-badge,.ui-nolvira .tag-pill{border-radius:999px;font-weight:500;}
+.ui-nolvira .completude-badge{background:var(--nv-info-soft);color:var(--nv-info);font-size:12px;}
+.ui-nolvira .completude-badge.full{background:var(--nv-success-soft);color:var(--nv-success);}
+.ui-nolvira .completude-badge.low{background:var(--nv-danger-soft);color:var(--nv-danger);}
+.ui-nolvira .completude-badge::before{content:"";display:inline-block;width:6px;height:6px;border-radius:50%;background:currentColor;margin-right:6px;vertical-align:middle;}
+.ui-nolvira .role-pill.to{background:var(--nv-neutral-soft);color:var(--nv-fg);border-color:transparent;}
+.ui-nolvira .role-pill.cc{background:var(--nv-warning-soft);color:var(--nv-warning);border-color:transparent;}
+.ui-nolvira .tag-pill{background:var(--nv-surface-2);border-color:var(--nv-border);}
+
+/* Segmented controls (agrégation, presets de période) → style Nolvira 3M/6M/9M */
+.ui-nolvira .agg-toggle,.ui-nolvira .period-presets{background:var(--nv-surface-2);border:1px solid var(--nv-border);border-radius:8px;padding:3px;gap:2px;}
+.ui-nolvira .agg-toggle button,.ui-nolvira .period-presets button{
+  background:transparent;border:none;color:var(--nv-muted);border-radius:5px;font-size:13px;font-weight:500;padding:4px 12px;
+}
+.ui-nolvira .agg-toggle button.active,.ui-nolvira .period-presets button.active{background:var(--nv-surface);color:var(--nv-fg);box-shadow:var(--nv-shadow-sm);}
+
+/* ---------------------------------------------------------------- BANNIÈRES */
+.ui-nolvira .banner{border-radius:10px;font-weight:500;}
+.ui-nolvira .banner.warn{background:var(--nv-warning-soft);color:var(--nv-warning);border-color:color-mix(in srgb, var(--nv-warning) 25%, transparent);}
+.ui-nolvira .banner.info{background:var(--nv-info-soft);color:var(--nv-info);border-color:color-mix(in srgb, var(--nv-info) 25%, transparent);}
+.ui-nolvira .banner.danger{background:var(--nv-danger-soft);color:var(--nv-danger);border-color:color-mix(in srgb, var(--nv-danger) 25%, transparent);}
+.ui-nolvira .guide-item{background:var(--nv-surface-2);border-left-color:var(--nv-primary);}
+
+/* ---------------------------------------------------------------- MODALES / TOAST / OVERLAYS */
+.ui-nolvira .modal-overlay{background:rgba(20,20,15,.45);backdrop-filter:blur(2px);}
+.ui-nolvira .modal-box{background:var(--nv-surface);border-color:var(--nv-border);border-radius:14px;box-shadow:var(--nv-shadow-lg);}
+.ui-nolvira .modal-head{border-color:var(--nv-border);}
+.ui-nolvira .modal-close:hover{background:var(--nv-surface-2);}
+.ui-nolvira .toast{background:var(--nv-fg);color:var(--nv-bg);border-radius:10px;font-weight:500;box-shadow:var(--nv-shadow-lg);}
+.ui-nolvira .busy-overlay{background:color-mix(in srgb, var(--nv-bg) 82%, transparent);}
+.ui-nolvira .busy-spinner{border-color:var(--nv-primary-soft);border-top-color:var(--nv-primary);}
+
+/* ---------------------------------------------------------------- AUTHENTIFICATION */
+.ui-nolvira .auth-overlay{background:var(--nv-bg);}
+.ui-nolvira .auth-box{border-radius:14px;padding:36px;border-color:var(--nv-border);box-shadow:var(--nv-shadow-lg);}
+.ui-nolvira .auth-box .brand-mark{background:var(--nv-primary) !important;color:var(--nv-primary-fg) !important;border-radius:10px;}
+.ui-nolvira .auth-box input{height:40px;border-radius:8px;border-color:var(--nv-border-strong);}
+
+/* ---------------------------------------------------------------- NOTES / DIVERS */
+.ui-nolvira .note-bubble.admin{background:var(--nv-primary-soft);color:var(--nv-fg);}
+.ui-nolvira .note-bubble.hotliner{background:var(--nv-warning-soft);color:var(--nv-fg);}
+.ui-nolvira .logo-preview{background:var(--nv-surface-2);}
+.ui-nolvira .status-dot.off{background:var(--nv-border-strong);}
+.ui-nolvira .theme-swatch{border-color:var(--nv-border);}
+
+/* Mode sombre : neutralise les fonds clairs codés en dur (inline) les plus fréquents */
+.ui-nolvira.dark [style*="background:#fff"],.ui-nolvira.dark [style*="background: #fff"],
+.ui-nolvira.dark [style*="background:#FFF"],.ui-nolvira.dark [style*="background:white"],
+.ui-nolvira.dark [style*="background:#FAFAFA"],.ui-nolvira.dark [style*="background:#F5F7F9"],
+.ui-nolvira.dark [style*="background:#F4F4F5"]{background:var(--nv-surface-2) !important;}
+.ui-nolvira.dark img.chart-img,.ui-nolvira.dark .card img[src*="png"]{background:#fff;border-radius:8px;}
+
+@media (max-width:900px){
+  .ui-nolvira .main{padding:0 16px 48px;}
+  .ui-nolvira .topbar{margin:0 -16px;padding:0 12px;flex-wrap:nowrap;overflow-x:auto;}
+  .ui-nolvira .sidebar{width:100%;}
+  .ui-nolvira .sidebar-footer,.ui-nolvira .brand{display:none;}
+  .ui-nolvira .nav{padding:6px;}
+}
+@media print{
+  .ui-nolvira .nv-pagebar{display:none !important;}
+}

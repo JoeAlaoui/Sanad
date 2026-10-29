@@ -49,12 +49,23 @@ sur l'écran, le PDF et l'Excel. Seule la heatmap est recadrée — le taux de d
 de réponse et les autres statistiques restent calculés sur l'intégralité des données importées,
 week-ends et heures creuses compris.
 
-**Sections du rapport email personnalisables** (Tarkhiss et Moussanada) : dans le panneau
+**Libellés des KPI personnalisables** : Administration → « Libellés des KPI » permet de renommer chaque
+indicateur (ex. « En retard » → « En instance »). Le nouveau libellé s'applique aux dashboards (ancienne
+et nouvelle interface) **et** aux rapports (PDF, Excel, email). Vide = libellé par défaut.
+
+**Indicateurs comparés au mois précédent** : sous chaque KPI, en plus du pourcentage d'évolution, la valeur
+du mois précédent est affichée, ex. « +12 % vs Août (180) » (durées au format jj/hh, taux avec « % »).
+
+**Légende sous chaque graphique** : une courte phrase explique ce que représente le graphique (écran,
+PDF, Excel et email).
+
+**Sections et graphiques du rapport email personnalisables** (Tarkhiss et Moussanada) : dans le panneau
 "Envoyer par email" du Dashboard, des cases à cocher permettent d'inclure ou exclure chaque
 section (analyse graphique, problèmes techniques, demandes, évolution hebdomadaire, synthèse
 pour Tarkhiss ; volume, délais, catégories, services, équipe, comparatif, synthèse pour
 Moussanada). Réglage enregistré automatiquement à chaque case cochée/décochée, propre à chaque
-module. **La heatmap et les statistiques avancées (appels/emails) ne sont, elles, jamais
+module. En plus des sections, chaque **graphique** peut être inclus ou exclu individuellement (un
+graphique reste masqué si sa section l'est). **La heatmap et les statistiques avancées (appels/emails) ne sont, elles, jamais
 incluses dans l'email, quel que soit ce réglage** — uniquement dans le PDF, l'Excel et l'écran,
 qui restent toujours complets indépendamment de ce qui est choisi pour l'email.
 - Saisie mensuelle appels/emails, analyse (problèmes, demandes, constats, recommandations),
@@ -218,3 +229,16 @@ l'accès applicatif est refusé en mode local, ce qui diffère d'un port réelle
 - Délai de première réponse email et rappels d'appels manqués : indicateurs **indicatifs**
   (appariement par sujet / par numéro et fenêtre de temps, pas d'identifiant de conversation
   réel dans les exports sources).
+
+
+## Lot 10 — Retour à l'interface legacy (unique)
+- L'interface React/shadcn a été **supprimée** (dossier `frontend/` retiré). `/` sert l'interface legacy ; `/legacy` et `/app` redirigent vers `/`.
+- Fonctions ajoutées à la legacy (nouveaux onglets, groupe « Qualité & conformité » de la sidebar) :
+  - **Qualité des données** (admin + superviseur) : score mensuel par volet, alertes, détail des contrôles par mois (`/api/quality/overview`).
+  - **SOP & preuves d'audit** (admin) : métadonnées documentaires, dossier de preuves du mois sélectionné (aperçu, PDF, ZIP + SHA-256), SOP (aperçu, PDF, Word).
+  - **Sauvegardes** (admin) : créer, télécharger, importer, restaurer (sauvegarde de sécurité auto), suppression, auto quotidienne + rétention.
+  - Administration > édition avancée : option « Email pleine largeur » ; variable `{sous_titre}` pour le sous-titre d'en-tête.
+- **Couverture de l'email/PDF = d'origine** : bloc 760 px centré, sous-titre par défaut `{agence} — {sous_titre} — {mois}` (titre/sous-titre toujours éditables en Administration). Email pleine largeur = option, jamais pour le PDF.
+- Si le client n'envoie pas d'images de graphiques, le serveur les génère (`server_report_charts`).
+- Test navigateur : `SANAD_CDN_DIR=<dossier avec node_modules/chart.js> python tests/e2e_smoke.py` (le CDN Chart.js est remplacé hors-ligne).
+- Maquettes de comparaison d'interfaces : dossier `mockups/` (ouvrir `index.html`).

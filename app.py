@@ -27,9 +27,14 @@ import glpi_profiles
 import tarkhiss_meta as tm
 from pchc_import import (
     CATEGORIES as PCHC_CATEGORIES, COLOR_HEX as PCHC_COLOR_HEX,
-    status_color as pchc_status_color, import_pchc_xlsx as _parse_pchc_xlsx,
+    status_color as pchc_status_color,
     import_pchc_csv as _parse_pchc_csv, normalize_key as pchc_normalize_key,
+    parse_category_rows as _pchc_parse_rows,
 )
+import pchc_raw
+import pchc_excel
+import pchc_deliverables
+import tarkhiss_annual
 import base64
 import subprocess
 import zipfile
@@ -43,7 +48,7 @@ def hex_to_rgbcolor(hex_str):
     from pptx.dml.color import RGBColor as _RGBColor
     h = hex_str.lstrip("#")
     return _RGBColor(int(h[0:2], 16), int(h[2:4], 16), int(h[4:6], 16))
-from flask import Flask, jsonify, request, render_template, send_file, abort, session
+from flask import Flask, jsonify, request, render_template, send_file, abort, session, send_from_directory, redirect
 from werkzeug.utils import secure_filename
 from werkzeug.security import generate_password_hash, check_password_hash
 
@@ -63,6 +68,63 @@ os.makedirs(BACKUP_DIR, exist_ok=True)
 # instantané (aucun redémarrage) — seul un changement de PORT nécessite un vrai redémarrage du
 # processus, que l'application effectue alors elle-même (voir restart_app_async()).
 NETWORK_STATE = {"enabled": False, "port": 5050}
+
+
+# Légendes explicatives affichées sous chaque graphique (écran, PDF, Excel, email) — et clés
+# utilisées pour permettre d'inclure/exclure CHAQUE graphique individuellement du rapport email
+# (en plus des sections entières). Un graphique reste toujours soumis à la section qui le
+# contient : si la section est désactivée pour l'email, ses graphiques le sont aussi.
+TARKHISS_CHART_CAPTIONS = {
+    "weekly": "Comparaison du nombre de bugs signalés et de demandes d'information, semaine par semaine.",
+    "problems": "Répartition des problèmes techniques par type, en proportion du total du mois.",
+}
+MOUSSANADA_CHART_CAPTIONS = {
+    "volume": "Évolution du nombre de tickets ouverts, résolus et clos sur le mois.",
+    "backlog": "Ancienneté des tickets encore ouverts, du plus récent au plus ancien.",
+    "trend": "Évolution du délai moyen de résolution et de clôture sur les derniers mois.",
+    "cat": "Répartition des tickets par catégorie de demande.",
+    "pareto": "Contribution cumulée des catégories au volume total (principe des 80/20).",
+    "srv": "Répartition des tickets par service demandeur.",
+    "techvol": "Volume de sollicitation par technicien (tickets ouverts + résolus sur le mois).",
+    "tech": "Détail des sollicitations : tickets ouverts et résolus par technicien.",
+    "radar": "Comparaison multi-critères de la performance de chaque technicien.",
+    "delay": "Comparaison des délais moyens de traitement entre les deux mois.",
+}
+
+# Libellés des KPI — personnalisables en Administration (ex. "Tickets en retard" → "Tickets en
+# instance"). Les clés ci-dessous sont les valeurs par défaut ; une entrée "kpi_labels" dans les
+# paramètres du module (même mécanisme que "email_sections") peut surcharger chacune.
+TARKHISS_DEFAULT_KPI_LABELS = {
+    "emails_received": "Emails reçus",
+    "emails_sent": "Emails envoyés",
+    "calls": "Appels",
+    "talk_time": "Temps comm. (hh:mm:ss)",
+    "problems": "Problèmes tech.",
+    "demandes": "Demandes info",
+    "ratio_bd": "Ratio bugs/demandes",
+    "critical_week": "Semaine critique",
+    "avg_call": "Durée moy./appel",
+    "dominant_channel": "Canal dominant",
+}
+MOUSSANADA_DEFAULT_KPI_LABELS = {
+    "tickets_ouverts": "Tickets ouverts",
+    "tickets_resolus": "Tickets résolus",
+    "tickets_clos": "Tickets clos",
+    "tickets_retard": "Tickets en retard",
+    "taux_resolution": "Taux de résolution",
+    "taux_cloture": "Taux de clôture",
+    "delai_resolution": "Délai moy. résolution",
+    "delai_cloture": "Délai moy. clôture",
+}
+
+
+def get_kpi_labels(module):
+    """Libellés KPI effectifs pour un module : défauts + surcharges Administration."""
+    defaults = TARKHISS_DEFAULT_KPI_LABELS if module == "tarkhiss" else MOUSSANADA_DEFAULT_KPI_LABELS
+    custom = load_module_settings(module).get("kpi_labels", {}) or {}
+    labels = dict(defaults)
+    labels.update({k: v for k, v in custom.items() if k in defaults and str(v).strip()})
+    return labels
 
 
 def write_json_safely(path, data):
@@ -230,7 +292,7 @@ def auth_gate():
     if not NETWORK_STATE["enabled"] and request.remote_addr not in ("127.0.0.1", "::1", "localhost"):
         return jsonify({"error": "SANAD n'est accessible que depuis cet ordinateur pour le moment."}), 403
     path = request.path
-    if path == "/" or path.startswith("/static/") or path.startswith("/api/auth/"):
+    if path in ("/", "/legacy", "/app", "/app/", "/nolvira", "/nolvira/", "/classic") or path.startswith("/static/") or path.startswith("/api/auth/"):
         return
     if path == "/api/modules":
         return
@@ -242,10 +304,14 @@ def auth_gate():
     if not user:
         return jsonify({"error": "auth_required"}), 401
     role = user["role"]
+    # Volet Reporting Métier PCHC désactivable (Administration → « Reporting Métier PCHC activé ») :
+    # toutes ses API sont alors fermées, pour tous les rôles.
+    if path.startswith("/api/pchc/") and load_global_settings().get("pchc_enabled", True) is False:
+        return jsonify({"error": "module_disabled", "message": "Le volet Reporting Métier PCHC est désactivé (Administration)."}), 403
     if role == "admin":
         return
-    if path.startswith("/api/users"):
-        return jsonify({"error": "forbidden"}), 403
+    if path.startswith("/api/users") or path.startswith("/api/admin"):
+        return jsonify({"error": "forbidden"}), 403  # réservé administrateur (gate admin ci-dessus)
     if role == "hotliner":
         if path.startswith("/api/notes") or path.startswith("/api/knowledge") or path == "/api/modules":
             return
@@ -262,6 +328,8 @@ def auth_gate():
     if role == "superviseur":
         if path.startswith("/api/notes"):
             return jsonify({"error": "forbidden"}), 403
+        # Lecture seule : GET uniquement — pour PCHC, cela couvre la synthèse, les exports
+        # Excel/PPTX/PDF et le .eml ; l'import (POST /api/pchc/import) reste réservé à l'admin.
         if request.method != "GET":
             return jsonify({"error": "forbidden"}), 403
         return
@@ -948,6 +1016,11 @@ def load_global_settings():
         "report_title_tarkhiss": "Rapport Support Tarkhiss",
         "report_title_moussanada": "Rapport Support Moussanada",
         "report_title_pchc": "Reporting Métier — PCHC",
+        "report_subtitle_tarkhiss": "",
+        "report_subtitle_moussanada": "",
+        "report_subtitle_pchc": "",
+        "email_full_width": False,           # email pleine largeur (défaut : couverture d'origine 760 px)
+        "pchc_enabled": True,                # volet « Reporting Métier PCHC » activé (Administration)
         "report_show_contact_names": False,  # PDF/Excel Tarkhiss : noms des contacts (RGPD) — masqués par défaut
         # SMTP optionnel — si renseigné, permet l'envoi RÉEL du rappel programmé par email
         # (sans lui, le rappel reste un simple bandeau à l'ouverture de l'app, comme documenté).
@@ -995,10 +1068,17 @@ def load_module_settings(module):
         # soit ce réglage — elles ne sont donc pas listées ici comme choix possibles.
         "email_sections": {
             "graphs": True, "problems": True, "demandes": True, "weekly": True, "synth": True,
+            "chart_weekly": True, "chart_problems": True,
         } if module == "tarkhiss" else {
             "volume": True, "delays": True, "categories": True, "services": True, "team": True,
             "comparative": True, "synth": True,
+            "chart_volume": True, "chart_backlog": True, "chart_trend": True, "chart_cat": True,
+            "chart_pareto": True, "chart_srv": True, "chart_techvol": True, "chart_tech": True, "chart_radar": True,
+            "chart_delay": True,
         } if module == "moussanada" else {},
+        # Libellés KPI personnalisés (surcharge de TARKHISS_DEFAULT_KPI_LABELS /
+        # MOUSSANADA_DEFAULT_KPI_LABELS) — ex. {"tickets_retard": "Tickets en instance"}.
+        "kpi_labels": {},
     }
     p = module_settings_file(module)
     if os.path.exists(p):
@@ -1071,6 +1151,49 @@ def append_send_log(module, entry):
     write_json_safely(send_log_file(module), log[:200])
 
 
+def new_draft_email(subject, to_list, cc_list, body_html):
+    """Message HTML marqué « non envoyé » (X-Unsent: 1) : Outlook l'ouvre en brouillon, prêt à
+    être relu et envoyé, au lieu d'un message reçu en lecture seule."""
+    msg = EmailMessage()
+    msg["Subject"] = subject
+    msg["To"] = "; ".join(to_list)
+    if cc_list:
+        msg["Cc"] = "; ".join(cc_list)
+    msg["X-Unsent"] = "1"
+    msg.set_content("Ce message nécessite un client compatible HTML.")
+    msg.add_alternative(body_html, subtype="html")
+    return msg
+
+
+def _is_wsl():
+    return platform.system() == "Linux" and "microsoft" in platform.release().lower()
+
+
+def open_in_outlook(fpath):
+    """Ouvre le .eml dans une fenêtre Outlook : application associée aux .eml par Windows (nouvel
+    Outlook ou Outlook classique, selon le poste). Fonctionne serveur sous Windows ET sous WSL
+    (appel de cmd.exe côté Windows). Retourne (ouvert, erreur).
+    SANAD_NO_OUTLOOK=1 désactive l'ouverture (tests automatiques)."""
+    if os.environ.get("SANAD_NO_OUTLOOK") == "1":
+        return False, "ouverture désactivée (SANAD_NO_OUTLOOK=1)"
+    try:
+        if platform.system() == "Windows":
+            os.startfile(fpath)  # noqa
+            return True, None
+        if _is_wsl():
+            win_path = subprocess.run(["wslpath", "-w", os.path.abspath(fpath)], capture_output=True, text=True, check=True).stdout.strip()
+            subprocess.Popen(["/mnt/c/Windows/System32/cmd.exe", "/c", "start", "", win_path], cwd="/mnt/c/Windows",
+                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, start_new_session=True)
+            return True, None
+        if platform.system() == "Darwin":
+            subprocess.run(["open", fpath], check=True)
+        else:
+            subprocess.run(["xdg-open", fpath], check=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return True, None
+    except Exception as e:
+        return False, str(e)
+
+
 def send_email_smtp(msg):
     """Envoi réel via SMTP si configuré (Administration). Retourne (ok, error)."""
     import smtplib
@@ -1079,7 +1202,7 @@ def send_email_smtp(msg):
     if not host:
         return False, "SMTP non configuré (Administration → Notifications par email)"
     try:
-        msg["From"] = gs.get("smtp_from") or gs.get("smtp_user") or "sanad@localhost"
+        msg["From"] = gs.get("smtp_from") or gs.get("smtp_user") or "noreply@localhost"
         with smtplib.SMTP(host, int(gs.get("smtp_port") or 587), timeout=15) as server:
             if gs.get("smtp_use_tls", True):
                 server.starttls()
@@ -1255,6 +1378,22 @@ def apply_technicien_filter(items):
     if cfg.get("mode") == "whitelist":
         return [it for it in items if (it.get("label") or "").strip().lower() in names]
     return [it for it in items if (it.get("label") or "").strip().lower() not in names]
+
+
+def real_months(ts, require_data=False):
+    """Clés de la série mensuelle Moussanada qui sont de vrais mois (AAAA-MM, hors lignes
+    « Total » d'un export GLPI), jusqu'au mois en cours, triées ; option : seulement avec données."""
+    now_ym = datetime.now().strftime("%Y-%m")
+    out = [k for k in sorted(ts) if re.match(r"^\d{4}-\d{2}$", k) and k <= now_ym]
+    if require_data:
+        out = [k for k in out if any((ts[k].get(f) or 0) for f in ("ouverts", "resolus", "clos", "en_retard"))]
+    return out
+
+
+def tech_volume(t):
+    """Volume de sollicitation d'un technicien = tickets ouverts + résolus sur le mois
+    (mesure de charge retenue par le Helpdesk ; même calcul que le dashboard)."""
+    return (t.get("ouverts") or 0) + (t.get("resolus") or 0)
 
 
 # ---------------------------------------------------------------------------
@@ -1483,7 +1622,12 @@ def moussanada_import(ym):
     record_import_history(kind, ym, "csv", f.filename)
     log_audit("import", {"file": f.filename, "kind": kind, "result": result}, module="moussanada")
     warnings = []
-    if isinstance(result, dict) and not any(v for k, v in result.items() if k != "detected_month"):
+    skipped = result.get("skipped_non_month") if isinstance(result, dict) else None
+    if skipped:
+        warnings.append(f"{len(skipped)} ligne(s) ignorée(s) : la première colonne n'est pas un mois AAAA-MM "
+                        f"({', '.join(skipped[:5])}{'…' if len(skipped) > 5 else ''}). "
+                        "Vérifiez le type d'export choisi (ex. feuille Techniciens importée comme série de tickets).")
+    if isinstance(result, dict) and not any(v for k, v in result.items() if k not in ("detected_month", "skipped_non_month")):
         warnings.append("Aucune donnée n'a été détectée dans ce fichier — vérifiez qu'il s'agit bien d'un export GLPI avec les feuilles/en-têtes attendus.")
     return jsonify({"ok": True, "result": result, "warnings": warnings})
 
@@ -1512,7 +1656,7 @@ def moussanada_data(ym):
             "techniciens": apply_technicien_filter(src.get("techniciens", [])),
             "demandeurs": src.get("demandeurs", []),
         },
-        "timeseries": ts,
+        "timeseries": {k: v for k, v in ts.items() if any((v.get(f) or 0) for f in ("ouverts", "resolus", "en_retard", "clos"))},
         "notes": notes,
     })
 
@@ -1565,8 +1709,9 @@ def _fig_to_png_buf(fig):
     return buf
 
 
-def chart_bar_png(categories, series, title, ylabel="", figsize=(7.5, 4.2)):
-    """series: dict {libellé_série: [valeurs...]} — barres groupées."""
+def chart_bar_png(categories, series, title, ylabel="", figsize=(7.5, 4.2), fontsize=9):
+    """series: dict {libellé_série: [valeurs...]} — barres groupées. fontsize : axes/légende
+    (titre = fontsize + 4)."""
     import numpy as np
     import matplotlib.pyplot as plt
     _seaborn_setup()
@@ -1577,12 +1722,13 @@ def chart_bar_png(categories, series, title, ylabel="", figsize=(7.5, 4.2)):
     for i, (label, values) in enumerate(series.items()):
         ax.bar(x + i * width - 0.4 + width / 2, values, width=width, label=label, color=SEABORN_PALETTE[i % len(SEABORN_PALETTE)])
     ax.set_xticks(x)
-    ax.set_xticklabels(categories, rotation=30, ha="right", fontsize=9)
-    ax.set_title(title, fontsize=13, fontweight="bold", color="#0B4965", pad=12)
+    ax.set_xticklabels(categories, rotation=30, ha="right", fontsize=fontsize)
+    ax.tick_params(axis="y", labelsize=fontsize)
+    ax.set_title(title, fontsize=fontsize + 4, fontweight="bold", color="#0B4965", pad=12)
     if ylabel:
-        ax.set_ylabel(ylabel, fontsize=10)
+        ax.set_ylabel(ylabel, fontsize=fontsize + 1)
     if n > 1:
-        ax.legend(frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.28), ncol=min(n, 4), fontsize=9)
+        ax.legend(frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.28), ncol=min(n, 4), fontsize=fontsize)
     ax.spines["top"].set_visible(False)
     ax.spines["right"].set_visible(False)
     fig.tight_layout()
@@ -1630,7 +1776,7 @@ def chart_line_png(categories, series, title, ylabel="", figsize=(8, 4.2)):
     return _fig_to_png_buf(fig)
 
 
-def chart_combo_png(categories, bar_series, line_series, bar_ylabel="", line_ylabel="", title="", figsize=(9, 6.2)):
+def chart_combo_png(categories, bar_series, line_series, bar_ylabel="", line_ylabel="", title="", figsize=(9, 6.2), fontsize=9):
     """Barres empilées (bar_series) + ligne sur axe secondaire (line_series, une seule série)."""
     import numpy as np
     import matplotlib.pyplot as plt
@@ -1641,24 +1787,26 @@ def chart_combo_png(categories, bar_series, line_series, bar_ylabel="", line_yla
         values = np.array(values, dtype=float)
         ax1.bar(categories, values, bottom=bottom, label=label, color=SEABORN_PALETTE[i % len(SEABORN_PALETTE)])
         bottom += values
-    ax1.set_ylabel(bar_ylabel, fontsize=10)
+    ax1.set_ylabel(bar_ylabel, fontsize=fontsize + 1)
     ax1.tick_params(axis="x", labelrotation=40)
+    ax1.tick_params(axis="y", labelsize=fontsize)
     for lbl in ax1.get_xticklabels():
         lbl.set_ha("right")
-        lbl.set_fontsize(9)
+        lbl.set_fontsize(fontsize)
     ax1.spines["top"].set_visible(False)
 
     ax2 = ax1.twinx()
     line_label, line_values = next(iter(line_series.items()))
     ax2.plot(categories, line_values, marker="o", linewidth=2.6, markersize=6, color="#F59F0A", label=line_label)
-    ax2.set_ylabel(line_ylabel, fontsize=10)
+    ax2.set_ylabel(line_ylabel, fontsize=fontsize + 1)
+    ax2.tick_params(axis="y", labelsize=fontsize)
     ax2.set_ylim(0, max(100, max(line_values, default=0) * 1.15))
     ax2.grid(False)
 
     lines1, labels1 = ax1.get_legend_handles_labels()
     lines2, labels2 = ax2.get_legend_handles_labels()
-    ax1.legend(lines1 + lines2, labels1 + labels2, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.5), ncol=2, fontsize=9)
-    ax1.set_title(title, fontsize=13, fontweight="bold", color="#0B4965", pad=12)
+    ax1.legend(lines1 + lines2, labels1 + labels2, frameon=False, loc="upper center", bbox_to_anchor=(0.5, -0.5), ncol=2, fontsize=fontsize)
+    ax1.set_title(title, fontsize=fontsize + 4, fontweight="bold", color="#0B4965", pad=12)
     fig.subplots_adjust(bottom=0.38)
     return _fig_to_png_buf(fig)
 
@@ -1755,7 +1903,12 @@ def export_xlsx_moussanada(ym):
 
     cat_sheet = write_sheet("Catégories", m["categories"], ["Catégorie", "Ouverts", "Résolus", "En retard", "Fermés"])
     write_sheet("Services", m["services"], ["Service", "Ouverts", "Résolus", "En retard", "Fermés"])
-    write_sheet("Techniciens", m["techniciens"], ["Technicien", "Ouverts", "Résolus", "En retard", "Fermés"])
+    techs_x = sorted(m["techniciens"], key=tech_volume, reverse=True)
+    tech_sheet = write_sheet("Techniciens", techs_x, ["Technicien", "Ouverts", "Résolus", "En retard", "Fermés"])
+    tech_sheet.write(0, 5, "Sollicitations (ouverts + résolus)", fmts["header"])
+    for r, t in enumerate(techs_x, start=1):
+        tech_sheet.write(r, 5, tech_volume(t))
+    tech_sheet.set_column("F:F", 30)
     write_sheet("Demandeurs", m["demandeurs"], ["Demandeur", "Ouverts", "Résolus", "En retard", "Fermés"])
 
     top_cats = sorted(m["categories"], key=lambda c: -(c.get("ouverts", 0)))[:10]
@@ -1770,7 +1923,7 @@ def export_xlsx_moussanada(ym):
     ws3 = wb.add_worksheet("Évolution mensuelle")
     for i, h in enumerate(["Mois", "Ouverts", "Résolus", "En retard", "Clos", "Délai résolution (h)", "Délai clôture (h)"]):
         ws3.write(0, i, h, fmts["header"])
-    sorted_keys = sorted(ts.keys())
+    sorted_keys = real_months(ts, require_data=True)
     for r, key in enumerate(sorted_keys, start=1):
         row = ts[key]
         ws3.write(r, 0, key)
@@ -1993,24 +2146,20 @@ def pchc_import():
         return jsonify({"ok": False, "error": "Aucun fichier reçu"}), 400
     kind = request.form.get("kind", "auto")
     ext = os.path.splitext(f.filename)[1].lower()
+    if ext in (".xlsx", ".xlsm"):
+        # Classeur consolidé (5 feuilles brutes, en-têtes ligne 5) → pipeline Reporting Métier
+        return pchc_import_workbook(f)
     data = load_pchc_records()
     result = {}
     try:
-        if ext == ".xlsx":
-            parsed = _parse_pchc_xlsx(f)
-            if not parsed:
-                return jsonify({"ok": False, "error": "Aucune feuille reconnue dans ce fichier"}), 400
-            for cat_key, recs in parsed.items():
-                data["categories"][cat_key] = recs
-                result[cat_key] = len(recs)
-        elif ext == ".csv":
+        if ext == ".csv":
             if kind == "auto" or kind not in PCHC_CATEGORIES:
                 return jsonify({"ok": False, "error": "Précisez la catégorie pour un CSV"}), 400
             recs = _parse_pchc_csv(f, kind)
             data["categories"][kind] = recs
             result[kind] = len(recs)
         else:
-            return jsonify({"ok": False, "error": "Format non supporté (.xlsx, .csv)"}), 400
+            return jsonify({"ok": False, "error": "Format non supporté (.xlsx, .xlsm, .csv)"}), 400
     except Exception as e:
         return jsonify({"ok": False, "error": f"Erreur d'analyse du fichier : {e}"}), 400
     data["last_import"] = datetime.now().isoformat(timespec="seconds")
@@ -2096,6 +2245,11 @@ def pchc_report_filename(end_date_str=None):
 
 @app.route("/api/pchc/export-xlsx")
 def pchc_export_xlsx():
+    # Dès qu'un classeur consolidé a été importé, l'Excel du Dashboard est le livrable officiel
+    # (copie conforme du gabarit, cf. pchc_excel) ; l'ancien classeur « période » ne sert plus
+    # qu'en l'absence d'import brut.
+    if load_pchc_meta():
+        return pchc_export("xlsx")
     start = request.args.get("start") or pchc_default_period()[0]
     end = request.args.get("end") or pchc_default_period()[1]
     buf = build_pchc_xlsx(start, end)
@@ -2251,7 +2405,7 @@ def build_report_html_pchc(start, end, charts=None, for_pdf=False):
         if not b64:
             return ""
         caption = f'<div style="font-size:11.5px;color:#55616B;text-align:center;margin:4px 0 14px;">{esc(title)}</div>' if title else ""
-        return f'<img src="{b64}" style="max-width:100%;border-radius:8px;margin:14px 0 0;border:1px solid #DAE0E7;display:block;">{caption}'
+        return centered_img(b64) + caption
 
     voyant_emoji = {"green": "🟢", "yellow": "🟡", "red": "🔴"}
 
@@ -2276,10 +2430,10 @@ def build_report_html_pchc(start, end, charts=None, for_pdf=False):
         </div>"""
 
     html = f"""
-    <div style="max-width:760px;margin:0 auto;font-family:Arial,sans-serif;background:#FFFFFF;">
+    <div style="{report_wrap_style(for_pdf)}">
       <div style="background:#0B4965;padding:22px 24px;border-radius:6px 6px 0 0;">
         <div style="color:#FFFFFF;font-size:20px;font-weight:bold;">{esc(global_settings.get('report_title_pchc') or 'Reporting Métier — PCHC')}</div>
-        <div style="color:#B9D3E0;font-size:13px;margin-top:4px;">{esc(global_settings.get('agency_name',''))} — Gestion des dossiers réglementaires — du {esc(start)} au {esc(end)}</div>
+        <div style="color:#B9D3E0;font-size:13px;margin-top:4px;">{esc(report_subtitle(global_settings, 'pchc', '', f'Gestion des dossiers réglementaires — du {start} au {end}'))}</div>
       </div>
       <div style="padding:20px 24px;border:1px solid #DAE0E7;border-top:none;">
 
@@ -2359,38 +2513,19 @@ def pchc_send_email():
     body_html = build_email_body(f"{start} au {end}", report_html, greeting, module_settings, "Reporting Métier (PCHC)")
     subject = f"Rapport de Synthèse Reporting Métier PCHC - du {start} au {end}"
 
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["To"] = "; ".join(to_list)
-    if cc_list:
-        msg["Cc"] = "; ".join(cc_list)
-    msg.set_content("Ce message nécessite un client compatible HTML.")
-    msg.add_alternative(body_html, subtype="html")
+    msg = new_draft_email(subject, to_list, cc_list, body_html)
 
-    xlsx_buf = build_pchc_xlsx(start, end)
-    fname_xlsx = pchc_report_filename()
-    msg.add_attachment(xlsx_buf.read(), maintype="application", subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=fname_xlsx)
+    if load_pchc_meta():   # même livrable que le téléchargement (gabarit)
+        xlsx_bytes, _, fname_xlsx, _ = pchc_build_deliverable("xlsx", datetime.now())
+    else:
+        xlsx_bytes, fname_xlsx = build_pchc_xlsx(start, end).read(), pchc_report_filename()
+    msg.add_attachment(xlsx_bytes, maintype="application", subtype="vnd.openxmlformats-officedocument.spreadsheetml.sheet", filename=fname_xlsx)
 
     fname = f"rapport_pchc_{start}_{end}.eml"
     fpath = os.path.join(module_dir("pchc"), "exports", fname)
     with open(fpath, "wb") as f:
         f.write(bytes(msg))
-
-    opened = False
-    error = None
-    try:
-        system = platform.system()
-        if system == "Windows":
-            os.startfile(fpath)  # noqa
-            opened = True
-        elif system == "Darwin":
-            subprocess.run(["open", fpath], check=True)
-            opened = True
-        else:
-            subprocess.run(["xdg-open", fpath], check=True)
-            opened = True
-    except Exception as e:
-        error = str(e)
+    opened, error = open_in_outlook(fpath)
 
     append_send_log("pchc", {
         "date": datetime.now().isoformat(timespec="seconds"),
@@ -2408,6 +2543,8 @@ def pchc_export_pptx():
     from pptx.enum.text import PP_ALIGN
     import base64
 
+    if load_pchc_meta():   # livrable officiel (même PPTX que « Revue de direction »)
+        return pchc_export("pptx")
     payload = request.json or {}
     start = payload.get("start") or pchc_default_period()[0]
     end = payload.get("end") or pchc_default_period()[1]
@@ -2451,7 +2588,7 @@ def pchc_export_pptx():
     # Slide 1 — page de garde
     slide = prs.slides.add_slide(blank)
     add_bg(slide, NAVY)
-    add_text(slide, global_settings.get("app_name") or "SANAD", Inches(0.8), Inches(2.6), Inches(6), Inches(0.8), size=40, bold=True, color=WHITE)
+    add_text(slide, global_settings.get("agency_name") or "AMMPS — DSID", Inches(0.8), Inches(2.6), Inches(8), Inches(0.8), size=32, bold=True, color=WHITE)
     add_text(slide, global_settings.get("report_title_pchc") or "Reporting Métier — PCHC", Inches(0.8), Inches(3.4), Inches(8), Inches(0.7), size=26, bold=True, color=AMBER)
     add_text(slide, f"Période du {start} au {end}", Inches(0.8), Inches(4.1), Inches(8), Inches(0.5), size=15, color=WHITE)
     add_text(slide, global_settings.get("agency_name", ""), Inches(0.8), Inches(6.7), Inches(8), Inches(0.4), size=12, color=WHITE)
@@ -2519,22 +2656,311 @@ def pchc_export_pptx():
     prs.save(buf)
     buf.seek(0)
     stamp = datetime.now().strftime("%Y%m%d")
-    return send_file(buf, as_attachment=True, download_name=f"SANAD_PCHC_RevueDirection_{stamp}.pptx",
+    return send_file(buf, as_attachment=True, download_name=f"PCHC_RevueDirection_{stamp}.pptx",
                       mimetype="application/vnd.openxmlformats-officedocument.presentationml.presentation")
+
+
+# ---------------------------------------------------------------------------
+# REPORTING MÉTIER PCHC — feuilles brutes, synthèse, livrables Excel / PPTX / PDF / .eml
+# Parse : pchc_raw.parse_workbook (pur) · stockage : ci-dessous (write_json_safely) ·
+# calcul unique : pchc_raw.pchc_compute · rendu : pchc_excel / pchc_deliverables.
+# ---------------------------------------------------------------------------
+PCHC_EML_WARN_BYTES = 10 * 1024 * 1024
+_pchc_raw_cache = {"sig": None, "raw": None}
+_pchc_deliverable_cache = {}
+
+
+def pchc_raw_dir():
+    d = os.path.join(module_dir("pchc"), "raw")
+    os.makedirs(d, exist_ok=True)
+    return d
+
+
+def pchc_raw_file(name):
+    return os.path.join(pchc_raw_dir(), f"{name}.json")
+
+
+def load_pchc_meta():
+    p = pchc_raw_file("meta")
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return None
+
+
+def load_pchc_raw():
+    """Feuilles brutes du dernier import {clé volet: {...}} (cache mémoire invalidé par meta.json)."""
+    meta = load_pchc_meta()
+    if not meta:
+        return {}
+    sig = (meta.get("sha256"), meta.get("imported_at"))
+    if _pchc_raw_cache["sig"] != sig:
+        raw = {}
+        for m in pchc_raw.MODULES:
+            p = pchc_raw_file(m["key"])
+            if os.path.exists(p):
+                with open(p, "r", encoding="utf-8") as f:
+                    raw[m["key"]] = json.load(f)
+        _pchc_raw_cache.update(sig=sig, raw=raw)
+    return _pchc_raw_cache["raw"]
+
+
+def load_pchc_history():
+    p = pchc_raw_file("history")
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as f:
+            return json.load(f)
+    return []
+
+
+def append_pchc_history(entry):
+    u = current_user()
+    entry = {"ts": datetime.now().isoformat(timespec="seconds"), "user": u["username"] if u else "system", **entry}
+    write_json_safely(pchc_raw_file("history"), ([entry] + load_pchc_history())[:300])
+
+
+def pchc_store_import(parsed, report, filename):
+    """Stockage (séparé du parse) : un JSON par feuille + métadonnées, puis synchronisation des
+    enregistrements du Dashboard « période » existant (records.json)."""
+    u = current_user()
+    for m in pchc_raw.MODULES:
+        # Import = remplacement complet : une feuille absente du nouveau classeur est vidée.
+        write_json_safely(pchc_raw_file(m["key"]), parsed.get(m["key"]) or
+                          {"key": m["key"], "sheet": m["sheet"], "headers": [], "rows": [], "cols": dict(m["cols"]), "widths": {}})
+    meta = {"source_file": filename, "sha256": report["sha256"], "size": report["size"],
+            "imported_at": datetime.now().isoformat(timespec="seconds"), "user": u["username"] if u else "system",
+            "rows": {k: v["rows"] for k, v in report["sheets"].items()}, "report": report}
+    write_json_safely(pchc_raw_file("meta"), meta)
+    legacy = load_pchc_records()
+    for key, sheet in parsed.items():
+        rows = [[pchc_raw.from_json_value(v) for v in r] for r in sheet["rows"]]
+        legacy["categories"][key] = _pchc_parse_rows(rows, sheet["headers"], key)
+    legacy["last_import"] = meta["imported_at"]
+    save_pchc_records(legacy)
+    _pchc_deliverable_cache.clear()
+    return meta
+
+
+def pchc_import_workbook(f):
+    data = f.read()
+    parsed, report = pchc_raw.parse_workbook(data, f.filename)
+    force = request.form.get("force") in ("1", "true", "on")
+    if report["blocking"] and (not parsed or not force):
+        log_audit("pchc_import_refused", {"file": f.filename, "sha256": report["sha256"], "blocking": report["blocking"]}, module="pchc")
+        return jsonify({"ok": False, "blocking": True, "error": report["blocking"][0], "report": report,
+                        "can_force": bool(parsed)}), 422
+    meta = pchc_store_import(parsed, report, f.filename)
+    snapshot = None
+    create_snapshot = app.extensions.get("sanad_create_snapshot")
+    if create_snapshot:
+        try:
+            snapshot, _ = create_snapshot("pchc-import", meta["user"])
+        except Exception as e:  # une sauvegarde ratée ne bloque pas l'import (tracé ci-dessous)
+            snapshot = f"échec : {e}"
+    log_audit("pchc_import", {"file": f.filename, "sha256": report["sha256"], "rows": meta["rows"], "forced": bool(report["blocking"]),
+                              "warnings": len(report["warnings"]), "snapshot": snapshot}, module="pchc")
+    append_pchc_history({"type": "import", "file": f.filename, "sha256": report["sha256"], "rows": meta["rows"],
+                         "warnings": len(report["warnings"]), "forced": bool(report["blocking"]), "snapshot": snapshot})
+    comp = pchc_raw.pchc_compute(parsed)
+    statuses = sorted({str(r[pchc_raw.col_index(s["cols"]["status"])]) for s in parsed.values() for r in s["rows"]
+                       if pchc_raw.col_index(s["cols"]["status"]) < len(r) and r[pchc_raw.col_index(s["cols"]["status"])]})
+    return jsonify({"ok": True, "report": report, "meta": {k: v for k, v in meta.items() if k != "report"}, "snapshot": snapshot,
+                    "result": meta["rows"], "last_import": meta["imported_at"], "statuses_found": statuses,
+                    "new_statuses": sorted({s for d in report["unknown_statuses"].values() for s in d}),
+                    "warnings": report["warnings"], "summary": pchc_summary_payload(comp)})
+
+
+def pchc_summary_payload(comp):
+    return {"synthesis": comp["synthesis"], "totals": comp["totals"], "cards": comp["cards"], "alerts": comp["alerts"],
+            "modules": {k: {x: v[x] for x in ("label", "short", "theme", "total", "delivered", "encours", "nonconf", "refused",
+                                                "taux", "voyant", "control_ok", "statuses")} for k, v in comp["modules"].items()},
+            "insights": comp["insights"], "empty_modules": comp["empty_modules"]}
+
+
+@app.route("/api/pchc/summary")
+def pchc_summary():
+    meta = load_pchc_meta()
+    hist = load_pchc_history()[:40]
+    if not meta:
+        return jsonify({"has_data": False, "history": hist})
+    comp = pchc_raw.pchc_compute(load_pchc_raw())
+    return jsonify({"has_data": True, "meta": {k: v for k, v in meta.items() if k != "report"}, "report": meta.get("report"),
+                    "summary": pchc_summary_payload(comp), "history": hist,
+                    "libreoffice": bool(pchc_excel.find_soffice())})
+
+
+def pchc_generation_date():
+    d = request.args.get("date")
+    try:
+        return datetime.strptime(d, "%Y-%m-%d") if d else datetime.now()
+    except ValueError:
+        abort(400, description="Paramètre date invalide (AAAA-MM-JJ)")
+
+
+def pchc_ctx(gen):
+    gs = load_global_settings()
+    logo = gs.get("logo_filename")
+    label = pchc_deliverables.period_label(gen)
+    return {"generated": gen, "period_label": label, "agency": gs.get("agency_name") or "AMMPS — DSID",
+            "app_name": gs.get("app_name") or "SANAD", "title": "Reporting Métier PCHC – Plateforme Tarkhiss",
+            "subtitle": report_subtitle(gs, "pchc", label, label),
+            "logo_path": os.path.join(UPLOAD_DIR, logo) if logo else None}
+
+
+def pchc_build_deliverable(fmt, gen, light=False):
+    """Génère (ou relit du cache) un livrable : retourne (octets, type MIME, nom de fichier, infos).
+    Fonction unique utilisée par les téléchargements ET le .eml (aucune logique dupliquée)."""
+    meta = load_pchc_meta()
+    if not meta:
+        raise LookupError("Aucun import Reporting Métier PCHC : importez d'abord le classeur consolidé.")
+    period = gen.strftime("%Y-%m")
+    key = (meta["sha256"], meta["imported_at"], fmt, bool(light), gen.strftime("%Y-%m-%d %H"))
+    if key in _pchc_deliverable_cache:
+        return _pchc_deliverable_cache[key]
+    raw = load_pchc_raw()
+    comp = pchc_raw.pchc_compute(raw)
+    info = {}
+    if fmt == "xlsx":
+        data = pchc_excel.build_xlsx(raw, comp, gen, light=light)
+        mime, name = pchc_excel.XLSX_MIME, f"Reporting_PCHC_{period}{'_allege' if light else ''}.xlsx"
+        if pchc_excel.find_soffice():
+            info["recalc"] = pchc_excel.recalc_check(data)
+    elif fmt == "pptx":
+        data = pchc_deliverables.build_pptx(comp, meta, pchc_ctx(gen))
+        mime, name = pchc_deliverables.PPTX_MIME, f"Reporting_PCHC_{period}.pptx"
+    elif fmt == "pdf":
+        data, engine = pchc_deliverables.build_pdf(comp, meta, pchc_ctx(gen))
+        mime, name, info["engine"] = pchc_deliverables.PDF_MIME, f"Reporting_PCHC_{period}.pdf", engine
+    else:
+        abort(404, description="Format inconnu (xlsx, pptx, pdf)")
+    if len(_pchc_deliverable_cache) > 12:
+        _pchc_deliverable_cache.clear()
+    _pchc_deliverable_cache[key] = (data, mime, name, info)
+    return data, mime, name, info
+
+
+@app.route("/api/pchc/export/<fmt>")
+def pchc_export(fmt):
+    gen = pchc_generation_date()
+    light = request.args.get("light") == "1"
+    try:
+        data, mime, name, info = pchc_build_deliverable(fmt, gen, light)
+    except LookupError as e:
+        return jsonify({"ok": False, "error": str(e)}), 409
+    log_audit("pchc_export", {"format": fmt, "file": name, "size": len(data), "light": light, **info}, module="pchc")
+    append_pchc_history({"type": "export", "format": fmt, "file": name, "size": len(data), "light": light})
+    return send_file(io.BytesIO(data), as_attachment=True, download_name=name, mimetype=mime)
+
+
+def pchc_eml_options():
+    flags = {f: request.args.get(f, "1") == "1" for f in ("xlsx", "pptx", "pdf")}
+    return flags, request.args.get("light") == "1"
+
+
+def pchc_email_parts(gen):
+    """Sujet, destinataires et corps HTML du .eml (identique à l'aperçu)."""
+    meta = load_pchc_meta()
+    if not meta:
+        raise LookupError("Aucun import Reporting Métier PCHC : importez d'abord le classeur consolidé.")
+    ms = load_module_settings("pchc")
+    ctx = pchc_ctx(gen)
+    comp = pchc_raw.pchc_compute(load_pchc_raw())
+    report = pchc_deliverables.summary_html(comp, meta, ctx, report_wrap_style(False))
+    body = build_email_body(ctx["period_label"], report, ms.get("greeting", "Bonjour,"), ms, "Reporting Métier (PCHC)")
+    subject = f"Reporting Métier PCHC – Plateforme Tarkhiss – {ctx['period_label']}"
+    to_list = [c["email"] for c in ms.get("contacts", []) if c.get("role") == "to"]
+    cc_list = [c["email"] for c in ms.get("contacts", []) if c.get("role") == "cc"]
+    return subject, to_list, cc_list, body
+
+
+@app.route("/api/pchc/eml-preview")
+def pchc_eml_preview():
+    """Aperçu du corps HTML et taille des pièces jointes sélectionnées (avertissement > 10 Mo)."""
+    gen = pchc_generation_date()
+    flags, light = pchc_eml_options()
+    try:
+        subject, to_list, cc_list, body = pchc_email_parts(gen)
+        files = []
+        for f, on in flags.items():
+            if on:
+                data, _, name, _ = pchc_build_deliverable(f, gen, light and f == "xlsx")
+                files.append({"format": f, "file": name, "size": len(data)})
+    except LookupError as e:
+        return jsonify({"ok": False, "error": str(e)}), 409
+    total = sum(x["size"] for x in files)
+    return jsonify({"ok": True, "subject": subject, "to": to_list, "cc": cc_list, "html": body, "attachments": files,
+                    "total_size": total, "too_big": total > PCHC_EML_WARN_BYTES, "limit": PCHC_EML_WARN_BYTES})
+
+
+@app.route("/api/pchc/eml")
+def pchc_eml():
+    """Génère le .eml du mois courant avec les livrables cochés en pièces jointes."""
+    gen = pchc_generation_date()
+    flags, light = pchc_eml_options()
+    if not any(flags.values()):
+        return jsonify({"ok": False, "error": "Sélectionnez au moins une pièce jointe (Excel, PPTX ou PDF)."}), 400
+    try:
+        subject, to_list, cc_list, body = pchc_email_parts(gen)
+        atts = [pchc_build_deliverable(f, gen, light and f == "xlsx")[:3] for f, on in flags.items() if on]
+    except LookupError as e:
+        return jsonify({"ok": False, "error": str(e)}), 409
+    eml = pchc_deliverables.build_eml(subject, to_list, cc_list, body, atts)
+    fname = f"Reporting_PCHC_{gen.strftime('%Y-%m')}.eml"
+    fpath = os.path.join(module_dir("pchc"), "exports", fname)
+    with open(fpath, "wb") as fh:
+        fh.write(eml)
+    opened, _ = (False, None) if request.args.get("open") == "0" else open_in_outlook(fpath)
+    names = [a[2] for a in atts]
+    append_send_log("pchc", {"date": datetime.now().isoformat(timespec="seconds"), "ym": gen.strftime("%Y-%m"), "subject": subject,
+                             "to": to_list, "cc": cc_list, "opened": opened, "file": fname, "attachments": names})
+    log_audit("pchc_eml", {"file": fname, "attachments": names, "size": len(eml), "light": light}, module="pchc")
+    append_pchc_history({"type": "eml", "file": fname, "attachments": names, "size": len(eml), "light": light})
+    resp = send_file(io.BytesIO(eml), as_attachment=True, download_name=fname, mimetype="message/rfc822")
+    resp.headers["X-Eml-Size"] = str(len(eml))
+    resp.headers["X-Eml-Opened"] = "1" if opened else "0"
+    return resp
 
 
 # ---------------------------------------------------------------------------
 # Pages
 # ---------------------------------------------------------------------------
 @app.route("/")
-
+@app.route("/nolvira")
+@app.route("/nolvira/")
 def index():
+    """Thème Nolvira (défaut) : même index.html, même app.js, mêmes API — seule une couche de
+    présentation (static/nolvira/) est injectée. Rollback : /classic sert l'ancien thème brut."""
+    html = render_template("index.html")
+    v = int(max(os.path.getmtime(os.path.join(app.static_folder, "nolvira", f)) for f in ("nolvira.css", "nolvira.js")))
+    head = ('<script>(function(){var d=document.documentElement;d.classList.add("ui-nolvira");'
+            'try{var t=localStorage.getItem("nolvira_theme")||"light";'
+            'if(t==="dark"||(t==="system"&&matchMedia("(prefers-color-scheme: dark)").matches))d.classList.add("dark");'
+            'if(localStorage.getItem("nolvira_sidebar")==="collapsed")d.classList.add("nv-collapsed");}catch(e){}})();</script>'
+            f'<link rel="stylesheet" href="/static/nolvira/nolvira.css?v={v}">')
+    html = html.replace("</head>", head + "\n</head>", 1)
+    html = html.replace("</body>", f'<script src="/static/nolvira/nolvira.js?v={v}"></script>\n</body>', 1)
+    return html
+
+
+@app.route("/classic")
+def index_classic():
+    """Ancien thème (shadcn/Zinc), conservé comme rollback."""
     return render_template("index.html")
+
+
+@app.route("/legacy")
+@app.route("/app")
+@app.route("/app/")
+def legacy_alias():
+    """Anciennes URLs (/legacy, /app) → interface unique à la racine."""
+    return redirect("/")
 
 
 @app.route("/api/modules")
 def get_modules():
-    return jsonify(MODULES)
+    mods = {k: dict(v) for k, v in MODULES.items()}
+    mods["pchc"]["ready"] = load_global_settings().get("pchc_enabled", True) is not False
+    return jsonify(mods)
 
 
 # ---------------------------------------------------------------------------
@@ -2795,8 +3221,11 @@ def moussanada_glpi_import_direct():
 
     if target == "ticket_series":
         ts = load_timeseries()
-        store_ticket_series(records, ts)
+        skipped = []
+        store_ticket_series(records, ts, skipped)
         save_timeseries(ts)
+        if skipped:
+            log_audit("glpi_import_direct_skipped", {"profile": profile_key, "skipped_non_month": skipped}, module="moussanada")
     elif target.startswith("source_items:"):
         kind = target.split(":", 1)[1]
         src = load_sources(ym)
@@ -2821,7 +3250,11 @@ def get_global_settings():
 @app.route("/api/global-settings", methods=["POST"])
 def post_global_settings():
     current = load_global_settings()
-    current.update(request.json or {})
+    payload = request.json or {}
+    if "pchc_enabled" in payload and bool(payload["pchc_enabled"]) != (current.get("pchc_enabled", True) is not False):
+        payload["pchc_enabled"] = bool(payload["pchc_enabled"])
+        log_audit("pchc_enabled" if payload["pchc_enabled"] else "pchc_disabled", {}, module="pchc")
+    current.update(payload)
     save_global_settings(current)
     return jsonify({"ok": True})
 
@@ -3005,12 +3438,9 @@ def export_csv(module, kind, ym):
             for w in rows:
                 writer.writerow([w.get("week", ""), w.get("bugs", 0), w.get("demandes", 0), w.get("obs", "")])
         else:
-            writer.writerow(["type", "nombre", "description"] + (["action"] if kind == "problems" else []))
+            writer.writerow(["type", "nombre", "description"])
             for r in rows:
-                row = [r.get("label", ""), r.get("count", 0), r.get("desc", "")]
-                if kind == "problems":
-                    row.append(r.get("action", ""))
-                writer.writerow(row)
+                writer.writerow([r.get("label", ""), r.get("count", 0), r.get("desc", "")])
         mem = io.BytesIO(buf.getvalue().encode("utf-8-sig"))
         return send_file(mem, as_attachment=True, download_name=f"{module}_{kind}_{ym}.csv", mimetype="text/csv")
 
@@ -3122,13 +3552,16 @@ def moussanada_category_trend():
     end_ym = request.args.get("end")
     if not start_ym or not end_ym:
         ts = load_timeseries()
-        known_months = sorted(ts.keys())
+        known_months = real_months(ts)
         if not known_months:
             return jsonify({"months": [], "categories": [], "series": {}})
         end_ym = known_months[-1]
         start_idx = max(0, len(known_months) - 6)
         start_ym = known_months[start_idx]
     months = month_range(start_ym, end_ym)
+    months = [ym for ym in months if load_sources(ym).get("categories")]  # mois sans donnée exclus
+    if not months:
+        return jsonify({"months": [], "month_labels": [], "categories": [], "series": {}})
 
     per_month = {}
     all_labels = set()
@@ -3161,8 +3594,8 @@ def annual(module, year):
         months_out = []
         for ym in months:
             row = ts.get(ym)
-            if not row:
-                continue
+            if not row or not any((row.get(k) or 0) for k in ("ouverts", "resolus", "en_retard", "clos")):
+                continue  # mois sans donnée : absent des graphiques
             months_out.append({
                 "ym": ym, "label": month_label_fr(ym),
                 "ouverts": row.get("ouverts", 0), "resolus": row.get("resolus", 0),
@@ -3170,7 +3603,13 @@ def annual(module, year):
                 "resolution_h": row.get("resolution_h", 0), "cloture_h": row.get("cloture_h", 0),
             })
         return jsonify({"year": year, "start": start_ym, "end": end_ym, "months": months_out})
+    return jsonify({"year": year, **tarkhiss_annual_data(module, start_ym, end_ym)})
 
+
+def tarkhiss_annual_data(module, start_ym, end_ym):
+    """Données de la « Vue annuelle » Tarkhiss (écran, e-mail, PDF, PPTX, Excel annuels) : mois
+    avec données, totaux de la période, top 3 des catégories, charge moyenne par jour de semaine."""
+    months = month_range(start_ym, end_ym)
     months_out = []
     cat_totals = {}
     weekday_load = {i: {"total": 0, "count": 0} for i in range(7)}
@@ -3191,6 +3630,8 @@ def annual(module, year):
         total_calls = sum((d.get("calls") or 0) for d in calls.values())
         total_bugs = sum(p.get("count", 0) for p in problems)
         total_dem = sum(d.get("count", 0) for d in demandes)
+        if not (total_recv or total_sent or total_calls or total_bugs or total_dem):
+            continue  # mois sans donnée : absent des graphiques
         for p in problems:
             cat_totals.setdefault(p.get("label", "?"), 0)
             cat_totals[p.get("label", "?")] += p.get("count", 0)
@@ -3220,12 +3661,211 @@ def annual(module, year):
         avg = round(weekday_load[i]["total"] / cnt, 1) if cnt else 0
         heatmap.append({"day": JOURS_FR[i], "avg": avg})
 
-    return jsonify({
-        "year": year,
+    totals = {k: sum(m[k] for m in months_out) for k in ("emails_received", "emails_sent", "calls", "bugs", "demandes")}
+    return {
+        "start": start_ym, "end": end_ym,
+        "period_label": annual_period_label(start_ym, end_ym),
         "months": months_out,
+        "totals": totals,
         "top_categories": [{"label": k, "count": v} for k, v in top_categories],
         "weekday_heatmap": heatmap,
-    })
+    }
+
+
+def annual_period_label(start_ym, end_ym):
+    if start_ym == end_ym:
+        return month_label_fr(start_ym)
+    return f"{month_label_fr(start_ym)} — {month_label_fr(end_ym)}"
+
+
+# ---------------------------------------------------------------------------
+# TARKHISS — Rapport annuel / de période (Vue annuelle) : e-mail, PDF, PPTX, Excel
+# Corps de l'e-mail = éléments de la Vue annuelle ; PDF/PPTX = page de garde + résumé + 1-2 pages
+# par mois (éléments de l'envoi mensuel, même design) ; Excel = synthèse + une feuille par mois.
+# ---------------------------------------------------------------------------
+def annual_period_args():
+    """Période AAAA-MM (paramètres d'URL ou corps JSON) ; défaut : l'année en cours."""
+    y = datetime.now().year
+    body = request.get_json(silent=True) or {}
+    start = request.args.get("start") or body.get("start") or f"{y}-01"
+    end = request.args.get("end") or body.get("end") or f"{y}-12"
+    if not (re.match(r"^\d{4}-(0[1-9]|1[0-2])$", start) and re.match(r"^\d{4}-(0[1-9]|1[0-2])$", end)) or start > end:
+        abort(400, description="Période invalide (AAAA-MM)")
+    return start, end
+
+
+def annual_notes_file():
+    return os.path.join(module_dir("tarkhiss"), "annual_notes.json")
+
+
+def load_annual_notes(start, end):
+    """Descriptifs rédigés de la Vue annuelle pour une période {bloc: texte}."""
+    p = annual_notes_file()
+    if not os.path.exists(p):
+        return {}
+    with open(p, "r", encoding="utf-8") as f:
+        return (json.load(f).get(f"{start}_{end}") or {}).get("notes", {})
+
+
+@app.route("/api/tarkhiss/annual-notes")
+def tarkhiss_annual_notes_get():
+    start, end = annual_period_args()
+    data = tarkhiss_annual_data("tarkhiss", start, end)
+    return jsonify({"blocks": [{"key": k, "label": lab} for k, lab in tarkhiss_annual.BLOCKS],
+                    "notes": load_annual_notes(start, end), "prompts": tarkhiss_annual.build_prompts(data)})
+
+
+@app.route("/api/tarkhiss/annual-notes", methods=["POST"])
+def tarkhiss_annual_notes_save():
+    start, end = annual_period_args()
+    payload = request.json or {}
+    notes = {k: str((payload.get("notes") or {}).get(k) or "").strip() for k in tarkhiss_annual.BLOCK_LABEL}
+    p = annual_notes_file()
+    allnotes = {}
+    if os.path.exists(p):
+        with open(p, "r", encoding="utf-8") as f:
+            allnotes = json.load(f)
+    u = current_user()
+    allnotes[f"{start}_{end}"] = {"notes": notes, "updated_at": datetime.now().isoformat(timespec="seconds"),
+                                  "user": u["username"] if u else "system"}
+    write_json_safely(p, allnotes)
+    log_audit("annual_notes_save", {"start": start, "end": end, "blocks": [k for k, v in notes.items() if v]}, module="tarkhiss")
+    return jsonify({"ok": True})
+
+
+def tarkhiss_annual_ctx(data, gen):
+    gs = load_global_settings()
+    s, e = data["start"], data["end"]
+    full_year = s[:4] == e[:4] and s[5:] == "01" and e[5:] == "12"
+    title = f"Rapport {'annuel' if full_year else 'de période'} — Support Tarkhiss"
+    logo = gs.get("logo_filename")
+    agency = gs.get("agency_name") or "AMMPS — DSID"
+    return {"title": title, "period_label": data["period_label"], "agency": agency, "generated": gen,
+            "subtitle": f"{agency} — {MODULES['tarkhiss']['subtitle']} — {data['period_label']}",
+            "months_count": len(data["months"]), "logos_html": report_logos_html(gs),
+            "logo_uri": logo_data_uri(logo), "logo_path": os.path.join(UPLOAD_DIR, logo) if logo else None}
+
+
+def tarkhiss_annual_trend_png(data):
+    ms = data["months"]
+    if not ms:
+        return None
+    return chart_line_png([m["label"] for m in ms], {
+        "Emails reçus": [m["emails_received"] for m in ms], "Appels": [m["calls"] for m in ms],
+        "Bugs": [m["bugs"] for m in ms], "Demandes": [m["demandes"] for m in ms]}, "Tendance mensuelle", figsize=(9, 4)).read()
+
+
+def tarkhiss_month_metrics(ym):
+    """Éléments de l'envoi mensuel d'un mois (diapositives mensuelles du PPTX annuel)."""
+    calls = _load("tarkhiss", "calls", ym, {})
+    emails = _load("tarkhiss", "emails", ym, {})
+    an = _load("tarkhiss", "analysis", ym, empty_analysis(ym))
+    total_calls = sum((d.get("calls") or 0) for d in calls.values())
+    problems, demandes, weekly = an.get("problems", []) or [], an.get("demandes", []) or [], an.get("weekly", []) or []
+    tp, td = sum(p.get("count", 0) for p in problems), sum(d.get("count", 0) for d in demandes)
+    crit = max(weekly, key=lambda w: (w.get("bugs", 0) + w.get("demandes", 0))) if weekly else None
+    charts = server_report_charts("tarkhiss", ym)
+    png = lambda k: base64.b64decode(charts[k].split(",", 1)[1]) if charts.get(k) else None
+    return {"label": an.get("month_label") or month_label_fr(ym),
+            "kpis": {"received": sum((d.get("received") or 0) for d in emails.values()),
+                     "sent": sum((d.get("sent") or 0) for d in emails.values()), "calls": total_calls,
+                     "talk_time": format_hms(sum(duration_seconds(d) for d in calls.values())),
+                     "problems": tp, "demandes": td, "ratio": str(round(tp / td, 2) if td else 0).replace(".", ","),
+                     "critical_week": crit.get("week", "-") if crit else "-"},
+            "problems": problems, "demandes": demandes, "weekly": weekly,
+            "constats": an.get("constats", []) or [], "recommandations": an.get("recommandations", []) or [],
+            "chart_weekly": png("weekly"), "chart_problems": png("problems")}
+
+
+def build_tarkhiss_annual(fmt, start, end, gen=None):
+    """Livrable annuel (pdf, pptx, xlsx) → (octets, type MIME, nom de fichier). Utilisé par les
+    téléchargements ET par l'e-mail (aucune logique dupliquée)."""
+    gen = gen or datetime.now()
+    data = tarkhiss_annual_data("tarkhiss", start, end)
+    ctx = tarkhiss_annual_ctx(data, gen)
+    notes = load_annual_notes(start, end)
+    base = f"Rapport_Tarkhiss_{start}_{end}"
+    if fmt == "pdf":
+        trend = tarkhiss_annual_trend_png(data)
+        parts = [tarkhiss_annual.cover_html(ctx),
+                 '<div class="pdf-break"></div>' + tarkhiss_annual.summary_html(
+                     data, ctx, ("data:image/png;base64," + base64.b64encode(trend).decode()) if trend else None, report_wrap_style(True), notes)]
+        for m in data["months"]:
+            html, _ = get_report_html_and_label("tarkhiss", m["ym"], None, for_pdf=False, compact=True)
+            parts.append('<div class="pdf-break"></div>' + html)
+        buf = render_pdf_bytes("".join(parts), header_label=f"{ctx['title']} — {ctx['period_label']}", cover=True, page_numbers=True)
+        return buf.getvalue(), "application/pdf", base + ".pdf"
+    if fmt == "pptx":
+        months = [tarkhiss_month_metrics(m["ym"]) for m in data["months"]]
+        return tarkhiss_annual.build_pptx(ctx, data, months, tarkhiss_annual_trend_png(data), notes), tarkhiss_annual.PPTX_MIME, base + ".pptx"
+    if fmt == "xlsx":
+        import xlsxwriter
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        fmts = xlsx_formats(wb)
+        tarkhiss_annual.write_summary_sheet(wb, fmts, data, ctx, notes)
+        for m in data["months"]:
+            write_tarkhiss_month_sheet(wb, fmts, "tarkhiss", m["ym"], m["label"][:31])
+        wb.close()
+        return buf.getvalue(), tarkhiss_annual.XLSX_MIME, base + ".xlsx"
+    abort(404, description="Format inconnu (pdf, pptx, xlsx)")
+
+
+@app.route("/api/tarkhiss/annual-report/<fmt>")
+def tarkhiss_annual_report(fmt):
+    start, end = annual_period_args()
+    data, mime, name = build_tarkhiss_annual(fmt, start, end)
+    log_audit("annual_export", {"format": fmt, "start": start, "end": end, "file": name, "size": len(data)}, module="tarkhiss")
+    return send_file(io.BytesIO(data), as_attachment=True, download_name=name, mimetype=mime)
+
+
+def tarkhiss_annual_email(start, end, greeting=None):
+    data = tarkhiss_annual_data("tarkhiss", start, end)
+    ctx = tarkhiss_annual_ctx(data, datetime.now())
+    ms = load_module_settings("tarkhiss")
+    trend = tarkhiss_annual_trend_png(data)
+    report = tarkhiss_annual.summary_html(data, ctx, ("data:image/png;base64," + base64.b64encode(trend).decode()) if trend else None,
+                                          report_wrap_style(False), load_annual_notes(start, end))
+    intro = f"Veuillez trouver ci-dessous la synthèse du support Tarkhiss sur la période {data['period_label']}."
+    body = build_email_body(data["period_label"], report, greeting or ms.get("greeting", "Bonjour,"), ms, "Tarkhiss", intro=intro)
+    subject = f"Rapport de Synthèse du Support Tarkhiss - {data['period_label']}"
+    return subject, body, ms
+
+
+@app.route("/api/tarkhiss/annual-email-preview")
+def tarkhiss_annual_email_preview():
+    start, end = annual_period_args()
+    subject, body, _ = tarkhiss_annual_email(start, end, request.args.get("greeting"))
+    return jsonify({"subject": subject, "html": body})
+
+
+@app.route("/api/tarkhiss/annual-send-email", methods=["POST"])
+def tarkhiss_annual_send_email():
+    payload = request.json or {}
+    start, end = annual_period_args()
+    subject, body, ms = tarkhiss_annual_email(start, end, payload.get("greeting"))
+    to_list = payload.get("to") or [c["email"] for c in ms.get("contacts", []) if c.get("role") == "to"]
+    cc_list = payload.get("cc") or [c["email"] for c in ms.get("contacts", []) if c.get("role") == "cc"]
+    attach = payload.get("attachments") or {}
+    msg = new_draft_email(subject, to_list, cc_list, body)
+    names = []
+    for fmt in ("pdf", "pptx", "xlsx"):
+        if attach.get(fmt):
+            data, mime, name = build_tarkhiss_annual(fmt, start, end)
+            maintype, subtype = mime.split("/", 1)
+            msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)
+            names.append(name)
+    fname = f"rapport_tarkhiss_{start}_{end}.eml"
+    fpath = os.path.join(module_dir("tarkhiss"), "exports", fname)
+    eml = bytes(msg)
+    with open(fpath, "wb") as f:
+        f.write(eml)
+    opened, error = open_in_outlook(fpath)
+    append_send_log("tarkhiss", {"date": datetime.now().isoformat(timespec="seconds"), "ym": f"{start}_{end}", "subject": subject,
+                                 "to": to_list, "cc": cc_list, "opened": opened, "file": fname, "attachments": names})
+    log_audit("annual_send_email", {"start": start, "end": end, "attachments": names, "size": len(eml), "to": to_list}, module="tarkhiss")
+    return jsonify({"ok": True, "file": fname, "opened": opened, "error": error, "subject": subject, "attachments": names,
+                    "size": len(eml), "download": f"/api/tarkhiss/send-log/download/{fname}"})
 
 
 # ---------------------------------------------------------------------------
@@ -3245,11 +3885,9 @@ def logo_data_uri(filename):
 
 
 def report_logos_html(global_settings):
-    sanad_uri = logo_data_uri(global_settings.get("sanad_logo_filename"))
+    # Rapports et e-mails : logo de l'agence uniquement (aucune mention de la plateforme SANAD).
     ammps_uri = logo_data_uri(global_settings.get("logo_filename"))
     imgs = ""
-    if sanad_uri:
-        imgs += f'<img src="{sanad_uri}" style="height:28px;margin-right:12px;vertical-align:middle;">'
     if ammps_uri:
         imgs += f'<img src="{ammps_uri}" style="height:28px;vertical-align:middle;">'
     if not imgs:
@@ -3297,7 +3935,7 @@ def build_tarkhiss_advanced_stats_html(meta_calls, meta_emails, show_contact_nam
         blocks.append(f"""
         <div style="font-size:13px;font-weight:800;color:#0B4965;margin:14px 0 8px;">☎ Journal d'appels — détail horaire</div>
         <p style="font-size:11.5px;color:#55616B;margin:0 0 8px;">Import du journal d'appels brut. Heures locales (Maroc).</p>
-        <img src="data:image/png;base64,{hourly_png}" style="width:100%;max-width:640px;display:block;margin:0 auto 12px;" />
+        {centered_img("data:image/png;base64," + hourly_png, "width:100%;max-width:640px;", "0 0 12px")}
         <table style="width:100%;border-collapse:collapse;margin-bottom:12px;">
           <tr>
             <td style="padding:4px 8px;font-size:11.5px;">Taux de décroché : <strong>{meta_calls.get('answer_rate') if meta_calls.get('answer_rate') is not None else '—'}%</strong></td>
@@ -3323,7 +3961,7 @@ def build_tarkhiss_advanced_stats_html(meta_calls, meta_emails, show_contact_nam
         rcpt_rows = [[(r["name"] if show_contact_names else "•••• (masqué)"), r["count"]] for r in meta_emails.get("top_recipients", [])[:6]]
         blocks.append(f"""
         <div style="font-size:13px;font-weight:800;color:#0B4965;margin:18px 0 8px;">✉ Emails — détail horaire &amp; délai de réponse</div>
-        <img src="data:image/png;base64,{hourly_png}" style="width:100%;max-width:640px;display:block;margin:0 auto 12px;" />
+        {centered_img("data:image/png;base64," + hourly_png, "width:100%;max-width:640px;", "0 0 12px")}
         <table style="width:100%;border-collapse:collapse;margin-bottom:8px;">
           <tr>
             <td style="padding:4px 8px;font-size:11.5px;">Délai médian (heures ouvrées) : <strong>{fmt_min(resp.get('median_biz_min'))}</strong></td>
@@ -3354,7 +3992,9 @@ def mask_call_label(entry):
     return entry["label"] if not entry.get("named") else "•••• (masqué)"
 
 
-def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev_emails=None, prev_analysis=None, charts=None, for_pdf=False):
+def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev_emails=None, prev_analysis=None, charts=None, for_pdf=False, compact=False):
+    """Rapport mensuel Tarkhiss. compact=True : contenu de l'e-mail mensuel (mêmes sections), mis en
+    page pour tenir sur 1-2 pages dans le PDF annuel (graphiques côte à côte, pas de saut de page)."""
     charts = charts or {}
     prev_calls = prev_calls or {}
     prev_emails = prev_emails or {}
@@ -3377,7 +4017,6 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
     weekly = analysis.get("weekly", [])
     constats = analysis.get("constats", [])
     recommandations = analysis.get("recommandations", [])
-    keywords = analysis.get("keywords", [])
 
     total_problems = sum(p.get("count", 0) for p in problems)
     total_demandes = sum(d.get("count", 0) for d in demandes)
@@ -3403,6 +4042,7 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
     # restent toujours complets). La heatmap et les statistiques avancées sont, elles,
     # TOUJOURS exclues de l'email, sans réglage possible — voir plus bas.
     email_sections = load_module_settings(module).get("email_sections", {}) if module == "tarkhiss" else {}
+    kpi_lbl = get_kpi_labels("tarkhiss")
 
     def show_section(key):
         return for_pdf or email_sections.get(key, True)
@@ -3431,7 +4071,8 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
     def esc(s):
         return html_module.escape(str(s), quote=True) if s is not None else ""
 
-    def delta_span(cur, prev_v, polarity="neutral"):
+    def delta_span(cur, prev_v, polarity="neutral", fmt=None):
+        # Affiche le % d'évolution ET la valeur absolue du mois précédent (ex. "+12% vs Août (180)").
         if not prev_v and not cur:
             return ""
         if not prev_v:
@@ -3444,7 +4085,8 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
             is_up = diff > 0
             is_good = is_up if polarity == "positive" else not is_up
             color = "#25935F" if is_good else "#DC2828"
-        return f"<div style='font-size:11px;font-weight:700;color:{color};margin-top:2px;'>{sign}{diff:.0f}% vs {esc(prev_month_label)}</div>"
+        prev_txt = fmt(prev_v) if fmt else (f"{prev_v:.1f}".rstrip("0").rstrip(".") if isinstance(prev_v, float) else str(prev_v))
+        return f"<div style='font-size:11px;font-weight:700;color:{color};margin-top:2px;'>{sign}{diff:.0f}% vs {esc(prev_month_label)} ({esc(prev_txt)})</div>"
 
     def kpi_card(label, value, delta_html="", bg="#F5F7F9", color="#0B4965"):
         return f"""<td style="width:25%;padding:10px;text-align:center;background:{bg};border:1px solid #DAE0E7;">
@@ -3457,20 +4099,24 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
         b64 = charts.get(key)
         if not b64:
             return ""
-        caption = f'<div style="font-size:11.5px;color:#55616B;text-align:center;margin:4px 0 14px;">{esc(title)}</div>' if title else ""
-        return f'<img src="{b64}" style="max-width:100%;border-radius:8px;margin:14px 0 0;border:1px solid #DAE0E7;display:block;">{caption}'
+        if not for_pdf and not email_sections.get(f"chart_{key}", True):
+            return ""  # graphique désactivé pour l'email (réglage par graphique, Administration)
+        # Titre (s'il est fourni) + légende explicative sous le graphique.
+        legend = TARKHISS_CHART_CAPTIONS.get(key, "")
+        caption_html = (f"<strong>{esc(title)}</strong><br>" if title else "") + esc(legend)
+        caption = f'<div style="font-size:11.5px;color:#55616B;text-align:center;margin:4px 0 14px;">{caption_html}</div>' if (title or legend) else ""
+        return centered_img(b64) + caption
 
     def rows_cat_problems(items, total):
         out = ""
         for it in items:
             p = pct(it.get("count", 0), total)
-            action = it.get("action", "")
             out += f"""
             <tr>
               <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:13px;color:#0D1926;">{esc(it.get('label',''))}</td>
               <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:13px;color:#0D1926;text-align:center;font-weight:bold;">{it.get('count',0)}</td>
               <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:13px;color:#DC2828;text-align:center;">{p}%</td>
-              <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12px;color:#55616B;">{esc(it.get('desc',''))}{f'<br><em>Action : {esc(action)}</em>' if action else ''}</td>
+              <td style="padding:8px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12px;color:#55616B;">{esc(it.get('desc',''))}</td>
             </tr>"""
         return out
 
@@ -3504,46 +4150,41 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
     def list_html(items):
         return "".join(f"<li style='margin-bottom:6px;font-family:Arial,sans-serif;font-size:13px;color:#0D1926;'>{esc(i)}</li>" for i in items)
 
-    keywords_line = ""
-    if keywords:
-        sorted_kw = sorted(keywords, key=lambda k: k.get("count", 0), reverse=True)
-        keywords_line = ", ".join(f"{esc(k.get('word',''))} ({k.get('count',0)})" for k in sorted_kw[:15])
-
     global_settings = load_global_settings()
     module_label = MODULES[module]["label"]
     report_title = global_settings.get(f"report_title_{module}") or f"Rapport Support {module_label}"
 
     html = f"""
-    <div style="max-width:760px;margin:0 auto;font-family:Arial,sans-serif;background:#FFFFFF;">
+    <div style="{report_wrap_style(for_pdf or compact)}">
       <div style="background:#0B4965;padding:22px 24px;border-radius:6px 6px 0 0;">
         {report_logos_html(global_settings)}
         <div style="color:#FFFFFF;font-size:20px;font-weight:bold;">{esc(report_title)}</div>
-        <div style="color:#B9D3E0;font-size:13px;margin-top:4px;">{esc(global_settings.get('agency_name',''))} — {esc(MODULES[module]['subtitle'])} — {esc(month_label)}</div>
+        <div style="color:#B9D3E0;font-size:13px;margin-top:4px;">{esc(report_subtitle(global_settings, module, month_label))}</div>
       </div>
 
       <div style="padding:20px 24px;border:1px solid #DAE0E7;border-top:none;">
         <table style="width:100%;border-collapse:collapse;margin-bottom:18px;">
           <tr>
-            {kpi_card("EMAILS REÇUS", total_received, delta_span(total_received, prev_received, "neutral"))}
-            {kpi_card("EMAILS ENVOYÉS", total_sent, delta_span(total_sent, prev_sent, "neutral"))}
-            {kpi_card("APPELS", total_calls, delta_span(total_calls, prev_calls_total, "neutral"))}
-            {kpi_card("TEMPS COMM. (hh:mm:ss)", format_hms(total_duration_sec), "", color="#0B4965")}
+            {kpi_card(kpi_lbl["emails_received"].upper(), total_received, delta_span(total_received, prev_received, "neutral"))}
+            {kpi_card(kpi_lbl["emails_sent"].upper(), total_sent, delta_span(total_sent, prev_sent, "neutral"))}
+            {kpi_card(kpi_lbl["calls"].upper(), total_calls, delta_span(total_calls, prev_calls_total, "neutral"))}
+            {kpi_card(kpi_lbl["talk_time"].upper(), format_hms(total_duration_sec), "", color="#0B4965")}
           </tr>
         </table>
 
         <table style="width:100%;border-collapse:collapse;margin-bottom:12px;">
           <tr>
-            {kpi_card("PROBLÈMES TECH.", total_problems, delta_span(total_problems, prev_total_problems, "negative"), bg="#FCE9E9", color="#DC2828")}
-            {kpi_card("DEMANDES INFO", total_demandes, delta_span(total_demandes, prev_total_demandes, "neutral"), bg="#E7F5EE", color="#25935F")}
-            {kpi_card("RATIO BUGS/DEMANDES", ratio_bd)}
-            {kpi_card("SEMAINE CRITIQUE", crit_week.get('week','-') if crit_week else '-', bg="#FEF3E0", color="#B9791F")}
+            {kpi_card(kpi_lbl["problems"].upper(), total_problems, delta_span(total_problems, prev_total_problems, "negative"), bg="#FCE9E9", color="#DC2828")}
+            {kpi_card(kpi_lbl["demandes"].upper(), total_demandes, delta_span(total_demandes, prev_total_demandes, "neutral"), bg="#E7F5EE", color="#25935F")}
+            {kpi_card(kpi_lbl["ratio_bd"].upper(), ratio_bd)}
+            {kpi_card(kpi_lbl["critical_week"].upper(), crit_week.get('week','-') if crit_week else '-', bg="#FEF3E0", color="#B9791F")}
           </tr>
         </table>
 
         <table style="width:100%;border-collapse:collapse;margin-bottom:18px;">
           <tr>
-            {kpi_card("DURÉE MOY./APPEL", format_hms(avg_call_sec))}
-            {kpi_card("CANAL DOMINANT", f"☎ {channel_calls_pct}% / ✉ {channel_email_pct}%" if channel_total else "—", bg="#F5F7F9")}
+            {kpi_card(kpi_lbl["avg_call"].upper(), format_hms(avg_call_sec))}
+            {kpi_card(kpi_lbl["dominant_channel"].upper(), f"☎ {channel_calls_pct}% / ✉ {channel_email_pct}%" if channel_total else "—", bg="#F5F7F9")}
           </tr>
         </table>
 
@@ -3562,8 +4203,7 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
         <a name="sec-graphs"></a>
         <div class="pdf-break"></div>
         {(lambda: f'''<div style="font-size:15px;font-weight:800;color:#0B4965;margin:4px 0 4px;">Analyse graphique</div>
-        {img_tag("weekly", "Évolution hebdomadaire — Bugs vs Demandes")}
-        {img_tag("problems", "Répartition des problèmes techniques")}''')() if show_section("graphs") else ""}
+        {f"""<table style="width:100%;border-collapse:collapse;"><tr><td style="width:50%;vertical-align:top;padding-right:6px;">{img_tag("weekly", "Évolution hebdomadaire — Bugs vs Demandes")}</td><td style="width:50%;vertical-align:top;padding-left:6px;">{img_tag("problems", "Répartition des problèmes techniques")}</td></tr></table>""" if compact else img_tag("weekly", "Évolution hebdomadaire — Bugs vs Demandes") + img_tag("problems", "Répartition des problèmes techniques")}''')() if show_section("graphs") else ""}
 
         <a name="sec-problems"></a>
         {(lambda: f'''<div class="pdf-break"></div>
@@ -3602,8 +4242,7 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
             <td style="padding:8px 10px;color:#fff;font-size:12px;font-weight:bold;">Observations</td>
           </tr>
           {rows_weekly()}
-        </table>
-        {"<div style='font-size:14px;font-weight:bold;color:#0B4965;margin:20px 0 8px;'>Mots-clés fréquents</div><div style='font-size:12.5px;color:#55616B;margin-bottom:16px;'>" + keywords_line + "</div>" if keywords_line else ""}''')() if show_section("weekly") else ""}
+        </table>''')() if show_section("weekly") else ""}
 
         {'<a name="sec-heatmap"></a><div class="pdf-break"></div><div style="font-size:14px;font-weight:bold;color:#0B4965;margin:4px 0 8px;">Heatmap de charge</div><p style="font-size:12px;color:#55616B;margin:0 0 10px;">Volume d\'appels par jour de semaine et semaine du mois (granularité journalière — Tarkhiss ne journalise pas l\'heure des appels).</p><img src="data:image/png;base64,' + heatmap_b64 + '" style="width:100%;max-width:620px;display:block;margin:0 auto 14px;" />' if (heatmap_has_data and for_pdf) else ""}
 
@@ -3619,26 +4258,81 @@ def build_report_html(module, ym, calls, emails, analysis, prev_calls=None, prev
       </div>
     </div>
     """
+    if compact:
+        html = html.replace('<div class="pdf-break"></div>', "")
     return html
 
 
-def build_email_body(month_label, report_html, greeting, module_settings, module_label="Tarkhiss"):
+def report_subtitle(gs, module, month_label, period=""):
+    """Sous-titre d'en-tête éditable. Placeholders : {agence} {sous_titre} {mois} {module} {periode}. Défaut = couverture d'origine."""
+    tpl = (gs.get(f"report_subtitle_{module}") or "").strip()
+    if not tpl:
+        tpl = "{agence} — {periode}" if module == "pchc" else "{agence} — {sous_titre} — {mois}"
+    label = MODULES.get(module, {}).get("label", module)
+    try:
+        return tpl.replace("{agence}", gs.get("agency_name", "")).replace("{mois}", month_label or "") \
+                  .replace("{module}", label).replace("{sous_titre}", MODULES.get(module, {}).get("subtitle", "")).replace("{periode}", period or month_label or "")
+    except Exception:
+        return tpl
+
+EMAIL_MAX_WIDTH_PX = 900   # corps des emails (Tarkhiss, Moussanada, Reporting Métier)
+PDF_MAX_WIDTH_PX = 760     # mise en page A4 des PDF, inchangée
+
+
+def report_wrap_style(for_pdf):
+    """Email : 900 px centré ; PDF : 760 px (A4). Option Administration `email_full_width` pour un
+    email pleine largeur (jamais pour le PDF)."""
+    if not for_pdf and load_global_settings().get("email_full_width"):
+        return "width:100%;margin:0;font-family:Arial,sans-serif;background:#FFFFFF;"
+    w = PDF_MAX_WIDTH_PX if for_pdf else EMAIL_MAX_WIDTH_PX
+    return f"max-width:{w}px;margin:0 auto;font-family:Arial,sans-serif;background:#FFFFFF;"
+
+
+def centered_img(src, style="max-width:100%;border-radius:8px;border:1px solid #DAE0E7;", margin="14px 0 0"):
+    """Image centrée dans les emails/PDF : cellule align=center (respectée par Outlook/Word) +
+    margin auto (navigateurs, WeasyPrint)."""
+    return (f'<table role="presentation" width="100%" cellpadding="0" cellspacing="0" style="border-collapse:collapse;margin:{margin};">'
+            f'<tr><td align="center" style="text-align:center;padding:0;">'
+            f'<img src="{src}" style="{style}display:block;margin:0 auto;"></td></tr></table>')
+
+
+def build_email_body(month_label, report_html, greeting, module_settings, module_label="Tarkhiss", intro=None):
     signature_parts = [module_settings.get("signature_name", ""), module_settings.get("signature_function", ""), module_settings.get("signature_phone", "")]
     signature_parts = [p for p in signature_parts if p]
     signature_html = "<br>".join(signature_parts)
 
-    return f"""
-    <div style="max-width:760px;margin:0 auto;font-family:Arial,sans-serif;">
+    wrap = "width:100%;margin:0;" if load_global_settings().get("email_full_width") else f"max-width:{EMAIL_MAX_WIDTH_PX}px;margin:0 auto;"
+    intro = intro or f"Veuillez trouver ci-dessous le rapport mensuel du support {module_label} ({month_label})."
+    return strip_platform_mentions(f"""
+    <div style="{wrap}font-family:Arial,sans-serif;">
       <p style="font-size:14px;color:#0D1926;">{greeting}</p>
-      <p style="font-size:14px;color:#0D1926;">Veuillez trouver ci-dessous le rapport mensuel du support {module_label} ({month_label}).</p>
+      <p style="font-size:14px;color:#0D1926;">{intro}</p>
       {report_html}
       <p style="font-size:13px;color:#0D1926;margin-top:22px;">Cordialement,{"<br>" + signature_html if signature_html else ""}</p>
     </div>
-    """
+    """)
+
+
+_DATA_URI_RE = re.compile(r"(data:[^\"'\s)]+)")
+
+
+def strip_platform_mentions(text):
+    """Garde-fou final des emails (corps et objet, tous volets) : aucune mention de l'outil
+    interne (SANAD → nom de l'agence) ni de GLPI (retiré : « Helpdesk GLPI » → « Helpdesk »).
+    Les images intégrées (data:…) sont laissées intactes pour ne pas altérer leur encodage."""
+    agency = load_global_settings().get("agency_name") or "AMMPS — DSID"
+
+    def clean(seg):
+        seg = re.sub(r"\bSANAD\b", agency, seg, flags=re.IGNORECASE)
+        seg = re.sub(r"\s*\(\s*GLPI\s*\)", "", seg)
+        seg = re.sub(r"[ \t]*\bGLPI\b(?=[ \t]*[—–\-:,.;)<])", "", seg)  # « Helpdesk GLPI — » → « Helpdesk — »
+        return re.sub(r"\bGLPI\b[ \t]*", "", seg)
+    parts = _DATA_URI_RE.split(text or "")
+    return "".join(p if i % 2 else clean(p) for i, p in enumerate(parts))
 
 
 def build_subject(module, month_label):
-    return f"Rapport de Synthèse du Support {MODULES[module]['label']} - {month_label}"
+    return strip_platform_mentions(f"Rapport de Synthèse du Support {MODULES[module]['label']} - {month_label}")
 
 
 def pct(n, total):
@@ -3669,7 +4363,8 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
 
     top_cat = top_n(m["categories"], 10)
     top_srv = top_n(m["services"], 10)
-    techs = sorted(m["techniciens"], key=lambda x: x.get("ouverts", 0), reverse=True)
+    # Charge = volume de sollicitation (ouverts + résolus), comme sur le dashboard
+    techs = sorted(m["techniciens"], key=tech_volume, reverse=True)
 
     # Heatmap de charge (jour x heure) — seulement si des tickets bruts ont été importés pour
     # ce mois (fonctionnalité optionnelle, distincte de l'import agrégé habituel).
@@ -3684,7 +4379,8 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
     def esc(s):
         return html_module.escape(str(s), quote=True) if s is not None else ""
 
-    def delta_span(cur, prev_v, polarity):
+    def delta_span(cur, prev_v, polarity, fmt=None):
+        # Affiche le % d'évolution ET la valeur absolue du mois précédent (ex. "+12% vs Août (180)").
         if not prev_v and not cur:
             return ""
         if not prev_v:
@@ -3697,7 +4393,8 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
             is_up = diff > 0
             is_good = is_up if polarity == "positive" else not is_up
             color = "#25935F" if is_good else "#DC2828"
-        return f"<div style='font-size:11px;font-weight:700;color:{color};margin-top:2px;'>{sign}{diff:.0f}% vs {esc(prev_month_label)}</div>"
+        prev_txt = fmt(prev_v) if fmt else (f"{prev_v:.1f}".rstrip("0").rstrip(".") if isinstance(prev_v, float) else str(prev_v))
+        return f"<div style='font-size:11px;font-weight:700;color:{color};margin-top:2px;'>{sign}{diff:.0f}% vs {esc(prev_month_label)} ({esc(prev_txt)})</div>"
 
     def kpi_card(label, value, delta_html="", bg="#F5F7F9", color="#0B4965"):
         return f"""<td style="width:25%;padding:10px;text-align:center;background:{bg};border:1px solid #DAE0E7;">
@@ -3722,13 +4419,15 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
     def rows_tech():
         out = ""
         n = len(techs) or 1
+        avg_v = sum(tech_volume(t) for t in techs)/n
         avg_o = sum(t.get('ouverts',0) for t in techs)/n
         avg_r = sum(t.get('resolus',0) for t in techs)/n
         for t in techs:
-            above = t.get('ouverts',0) >= avg_o
+            above = tech_volume(t) >= avg_v
             out += f"""<tr>
               <td style="padding:7px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12.5px;color:#0D1926;">{esc(t.get('label',''))}</td>
-              <td style="padding:7px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12.5px;text-align:center;font-weight:bold;">{t.get('ouverts',0)}</td>
+              <td style="padding:7px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12.5px;text-align:center;font-weight:bold;color:#0B4965;">{tech_volume(t)}</td>
+              <td style="padding:7px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12.5px;text-align:center;">{t.get('ouverts',0)}</td>
               <td style="padding:7px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12.5px;text-align:center;color:#25935F;">{t.get('resolus',0)}</td>
               <td style="padding:7px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:12.5px;text-align:center;color:#DC2828;">{t.get('en_retard',0)}</td>
               <td style="padding:7px 10px;border-bottom:1px solid #DAE0E7;font-family:Arial,sans-serif;font-size:11.5px;text-align:center;color:{'#25935F' if above else '#B9791F'};">{'≥ moy.' if above else '< moy.'}</td>
@@ -3736,6 +4435,7 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
         if techs:
             out += f"""<tr style="background:#F5F7F9;">
               <td style="padding:7px 10px;font-family:Arial,sans-serif;font-size:12.5px;font-weight:bold;color:#0B4965;">Moyenne équipe</td>
+              <td style="padding:7px 10px;text-align:center;font-weight:bold;color:#0B4965;">{avg_v:.1f}</td>
               <td style="padding:7px 10px;text-align:center;font-weight:bold;">{avg_o:.1f}</td>
               <td style="padding:7px 10px;text-align:center;font-weight:bold;color:#25935F;">{avg_r:.1f}</td>
               <td style="padding:7px 10px;"></td><td style="padding:7px 10px;"></td>
@@ -3749,7 +4449,11 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
         b64 = charts.get(key)
         if not b64:
             return ""
-        return f'<img src="{b64}" style="max-width:100%;border-radius:8px;margin:12px 0 4px;border:1px solid #DAE0E7;display:block;">'
+        if not for_pdf and not email_sections.get(f"chart_{key}", True):
+            return ""  # graphique désactivé pour l'email (réglage par graphique, Administration)
+        caption_text = MOUSSANADA_CHART_CAPTIONS.get(key, "")
+        caption = f'<div style="font-size:11.5px;color:#55616B;text-align:center;margin:4px 0 14px;">{esc(caption_text)}</div>' if caption_text else ""
+        return centered_img(b64, margin="12px 0 4px") + caption
 
     def copilot_box(text):
         if not text or not text.strip():
@@ -3783,16 +4487,20 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
     global_settings = load_global_settings()
     report_title = global_settings.get("report_title_moussanada") or "Rapport Support Moussanada"
     email_sections = load_module_settings("moussanada").get("email_sections", {})
+    kpi_lbl = get_kpi_labels("moussanada")
+    # Email : « Tickets en instance » (orange) par défaut ; un libellé personnalisé en Administration reste prioritaire
+    email_instance_label = (kpi_lbl["tickets_retard"] if kpi_lbl["tickets_retard"] != MOUSSANADA_DEFAULT_KPI_LABELS["tickets_retard"]
+                            else "Tickets en instance")
 
     def show_section(key):
         return for_pdf or email_sections.get(key, True)
 
     html = f"""
-    <div style="max-width:760px;margin:0 auto;font-family:Arial,sans-serif;background:#FFFFFF;">
+    <div style="{report_wrap_style(for_pdf)}">
       <div style="background:#0B4965;padding:22px 24px;border-radius:6px 6px 0 0;">
         {report_logos_html(global_settings)}
         <div style="color:#FFFFFF;font-size:20px;font-weight:bold;">{esc(report_title)}</div>
-        <div style="color:#B9D3E0;font-size:13px;margin-top:4px;">{esc(global_settings.get('agency_name',''))} — Helpdesk GLPI — {esc(month_label)}</div>
+        <div style="color:#B9D3E0;font-size:13px;margin-top:4px;">{esc(report_subtitle(global_settings, 'moussanada', month_label))}</div>
       </div>
       <div style="padding:20px 24px;border:1px solid #DAE0E7;border-top:none;">
 
@@ -3800,10 +4508,10 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
 
         {(lambda: f'''{section_title(1, "Volume global des tickets")}
         <table style="width:100%;border-collapse:collapse;margin-bottom:6px;"><tr>
-          {kpi_card("TICKETS OUVERTS", tickets["ouverts"], delta_span(tickets["ouverts"], prev.get("ouverts", 0), "neutral"))}
-          {kpi_card("TICKETS RÉSOLUS", tickets["resolus"], delta_span(tickets["resolus"], prev.get("resolus", 0), "positive"))}
-          {kpi_card("TICKETS CLOS", tickets["clos"], delta_span(tickets["clos"], prev.get("clos", 0), "positive"))}
-          {kpi_card("EN RETARD", tickets["en_retard"], delta_span(tickets["en_retard"], prev.get("en_retard", 0), "negative"), bg="#FCE9E9", color="#DC2828")}
+          {kpi_card(kpi_lbl["tickets_ouverts"].upper(), tickets["ouverts"], delta_span(tickets["ouverts"], prev.get("ouverts", 0), "neutral"))}
+          {kpi_card(kpi_lbl["tickets_resolus"].upper(), tickets["resolus"], delta_span(tickets["resolus"], prev.get("resolus", 0), "positive"))}
+          {kpi_card(kpi_lbl["tickets_clos"].upper(), tickets["clos"], delta_span(tickets["clos"], prev.get("clos", 0), "positive"))}
+          {kpi_card(email_instance_label.upper(), tickets["en_retard"], delta_span(tickets["en_retard"], prev.get("en_retard", 0), "negative"), bg="#FFF1E6", color="#EA580C")}
         </tr></table>
         {img_tag("volume")}
         {img_tag("backlog")}
@@ -3811,10 +4519,10 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
 
         {(lambda: f'''{section_title(2, "Évolution des délais de traitement")}
         <table style="width:100%;border-collapse:collapse;margin-bottom:6px;"><tr>
-          {kpi_card("TAUX DE RÉSOLUTION", f"{taux_resolution}%", delta_span(taux_resolution, prev_taux_resolution, "positive"), bg="#E7F5EE", color="#25935F")}
-          {kpi_card("TAUX DE CLÔTURE", f"{taux_cloture}%", delta_span(taux_cloture, prev_taux_cloture, "positive"), bg="#E7F5EE", color="#25935F")}
-          {kpi_card("DÉLAI MOY. RÉSOLUTION", format_dh(durations["resolution_h"]), delta_span(durations["resolution_h"], prev.get("resolution_h", 0), "negative"))}
-          {kpi_card("DÉLAI MOY. CLÔTURE", format_dh(durations["cloture_h"]), delta_span(durations["cloture_h"], prev.get("cloture_h", 0), "negative"))}
+          {kpi_card(kpi_lbl["taux_resolution"].upper(), f"{taux_resolution}%", delta_span(taux_resolution, prev_taux_resolution, "positive", fmt=lambda v: f"{v}%"), bg="#E7F5EE", color="#25935F")}
+          {kpi_card(kpi_lbl["taux_cloture"].upper(), f"{taux_cloture}%", delta_span(taux_cloture, prev_taux_cloture, "positive", fmt=lambda v: f"{v}%"), bg="#E7F5EE", color="#25935F")}
+          {kpi_card(kpi_lbl["delai_resolution"].upper(), format_dh(durations["resolution_h"]), delta_span(durations["resolution_h"], prev.get("resolution_h", 0), "negative", fmt=format_dh))}
+          {kpi_card(kpi_lbl["delai_cloture"].upper(), format_dh(durations["cloture_h"]), delta_span(durations["cloture_h"], prev.get("cloture_h", 0), "negative", fmt=format_dh))}
         </tr></table>
         {img_tag("trend")}
         {copilot_box(sections.get("delays", ""))}''')() if show_section("delays") else ""}
@@ -3850,13 +4558,15 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
         <table style="width:100%;border-collapse:collapse;border:1px solid #DAE0E7;">
           <tr style="background:#0B4965;">
             <td style="padding:7px 10px;color:#fff;font-size:11.5px;font-weight:bold;">Technicien</td>
+            <td style="padding:7px 10px;color:#fff;font-size:11.5px;font-weight:bold;text-align:center;">Sollicitations</td>
             <td style="padding:7px 10px;color:#fff;font-size:11.5px;font-weight:bold;text-align:center;">Ouverts</td>
             <td style="padding:7px 10px;color:#fff;font-size:11.5px;font-weight:bold;text-align:center;">Résolus</td>
-            <td style="padding:7px 10px;color:#fff;font-size:11.5px;font-weight:bold;text-align:center;">Retard</td>
+            <td style="padding:7px 10px;color:#fff;font-size:11.5px;font-weight:bold;text-align:center;">En instance</td>
             <td style="padding:7px 10px;color:#fff;font-size:11.5px;font-weight:bold;text-align:center;">vs Équipe</td>
           </tr>
           {rows_tech()}
         </table>
+        {img_tag("techvol")}
         {img_tag("tech")}
         {img_tag("radar")}
         {copilot_box(sections.get("team", ""))}''')() if show_section("team") else ""}
@@ -3868,7 +4578,7 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
         {copilot_box(sections.get("comparative", ""))}''')() if show_section("comparative") else ""}
 
         {section_title(7, "Heatmap de charge (jour x heure)") if (heatmap_matrix and for_pdf) else ""}
-        {"<p style='font-size:12.5px;color:#55616B;margin:0 0 10px;'>Répartition des tickets ouverts par jour de semaine et heure de la journée — basée sur les tickets bruts importés (colonne Date d'ouverture). Utile pour dimensionner les plages de présence hotline.</p><img src='data:image/png;base64," + heatmap_b64 + "' style='width:100%;max-width:680px;display:block;margin:0 auto 14px;' />" if (heatmap_matrix and for_pdf) else ""}
+        {"<p style='font-size:12.5px;color:#55616B;margin:0 0 10px;'>Répartition des tickets ouverts par jour de semaine et heure de la journée — basée sur les tickets bruts importés (colonne Date d'ouverture). Utile pour dimensionner les plages de présence hotline.</p>" + centered_img("data:image/png;base64," + heatmap_b64, "width:100%;max-width:680px;", "0 0 14px") if (heatmap_matrix and for_pdf) else ""}
 
         {(lambda: f'''{section_title(8 if heatmap_matrix else 7, "Synthèse finale et conclusion")}
         {("<div style='font-size:13px;font-weight:bold;color:#0B4965;margin:6px 0 6px;'>Constats clés</div><ul style='padding-left:18px;margin:0 0 14px;'>" + list_html(notes.get('constats', [])) + "</ul>") if notes.get('constats') else ""}
@@ -3881,7 +4591,93 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
     return html
 
 
-def get_report_html_and_label(module, ym, charts=None, for_pdf=False):
+def _png_uri(buf):
+    return "data:image/png;base64," + base64.b64encode(buf.read()).decode("ascii")
+
+
+def server_report_charts(module, ym):
+    """Graphiques du rapport générés côté serveur (matplotlib) — utilisés quand le client n'envoie
+    pas d'images (interface React). Même contenu que les graphiques Chart.js de la legacy."""
+    out = {}
+    try:
+        if module == "tarkhiss":
+            an = _load(module, "analysis", ym, empty_analysis(ym))
+            weekly = an.get("weekly", []) or []
+            if weekly:
+                out["weekly"] = _png_uri(chart_bar_png(
+                    [w.get("week", "") for w in weekly],
+                    {"Bugs": [w.get("bugs", 0) or 0 for w in weekly], "Demandes": [w.get("demandes", 0) or 0 for w in weekly]},
+                    "Évolution hebdomadaire — Bugs vs Demandes"))
+            probs = [p for p in (an.get("problems", []) or []) if (p.get("count") or 0) > 0]
+            if probs:
+                out["problems"] = _png_uri(chart_pie_png([p["label"] for p in probs], [p["count"] for p in probs], "Répartition des problèmes techniques"))
+        elif module == "moussanada":
+            import numpy as np
+            import matplotlib.pyplot as plt
+            data = moussanada_data(ym).get_json()
+            m, ts = data["month"], data["timeseries"]
+            cur = {**m["tickets"], **m["durations"]}
+            py = prev_ym(ym)
+            prev = ts.get(py, {})
+            ml, pl = month_label_fr(ym), month_label_fr(py)
+            out["volume"] = _png_uri(chart_bar_png(["Ouverts", "Résolus", "En instance", "Clos"], {
+                pl: [prev.get(k, 0) or 0 for k in ("ouverts", "resolus", "en_retard", "clos")],
+                ml: [cur.get(k, 0) or 0 for k in ("ouverts", "resolus", "en_retard", "clos")]}, "Volumes de tickets — comparatif", "tickets"))
+            out["delay"] = _png_uri(chart_bar_png(["Délai résolution", "Délai clôture"], {
+                pl: [prev.get("resolution_h", 0) or 0, prev.get("cloture_h", 0) or 0],
+                ml: [cur.get("resolution_h", 0) or 0, cur.get("cloture_h", 0) or 0]}, "Délais de traitement — comparatif", "heures"))
+            # Clés non-mois (ex. lignes "Total" d'un export GLPI) ignorées : elles faisaient échouer
+            # month_label_fr() et donc tous les graphiques suivants (catégories, techniciens, radar).
+            months = real_months(ts, require_data=True)  # mois réels avec données, jusqu'au mois en cours
+            if months:
+                labs = [month_label_fr(k) for k in months]
+                out["trend"] = _png_uri(chart_line_png(labs, {
+                    "Ouverts": [ts[k].get("ouverts", 0) or 0 for k in months],
+                    "Résolus": [ts[k].get("resolus", 0) or 0 for k in months],
+                    "Clos": [ts[k].get("clos", 0) or 0 for k in months]}, "Tendance des tickets", "tickets"))
+                out["backlog"] = _png_uri(chart_bar_png(labs, {"En instance": [ts[k].get("en_retard", 0) or 0 for k in months]}, "Backlog — tickets en instance"))
+            cats = sorted(m["categories"], key=lambda x: x.get("ouverts", 0), reverse=True)
+            srv = sorted(m["services"], key=lambda x: x.get("ouverts", 0), reverse=True)
+            if cats:
+                t = cats[:10]
+                # Catégories : texte agrandi (libellés longs, illisibles en taille 9 une fois dans l'email)
+                out["cat"] = _png_uri(chart_bar_png([c["label"][:32] for c in t], {"Ouverts": [c.get("ouverts", 0) for c in t], "Résolus": [c.get("resolus", 0) for c in t]}, "Top catégories", figsize=(9, 5.4), fontsize=12))
+                p = cats[:12]; tot = sum(c.get("ouverts", 0) for c in cats) or 1; cum = 0; cp = []
+                for c in p:
+                    cum += c.get("ouverts", 0); cp.append(round(cum / tot * 100))
+                out["pareto"] = _png_uri(chart_combo_png([c["label"][:24] for c in p], {"Ouverts": [c.get("ouverts", 0) for c in p]}, {"% cumulé": cp}, "tickets", "% cumulé", "Pareto des catégories", figsize=(9, 5.6), fontsize=12))
+            if srv:
+                t = srv[:10]
+                out["srv"] = _png_uri(chart_bar_png([c["label"][:32] for c in t], {"Ouverts": [c.get("ouverts", 0) for c in t], "Résolus": [c.get("resolus", 0) for c in t]}, "Top services demandeurs", figsize=(9, 5.4), fontsize=12))
+            techs = sorted(m["techniciens"], key=tech_volume, reverse=True)
+            if techs:
+                out["techvol"] = _png_uri(chart_bar_png([t["label"] for t in techs], {"Sollicitations": [tech_volume(t) for t in techs]}, "Volume de sollicitation par technicien", "tickets"))
+                out["tech"] = _png_uri(chart_bar_png([t["label"] for t in techs], {"Ouverts": [t.get("ouverts", 0) for t in techs], "Résolus": [t.get("resolus", 0) for t in techs]}, "Détail des sollicitations — ouverts / résolus"))
+                rt = techs[:6]
+                mo = max(1, *[t.get("ouverts", 0) for t in rt]); md = max(1, *[(t.get("delai_resolution_s") or 0) for t in rt])
+                axes = ["Ouverts", "Résolus", "Taux résolution", "Rapidité"]
+                ang = np.linspace(0, 2 * np.pi, len(axes), endpoint=False).tolist(); ang += ang[:1]
+                fig, ax = plt.subplots(figsize=(6, 5), subplot_kw=dict(polar=True))
+                pal = ["#0B4965", "#DC2828", "#F59F0A", "#25935F", "#8E5AA6", "#1794CF"]
+                for i, t in enumerate(rt):
+                    o = t.get("ouverts", 0); r = t.get("resolus", 0)
+                    # Taux plafonnés à 100 % (résolus du mois pouvant inclure des tickets ouverts avant)
+                    vals = [round(o / mo * 100), min(100, round(r / o * 100)) if o else 0, min(100, round(r / o * 100)) if o else 0, round(100 - (t.get("delai_resolution_s") or 0) / md * 100) if t.get("delai_resolution_s") else 100]
+                    vals += vals[:1]
+                    ax.plot(ang, vals, color=pal[i % 6], linewidth=2, label=t["label"]); ax.fill(ang, vals, color=pal[i % 6], alpha=.12)
+                ax.set_xticks(ang[:-1]); ax.set_xticklabels(axes); ax.set_ylim(0, 100)
+                ax.set_title("Radar de performance — top techniciens", fontsize=12, fontweight="bold", color="#0B4965", pad=16)
+                ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.08), ncol=3, frameon=False, fontsize=8)
+                fig.tight_layout()
+                out["radar"] = _png_uri(_fig_to_png_buf(fig))
+    except Exception as e:  # les graphiques ne doivent jamais bloquer l'envoi
+        app.logger.warning("server_report_charts: %s", e)
+    return out
+
+
+def get_report_html_and_label(module, ym, charts=None, for_pdf=False, compact=False):
+    if not charts:
+        charts = server_report_charts(module, ym)
     if module == "moussanada":
         month_label = month_label_fr(ym)
         return build_report_html_moussanada(ym, month_label, charts, for_pdf=for_pdf), month_label
@@ -3893,7 +4689,7 @@ def get_report_html_and_label(module, ym, charts=None, for_pdf=False):
     prev_emails = _load(module, "emails", py, {})
     prev_analysis = _load(module, "analysis", py, empty_analysis(py))
     month_label = analysis.get("month_label") or month_label_fr(ym)
-    return build_report_html(module, ym, calls, emails, analysis, prev_calls, prev_emails, prev_analysis, charts, for_pdf=for_pdf), month_label
+    return build_report_html(module, ym, calls, emails, analysis, prev_calls, prev_emails, prev_analysis, charts, for_pdf=for_pdf, compact=compact), month_label
 
 
 @app.route("/api/<module>/preview-email/<ym>", methods=["POST"])
@@ -3924,34 +4720,13 @@ def send_email(module, ym):
     body_html = build_email_body(month_label, report_html, greeting, module_settings, MODULES[module]["label"])
     subject = build_subject(module, month_label)
 
-    msg = EmailMessage()
-    msg["Subject"] = subject
-    msg["To"] = "; ".join(to_list)
-    if cc_list:
-        msg["Cc"] = "; ".join(cc_list)
-    msg.set_content("Ce message nécessite un client compatible HTML.")
-    msg.add_alternative(body_html, subtype="html")
+    msg = new_draft_email(subject, to_list, cc_list, body_html)
 
     fname = f"rapport_{module}_{ym}.eml"
     fpath = os.path.join(module_dir(module), "exports", fname)
     with open(fpath, "wb") as f:
         f.write(bytes(msg))
-
-    opened = False
-    error = None
-    try:
-        system = platform.system()
-        if system == "Windows":
-            os.startfile(fpath)  # noqa
-            opened = True
-        elif system == "Darwin":
-            subprocess.run(["open", fpath], check=True)
-            opened = True
-        else:
-            subprocess.run(["xdg-open", fpath], check=True)
-            opened = True
-    except Exception as e:
-        error = str(e)
+    opened, error = open_in_outlook(fpath)
 
     append_send_log(module, {
         "date": datetime.now().isoformat(timespec="seconds"),
@@ -3969,18 +4744,20 @@ def send_email(module, ym):
 # ---------------------------------------------------------------------------
 # API - Export Excel du dashboard (par volet)
 # ---------------------------------------------------------------------------
-def render_pdf_bytes(inner_html, landscape=False, header_label=None):
+def render_pdf_bytes(inner_html, landscape=False, header_label=None, cover=False, page_numbers=False):
     """Génère le PDF final. Utilise WeasyPrint si disponible (meilleur rendu CSS moderne,
     flexbox/grid, en-tête récurrent via CSS Paged Media standard) ; sinon repli automatique
     sur xhtml2pdf (moteur historique, zéro dépendance système). WeasyPrint nécessite GTK3 sous
     Windows — voir le README pour l'installation ; sans ça, l'app continue de fonctionner
-    normalement avec xhtml2pdf."""
+    normalement avec xhtml2pdf.
+    cover=True : 1re page sans marge ni en-tête (page de garde) ; page_numbers : « Page n / N »."""
     size = "A4 landscape" if landscape else "A4"
     header_block = ""
     if header_label:
+        agency = html_module.escape(load_global_settings().get("agency_name") or "AMMPS — DSID")
         header_block = f"""<div id="pdfRunningHeader" style="font-size:9px;color:#55616B;
           border-bottom:1px solid #DAE0E7;padding-bottom:4px;">
-          <strong style="color:#0B4965;">SANAD — AMMPS/DSID</strong> &nbsp;·&nbsp; {header_label}
+          <strong style="color:#0B4965;">{agency}</strong> &nbsp;·&nbsp; {header_label}
         </div>"""
 
     try:
@@ -3992,9 +4769,16 @@ def render_pdf_bytes(inner_html, landscape=False, header_label=None):
               @top-left { content: element(pdfrunhead); }
             """
             header_block = f'<div style="position:running(pdfrunhead);">{header_block}</div>'
+        if page_numbers:
+            header_css += """
+              @bottom-right { content: "Page " counter(page) " / " counter(pages); font: 8.5pt Arial, sans-serif; color: #55616B; }
+            """
+        cover_css = ("@page :first { margin: 0; @top-left { content: none; } @bottom-right { content: none; } }"
+                     if cover else "")
         doc = f"""<html><head><meta charset="utf-8">
         <style>
           @page {{ size: {size}; margin: {top_margin} 1.4cm 1.4cm 1.4cm;{header_css} }}
+          {cover_css}
           body {{ font-family: Arial, sans-serif; }}
           img {{ max-width: 100%; }}
           .pdf-break {{ page-break-before: always; }}
@@ -4041,6 +4825,8 @@ def export_pdf(module, ym):
 
 @app.route("/api/pchc/export-pdf", methods=["POST"])
 def pchc_export_pdf():
+    if load_pchc_meta():   # livrable officiel (même PDF que « Revue de direction »)
+        return pchc_export("pdf")
     payload = request.json or {}
     start = payload.get("start") or pchc_default_period()[0]
     end = payload.get("end") or pchc_default_period()[1]
@@ -4058,6 +4844,21 @@ def export_xlsx(module, ym):
     if module == "moussanada":
         return export_xlsx_moussanada(ym)
 
+    buf = io.BytesIO()
+    wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+    fmts = xlsx_formats(wb)
+    write_tarkhiss_month_sheet(wb, fmts, module, ym, "Dashboard")
+    if module == "tarkhiss":
+        write_tarkhiss_advanced_sheet_xw(wb, fmts, ym)
+    write_alerts_sheet_xw(wb, fmts, module)
+    wb.close()
+    buf.seek(0)
+    return send_file(buf, as_attachment=True, download_name=f"dashboard_{module}_{ym}.xlsx",
+                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+
+
+def write_tarkhiss_month_sheet(wb, fmts, module, ym, sheet_name):
+    """Feuille « Dashboard » du rapport mensuel Tarkhiss (export mensuel et Excel annuel)."""
     calls = _load(module, "calls", ym, {})
     emails = _load(module, "emails", ym, {})
     analysis = _load(module, "analysis", ym, empty_analysis(ym))
@@ -4070,11 +4871,7 @@ def export_xlsx(module, ym):
     problems = analysis.get("problems", [])
     demandes = analysis.get("demandes", [])
     weekly = analysis.get("weekly", [])
-
-    buf = io.BytesIO()
-    wb = xlsxwriter.Workbook(buf, {"in_memory": True})
-    fmts = xlsx_formats(wb)
-    ws = wb.add_worksheet("Dashboard")
+    ws = wb.add_worksheet(sheet_name)
 
     _gs = load_global_settings()
     _report_title = _gs.get(f"report_title_{module}") or f"Rapport Support {MODULES[module]['label']}"
@@ -4088,7 +4885,7 @@ def export_xlsx(module, ym):
     row = 7
     ws.write(row, 0, "Problèmes techniques", fmts["title"])
     row += 1
-    for i, h in enumerate(["Type", "Nombre", "%", "Description", "Action corrective"]):
+    for i, h in enumerate(["Type", "Nombre", "%", "Description"]):
         ws.write(row, i, h, fmts["header"])
     total_p = sum(p.get("count", 0) for p in problems)
     row += 1
@@ -4096,7 +4893,7 @@ def export_xlsx(module, ym):
     for p in problems:
         pct = round(p.get("count", 0) / total_p * 100, 1) if total_p else 0
         ws.write(row, 0, p.get("label", "")); ws.write(row, 1, p.get("count", 0))
-        ws.write(row, 2, f"{pct}%"); ws.write(row, 3, p.get("desc", "")); ws.write(row, 4, p.get("action", ""))
+        ws.write(row, 2, f"{pct}%"); ws.write(row, 3, p.get("desc", ""))
         problem_labels.append(p.get("label", "")); problem_values.append(p.get("count", 0))
         row += 1
 
@@ -4139,16 +4936,7 @@ def export_xlsx(module, ym):
     if problem_labels:
         png = chart_pie_png(problem_labels, problem_values, "Répartition des problèmes techniques")
         xlsx_insert_png(ws, 20, 7, png)
-
-    if module == "tarkhiss":
-        write_tarkhiss_advanced_sheet_xw(wb, fmts, ym)
-
-    write_alerts_sheet_xw(wb, fmts, module)
-
-    wb.close()
-    buf.seek(0)
-    return send_file(buf, as_attachment=True, download_name=f"dashboard_{module}_{ym}.xlsx",
-                      mimetype="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet")
+    return ws
 
 
 def write_tarkhiss_advanced_sheet_xw(workbook, fmts, ym):
@@ -4328,6 +5116,10 @@ def system_network_config_save():
         "share_url": f"http://{lan_ip}:{port}" if host == "0.0.0.0" else None,
         "restart_scheduled": port_changed,
     })
+
+
+import ops
+ops.register(app, sys.modules[__name__])
 
 
 if __name__ == "__main__":
