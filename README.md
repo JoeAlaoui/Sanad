@@ -1,244 +1,129 @@
-# SANAD — Plateforme de pilotage du Helpdesk SI (AMMPS / DSID)
+# SANAD — Plateforme locale de pilotage du helpdesk
 
-Application web locale (Flask + JSON, aucune base de données), multi-volets, multi-utilisateurs.
-"SANAD" désigne l'application complète : **Tarkhiss** (Support Email & Hotline), **Moussanada**
-(Helpdesk GLPI) et **Reporting Métier PCHC**. Nom, sous-titre, agence et titres de rapport sont
-personnalisables dans Administration → Édition avancée.
+Application web multi-utilisateurs construite avec Flask, JavaScript natif et des fichiers JSON
+(aucune base de données). Elle regroupe le support email et hotline, la gestion de tickets GLPI et
+le reporting métier PCHC.
 
-## 1. Installation & lancement
+## Installation et lancement
 
-```bash
-cd sanad_app
+```powershell
+cd D:\Apps\sanad_app
 python -m pip install -r requirements.txt
 python app.py
 ```
-Ouvrir : **http://127.0.0.1:5050**. Laisser le terminal ouvert.
 
-**⚠️ Windows — installation** : utiliser systématiquement `python -m pip install -r requirements.txt`
-(avec `python -m` devant) plutôt que `pip` seul, qui a échoué sur certains postes (pip introuvable
-dans le PATH alors que Python l'est).
+Ouvrir <http://127.0.0.1:5050> et laisser le terminal ouvert. Au premier lancement, créer le compte
+administrateur. Sous Windows, utiliser `python -m pip` plutôt que `pip` seul.
 
-**⚠️ Windows — génération PDF (WeasyPrint)** : WeasyPrint est le moteur PDF principal (meilleur
-rendu que l'ancien moteur, conservé en repli automatique : xhtml2pdf). Il dépend de bibliothèques
-système absentes de Windows par défaut (GTK3 : Pango, Cairo, GDK-Pixbuf). Si l'export PDF échoue
-avec une erreur `libgobject`/`cairo`/`pango`, installer le runtime GTK3 pour Windows (voir la
-documentation officielle WeasyPrint, section "Windows"). **Tant que GTK3 n'est pas installé,
-l'application bascule automatiquement sur xhtml2pdf** — aucune action requise pour que l'export
-PDF continue de fonctionner en attendant.
+Les PDF sont générés côté serveur : WeasyPrint est utilisé en priorité, avec xhtml2pdf en solution
+de repli. Sous Windows, WeasyPrint peut nécessiter l’installation des bibliothèques GTK3 (Pango,
+Cairo et GDK-Pixbuf) ; sans elles, le repli PDF reste disponible.
 
-## 2. Premier lancement — création du compte administrateur
+## Rôles
 
-Au premier accès, l'application demande de créer le compte **Administrateur / Responsable
-Helpdesk**. Ce compte gère ensuite les autres utilisateurs dans l'onglet **Utilisateurs**.
-
-## 3. Rôles
-
-| Rôle | Accès |
+| Rôle | Principaux droits |
 |---|---|
-| **Administrateur** | Accès complet : saisie, imports, rapports, administration, comptes, tous les volets |
-| **Superviseur** | Lecture seule : Dashboard, Vue annuelle, export PDF/Excel des volets. Pas de saisie, pas d'envoi d'email, pas d'administration |
-| **Hotliner** | **Base de connaissances** et **Notes**, limité aux volets assignés par l'admin, + **vue lecture seule** du Dashboard et de la Vue annuelle **Tarkhiss uniquement** (jamais Moussanada/PCHC, jamais de saisie/export/envoi) si "Tarkhiss" fait partie de ses volets assignés |
+| Administrateur | Saisie, imports, rapports, gestion des comptes, paramètres, sauvegardes et fonctions d’administration |
+| Superviseur | Consultation, rapports et exports autorisés ; pas de saisie, d’envoi ni d’administration |
+| Hotliner | Notes, base de connaissances et accès en lecture limités aux volets qui lui sont attribués |
 
-## 4. Volets
+Les restrictions sont appliquées côté API, et pas uniquement par masquage de l’interface.
 
-### 4.1 Tarkhiss — Support Email & Hotline
+## Fonctionnalités
 
-**Heatmap jour × heure (appels et emails) recadrée aux horaires d'ouverture** : affichage
-limité aux jours ouvrés (Lun-Ven) et à la plage 08h-17h (≈08h30-16h30, horaires Tarkhiss),
-sur l'écran, le PDF et l'Excel. Seule la heatmap est recadrée — le taux de décroché, le délai
-de réponse et les autres statistiques restent calculés sur l'intégralité des données importées,
-week-ends et heures creuses compris.
+### Support email et hotline
 
-**Libellés des KPI personnalisables** : Administration → « Libellés des KPI » permet de renommer chaque
-indicateur (ex. « En retard » → « En instance »). Le nouveau libellé s'applique aux dashboards (ancienne
-et nouvelle interface) **et** aux rapports (PDF, Excel, email). Vide = libellé par défaut.
+- Saisie et analyse mensuelles, tableaux de bord, vue annuelle, comparatifs de périodes, alertes et
+  libellés de KPI personnalisables.
+- Import cumulatif des exports Outlook `.xlsm` et des journaux d’appels `.csv`, avec recalcul des
+  compteurs journaliers et statistiques détaillées.
+- Analyses avancées : activité par jour et heure, taux de décroché, durées et rappels d’appels
+  manqués, tendances et sujets fréquents. Les noms de contacts sont masqués par défaut dans les
+  rapports détaillés.
+- Vue annuelle avec descriptions et prompts par rubrique, ainsi que des exports PDF, Excel et
+  PowerPoint et une préparation d’email.
+- Les sections et graphiques des emails mensuels sont configurables. Les messages sont créés en
+  brouillon `.eml` pour être ouverts et modifiés dans l’application de messagerie associée.
 
-**Indicateurs comparés au mois précédent** : sous chaque KPI, en plus du pourcentage d'évolution, la valeur
-du mois précédent est affichée, ex. « +12 % vs Août (180) » (durées au format jj/hh, taux avec « % »).
+### Gestion des tickets GLPI
 
-**Légende sous chaque graphique** : une courte phrase explique ce que représente le graphique (écran,
-PDF, Excel et email).
+- Imports agrégés Excel/CSV et imports de tickets individuels ; indicateurs, tendances, catégories,
+  services, techniciens, backlog et délais.
+- Connexion directe à l’API REST GLPI, profils d’import, pagination, test de connexion et contrôle
+  des doublons entre sources.
+- Filtrage des techniciens appliqué aux tableaux de bord et aux rapports, sans réimporter les
+  tickets.
+- Suivi des retards à partir des tickets bruts importés : un ticket est en retard si sa résolution
+  ou sa clôture n’est pas enregistrée et si son échéance TTR est dépassée. Les tickets sans
+  échéance sont signalés séparément.
+- Le TOP et les KPI de retard des emails, ainsi que le classeur Excel joint ou téléchargé, peuvent
+  exclure les techniciens configurés. Le classeur est rempli à partir du gabarit fourni.
 
-**Sections et graphiques du rapport email personnalisables** (Tarkhiss et Moussanada) : dans le panneau
-"Envoyer par email" du Dashboard, des cases à cocher permettent d'inclure ou exclure chaque
-section (analyse graphique, problèmes techniques, demandes, évolution hebdomadaire, synthèse
-pour Tarkhiss ; volume, délais, catégories, services, équipe, comparatif, synthèse pour
-Moussanada). Réglage enregistré automatiquement à chaque case cochée/décochée, propre à chaque
-module. En plus des sections, chaque **graphique** peut être inclus ou exclu individuellement (un
-graphique reste masqué si sa section l'est). **La heatmap et les statistiques avancées (appels/emails) ne sont, elles, jamais
-incluses dans l'email, quel que soit ce réglage** — uniquement dans le PDF, l'Excel et l'écran,
-qui restent toujours complets indépendamment de ce qui est choisi pour l'email.
-- Saisie mensuelle appels/emails, analyse (problèmes, demandes, constats, recommandations),
-  dashboard, vue annuelle, heatmap jour de semaine × semaine du mois, comparatif N vs N-1,
-  alertes de seuil configurables, prompts Copilot, rapport email/PDF/Excel.
-- **Import Outlook brut (.xlsm)** : à partir d'un export de la boîte mail (feuille "Mail" —
-  Folder Path, Subject, DisplayTo/Cc, DateTimeSent/Received, Importance, IsRead, HasAttachments,
-  Preview, Id), recalcule automatiquement les compteurs jour par jour (`\Inbox\` = reçus,
-  `\Sent Items\` = envoyés ; Deleted/Drafts/Archive ignorés). Fichier cumulatif : chaque
-  réimport resynchronise les mois couverts.
-- **Import journal d'appels brut (.csv)** : à partir d'un export du journal d'appels mobile
-  (Name, Phone, Date, Type, Duration…), recalcule les compteurs jour par jour (appels
-  reçus/durée). Même principe cumulatif que l'import Outlook.
-- **Statistiques avancées** (issues des deux imports bruts ci-dessus, PDF/Excel/écran
-  uniquement — **jamais dans le corps de l'email**) : heatmap jour × heure (appels et emails),
-  taux de décroché, distribution des durées d'appel, rappel des appels manqués sous 24h, top
-  appelants ; délai de première réponse email (indicatif — apparié par sujet, pas d'ID de
-  conversation dans l'export), sujets et mots-clés fréquents, top destinataires. Les noms de
-  contacts sont **masqués par défaut** dans ces rapports (case à cocher RGPD en Administration
-  pour les afficher en clair).
-- **Traçabilité des imports** : chaque fichier brut importé (Outlook, journal d'appels) est
-  archivé et re-téléchargeable depuis Administration → Imports bruts Tarkhiss (50 derniers
-  conservés).
+### Reporting métier PCHC
 
-### 4.2 Moussanada — Helpdesk GLPI
-- Imports GLPI agrégés (xlsx/csv), KPI, Pareto, radar, backlog, comparatifs, tendance des
-  catégories dans le temps.
-- Import CSV ticket-par-ticket (tickets bruts) → heatmap jour × heure, répartition par Type,
-  distribution des délais de résolution, liste nominative des tickets en souffrance.
-- **Intégration GLPI (Mode Direct)** : client REST (initSession/search/killSession, pagination),
-  profils d'import déclaratifs (tickets, catégories, demandeurs, techniciens), interface
-  unifiée "Mode CSV / Mode Direct GLPI", panneau Admin → Intégrations GLPI (URL, App-Token,
-  User-Token, entity_id, test de connexion). Détection de doublons CSV↔Direct (confirmation
-  requise pour écraser un import déjà présent).
-- Filtre techniciens (exclusion/whitelist), appliqué à la lecture : un changement de filtre se
-  répercute immédiatement sur dashboard, Excel, PDF et email, sans ré-import.
-- **Limite connue** : profils GLPI testés contre un serveur simulé — les identifiants de champs
-  de recherche (`glpi_profiles.py`) correspondent à un GLPI 11.x standard, à vérifier sur
-  l'instance réelle (Configuration → Listes). Règle "ticket en retard" pour l'import direct =
-  ouvert depuis plus de 30 jours (hypothèse, ajustable).
+- Import de classeurs `.xlsx`/`.xlsm` et de fichiers CSV, contrôles de structure et de qualité,
+  synthèse et tableaux de bord.
+- Les anomalies de structure sont signalées avant import ; les avertissements et les statuts
+  inconnus sont visibles pour faciliter le contrôle des données.
+- Calcul partagé entre l’interface et les livrables. Export Excel basé sur un gabarit, version
+  allégée disponible, rapports PDF et PowerPoint, et préparation d’emails avec pièces jointes au
+  format `.eml`.
+- Les imports et exports sont journalisés ; une sauvegarde peut être créée avant un import.
 
-### 4.3 Reporting Métier PCHC
-- Import Excel/CSV, voyants, table statut → couleur paramétrable, backlog par ancienneté,
-  top 10 opérateurs, export Excel/PDF/PPTX ("Revue de Direction")/email.
-- Rapports PDF, PPTX et email selon la charte AMMPS, en modèle hybride (couleur par volet).
-  Tarkhiss et Moussanada ont aussi leur export PPTX mensuel (`rapports_mensuels.py`).
+### Qualité, conformité et administration
 
-## 5. Partager SANAD sur le réseau local
+- Tableau de qualité des données et contrôles mensuels.
+- Gestion de procédures documentées et génération de dossiers mensuels de preuves, avec exports
+  PDF ou ZIP et manifeste d’intégrité.
+- Sauvegardes manuelles et automatiques, vérification d’intégrité avant restauration et création
+  d’une sauvegarde de sécurité avant celle-ci.
+- Journal d’audit des connexions, imports, exports et actions d’administration ; outils de recherche
+  et d’anonymisation des données personnelles.
+- Administration des utilisateurs, paramètres, notes et base de connaissances.
 
-Bouton **🔗 Partager SANAD** (menu utilisateur, réservé à l'administrateur) : bascule entre accès
-**local uniquement** (défaut) et accès **réseau local**, avec un port configurable. Une fois
-enregistré, la fenêtre affiche le lien à transmettre (ex. `http://192.168.1.42:5050`) basé sur
-l'IP détectée du poste. Chaque collègue qui ouvre ce lien depuis le **même réseau** (même
-Wi-Fi/switch) arrive sur l'écran de connexion SANAD et utilise son propre compte.
+## Accès sur le réseau local
 
-**Bascule instantanée, sans redémarrage** : le processus écoute en permanence sur toutes les
-interfaces ; c'est un contrôle applicatif (pas le système d'exploitation) qui refuse les
-connexions non locales tant que le partage n'est pas activé. Activer/désactiver le partage
-réseau prend donc effet immédiatement. **Seul un changement de port** force un vrai redémarrage
-du processus — SANAD le fait alors lui-même automatiquement (quelques secondes d'interruption,
-reconnexion automatique du navigateur), sans jamais vous demander de relancer `python app.py`
-manuellement. Le réglage est conservé dans `data/network_config.json`.
+L’administrateur peut activer le partage de l’application sur le réseau local et transmettre le lien
+affiché par l’interface. Le partage n’est pas destiné à exposer l’application à Internet. Ne
+l’activer que sur un réseau de confiance ; les utilisateurs se connectent avec leur propre compte.
 
-**⚠️ Sécurité** : le mode réseau expose SANAD à quiconque est connecté au même réseau local (pas
-à Internet). L'authentification et les rôles habituels restent en vigueur ; à réserver à un
-réseau de confiance (bureau, VPN d'entreprise). Techniquement, le port reste toujours ouvert sur
-toutes les interfaces réseau de la machine (nécessaire pour la bascule instantanée) — seul
-l'accès applicatif est refusé en mode local, ce qui diffère d'un port réellement fermé.
+## Données et sécurité
 
-## 6. Personnalisation de l'écran (Administration)
+Les données sont stockées localement dans `data/` au format JSON. Ce dossier contient notamment
+les comptes utilisateurs et la clé de signature des sessions ; il est exclu du dépôt Git. Les
+archives de sauvegarde peuvent également contenir ces fichiers et doivent être protégées comme des
+données sensibles. Aucun mot de passe n’est stocké en clair : les mots de passe sont hachés.
 
-- **Design shadcn/ui** : l'écran reprend intégralement les tokens, l'échelle de rayon/ombre et
-  le langage visuel de shadcn/ui (base neutre "Zinc", cartes à bordure fine et ombre très
-  subtile, tableaux minimalistes sans grille ni en-tête coloré, sidebar claire avec item actif
-  par simple changement de fond, boutons/badges aux variants shadcn — default/outline/
-  secondary/ghost/destructive). L'application étant un rendu serveur Jinja + JS (pas React), les
-  composants shadcn (Radix) sont repris fidèlement en CSS pur plutôt qu'importés tels quels.
-  Les kits de thèmes explorés en cours de route (Ant Design Pro, Pastel, AMMPS Vert
-  Institutionnel, AMMPS Moderne 2026) sont conservés dans `static/design-kits/` à titre de
-  référence, mais ne sont plus proposés comme choix actifs.
-- **Aperçu live** : cliquer sur un thème ou une palette l'applique immédiatement à l'écran entier
-  (avant même d'enregistrer), pour comparer sans aller-retour. Si vous quittez l'onglet
-  Administration sans cliquer sur "Enregistrer", l'écran revient automatiquement au thème/palette
-  réellement sauvegardés.
-- **6 palettes de couleur** restent configurables, reprises des presets officiels shadcn/ui :
-  Zinc (défaut, neutre), Bleu, Vert, Orange, Violet, Rose — avec aperçu live au clic, avant
-  même d'enregistrer. Seule la couleur primaire change ; le fond, les cartes et la sidebar
-  restent toujours neutres (comme sur le sélecteur de thème officiel de shadcn/ui).
-- Ces réglages sont **purement visuels côté écran** : aucun effet sur les rapports
-  PDF/Excel/PowerPoint, qui conservent toujours la charte AMMPS officielle.
-- **Navigation par mois** : flèches ←/→ à côté du sélecteur de mois pour avancer/reculer d'un
-  mois et recharger automatiquement les données, avec une transition douce (fondu + léger
-  glissement) au changement plutôt qu'un rafraîchissement brut.
-- Bouton **densité compacte** (topbar) pour resserrer les tableaux volumineux, mémorisé par
-  navigateur.
-- Raccourcis clavier : `/` (recherche globale), `Échap` (ferme les fenêtres), `Ctrl+S`/`Cmd+S`
-  sur un dashboard (exporte le PDF du volet actif).
-- Favoris ★ (barre latérale, jusqu'à 8, mémorisés par navigateur), fil d'ariane, recherche
-  globale (mois, catégories, contacts, base de connaissances, Notes), glisser-déposer sur les
-  imports, notifications navigateur, aperçu PDF avant téléchargement, CSS d'impression,
-  indicateur "dernière synchro", onboarding par rôle.
+Après remplacement de `data/.secret_key`, les cookies de session précédents ne sont plus valides ;
+les utilisateurs doivent se reconnecter. Cette rotation ne modifie pas les mots de passe.
 
-## 7. Gouvernance / fiabilité
+## Tests
 
-- Sauvegardes automatiques horodatées avant chaque écriture (`data/_backups/`, 20
-  versions/fichier), écriture atomique.
-- Journal d'audit consultable en Administration (`data/audit_log.jsonl`) : connexions, imports,
-  gestion des comptes, actions RGPD.
-- RGPD : recherche/export CSV, anonymisation des noms demandeurs GLPI et entités PCHC, masquage
-  par défaut des contacts Tarkhiss dans les rapports détaillés (case à cocher pour lever le
-  masquage). **Limite connue** : les feuilles agrégées mensuelles historiques ne sont pas
-  couvertes par l'anonymisation rétroactive.
-- SMTP optionnel + endpoint headless `POST /api/system/reminder-check` (jeton `X-Reminder-Token`)
-  pour tâche planifiée de rappel d'envoi mensuel.
-- Export/import de la configuration complète (agence, logo, contacts, salutations, signatures,
-  seuils, comptes, base de connaissances) en un fichier `.json`, distinct des données mensuelles.
-- Historique des envois d'email avec téléchargement des `.eml` (protégé contre le path
-  traversal) ; historique des imports bruts Tarkhiss avec re-téléchargement (même protection).
+Depuis la racine du dépôt, avec les dépendances installées :
 
-## 8. Notes techniques
+```powershell
+python tests/test_retards.py
+python tests/test_rapports_mensuels.py
+python tests/test_pchc_export.py
+python tests/e2e_smoke.py
+```
 
-- Authentification par session Flask (cookie), mots de passe hashés (`werkzeug.security`), clé
-  de session persistée dans `data/.secret_key`. Politique de mot de passe et timeout de session
-  configurables (Administration).
-- Stockage JSON à plat dans `data/<volet>/` — aucune base de données. Comptes : `data/users.json`.
-  Notes : `data/notes/thread_<id>.json`. Base de connaissances : `data/knowledge.json`.
-- Dépendances (`requirements.txt`) : Flask, openpyxl (lecture des imports), xlsxwriter (génération
-  Excel), matplotlib + seaborn (graphiques en images PNG), python-pptx (rapports PPTX), weasyprint
-  (PDF principal), xhtml2pdf (repli), requests (client GLPI).
-- Aucune donnée envoyée à l'extérieur : tout reste local à la machine qui exécute l'application.
+Les tests du rapport annuel sont également disponibles dans le dossier `tests/`. Les tests de bout
+en bout utilisent un serveur et des données isolés. Pour désactiver le thread de sauvegarde
+automatique dans les tests qui lancent l’application :
 
-## 9. Historique des lots livrés (repères)
+```powershell
+$env:SANAD_NO_AUTO_SNAPSHOT = "1"
+python app.py
+```
 
-- **Lots A–G** : navigation/UI (accordéon, favoris, recherche globale, thèmes/palettes,
-  densité, raccourcis, drag & drop, notifications), alertes de seuil, export/import de
-  configuration, rappel programmé, export PNG des graphiques.
-- **Lots GLPI (Mode Direct)** : client REST, profils d'import déclaratifs, pipeline en deux
-  couches (parsing pur → stockage) partagé CSV/Direct, panneau Admin dédié, filtre techniciens
-  persistant, détection de doublons.
-- **Import Outlook brut** puis **exploitation avancée** : heatmap horaire, délai de réponse
-  indicatif, sujets/mots-clés fréquents, top destinataires.
-- **Import journal d'appels brut** : heatmap horaire, taux de décroché, rappels sous 24h, top
-  appelants — restitué en PDF/Excel/écran, exclu de l'email.
-- **Thème Ant Design Pro**, aperçu live des thèmes/palettes, navigation par flèches ←/→ avec
-  transition douce au changement de mois.
-- **Thèmes Pastel / AMMPS Vert Institutionnel / AMMPS Moderne 2026** (d'après kits fournis),
-  heatmap horaire recadrée aux horaires d'ouverture, vue lecture seule Tarkhiss pour le
-  hotliner, partage réseau local.
-- **Design unifié** : suppression de la sélection de thème (un seul design retravaillé —
-  sidebar, cartes, tableaux, boutons), partage réseau à bascule instantanée avec redémarrage
-  automatique géré par l'application (changement de port uniquement).
+Le navigateur charge Chart.js depuis un CDN. Pour les tests sans réseau, la variable
+`SANAD_CDN_DIR` peut pointer vers un dossier contenant les dépendances Chart.js hors ligne.
 
-## 10. Limites connues (honnêteté sur les points non vérifiés)
+## Limites connues
 
-- Rendu visuel jamais vérifié dans un navigateur réel en conditions de développement (sandbox
-  sans affichage) : structure, CSS et données sont validés, pas le rendu pixel par pixel.
-- Module GLPI testé uniquement contre un serveur simulé, jamais contre l'instance GLPI réelle
-  de l'AMMPS.
-- WeasyPrint non testé sur poste Windows sans GTK3 (le repli xhtml2pdf est fonctionnel mais son
-  rendu visuel sous Windows n'a pas été contrôlé).
-- Délai de première réponse email et rappels d'appels manqués : indicateurs **indicatifs**
-  (appariement par sujet / par numéro et fenêtre de temps, pas d'identifiant de conversation
-  réel dans les exports sources).
-
-
-## Lot 10 — Retour à l'interface legacy (unique)
-- L'interface React/shadcn a été **supprimée** (dossier `frontend/` retiré). `/` sert l'interface legacy ; `/legacy` et `/app` redirigent vers `/`.
-- Fonctions ajoutées à la legacy (nouveaux onglets, groupe « Qualité & conformité » de la sidebar) :
-  - **Qualité des données** (admin + superviseur) : score mensuel par volet, alertes, détail des contrôles par mois (`/api/quality/overview`).
-  - **SOP & preuves d'audit** (admin) : métadonnées documentaires, dossier de preuves du mois sélectionné (aperçu, PDF, ZIP + SHA-256), SOP (aperçu, PDF, Word).
-  - **Sauvegardes** (admin) : créer, télécharger, importer, restaurer (sauvegarde de sécurité auto), suppression, auto quotidienne + rétention.
-  - Administration > édition avancée : option « Email pleine largeur » ; variable `{sous_titre}` pour le sous-titre d'en-tête.
-- **Couverture de l'email/PDF = d'origine** : bloc 760 px centré, sous-titre par défaut `{agence} — {sous_titre} — {mois}` (titre/sous-titre toujours éditables en Administration). Email pleine largeur = option, jamais pour le PDF.
-- Si le client n'envoie pas d'images de graphiques, le serveur les génère (`server_report_charts`).
-- Test navigateur : `SANAD_CDN_DIR=<dossier avec node_modules/chart.js> python tests/e2e_smoke.py` (le CDN Chart.js est remplacé hors-ligne).
-- Maquettes de comparaison d'interfaces : dossier `mockups/` (ouvrir `index.html`).
+- L’intégration directe GLPI a été testée contre un serveur simulé ; vérifier les champs de recherche
+  sur l’instance GLPI réelle avant de l’utiliser en production.
+- La génération PDF sous Windows sans GTK3 repose sur le moteur de repli ; son rendu peut différer.
+- Les analyses de première réponse email et de rappel des appels manqués sont indicatives, car les
+  exports sources ne fournissent pas toujours d’identifiant fiable de conversation.
