@@ -8,6 +8,7 @@ l'appelant (app.py) de les charger/sauvegarder. Ce découpage permet de tester e
 évoluer le parsing GLPI indépendamment du reste de l'application.
 """
 import csv as _csv
+import html
 import io as _io
 import re
 import datetime as _dt
@@ -383,20 +384,20 @@ def parse_glpi_raw_tickets(file_storage):
     for row in rows[1:]:
         if not row or not g(row, idx_id):
             continue
-        tid = g(row, idx_id).replace(" ", "").replace("\u202f", "")
+        tid = re.sub(r"[\s\u202f\u00a0]", "", g(row, idx_id))
         tickets.append({
             "id": tid,
-            "titre": g(row, idx_titre),
+            "titre": html.unescape(g(row, idx_titre)).strip('"'),
             "statut": g(row, idx_statut),
-            "date_ouverture": g(row, idx_ouverture),
+            "date_ouverture": normalize_glpi_datetime(g(row, idx_ouverture)),
             "priorite": g(row, idx_priorite),
             "demandeur": g(row, idx_demandeur),
             "groupe_demandeur": g(row, idx_groupe),
             "technicien": g(row, idx_technicien),
             "categorie": g(row, idx_categorie),
-            "ttr": g(row, idx_ttr),
+            "ttr": normalize_glpi_datetime(g(row, idx_ttr)),
             "type": g(row, idx_type),
-            "derniere_modification": g(row, idx_modif),
+            "derniere_modification": normalize_glpi_datetime(g(row, idx_modif)),
         })
     return tickets
 
@@ -431,16 +432,28 @@ def compute_heatmap_matrix(tickets, date_field="date_ouverture"):
 
 
 def parse_glpi_datetime(raw):
-    """Parse une date GLPI 'YYYY-MM-DD HH:MM[:SS]' en datetime, ou None si invalide/vide."""
+    """Parse une date GLPI 'YYYY-MM-DD HH:MM[:SS]' ou 'JJ/MM/AAAA HH:MM[:SS]' en datetime, ou None
+    si invalide/vide."""
     raw = (raw or "").strip()
     m = re.match(r"^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2})(?::(\d{2}))?", raw)
-    if not m:
-        return None
-    y, mo, d, h, mi, s = m.groups()
+    if m:
+        y, mo, d, h, mi, s = m.groups()
+    else:
+        m = re.match(r"^(\d{2})/(\d{2})/(\d{4})(?:[ T](\d{2}):(\d{2})(?::(\d{2}))?)?", raw)
+        if not m:
+            return None
+        d, mo, y, h, mi, s = m.groups()
     try:
-        return _dt.datetime(int(y), int(mo), int(d), int(h), int(mi), int(s or 0))
+        return _dt.datetime(int(y), int(mo), int(d), int(h or 0), int(mi or 0), int(s or 0))
     except ValueError:
         return None
+
+
+def normalize_glpi_datetime(raw):
+    """Date d'un export (ISO ou JJ/MM/AAAA) → 'AAAA-MM-JJ HH:MM' ; texte inchangé si illisible, ''
+    si vide. Le stockage des tickets bruts est ainsi toujours en ISO (filtres par mois, heatmap)."""
+    dt = parse_glpi_datetime(raw)
+    return dt.strftime("%Y-%m-%d %H:%M") if dt else (raw or "").strip()
 
 
 def compute_resolution_hours(tickets):

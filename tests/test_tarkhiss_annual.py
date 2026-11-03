@@ -132,7 +132,8 @@ def test_annual_report_end_to_end():
         assert msg.get_content_type() == "multipart/mixed" and msg["To"] == "direction@ammps.gov.ma"
         assert msg["X-Unsent"] == "1", "Outlook doit ouvrir le message en brouillon"
         assert d["opened"] is False and "SANAD_NO_OUTLOOK" in (d["error"] or "")   # ouverture Outlook neutralisée en test
-        assert msg.get_body(("html",)).get_content().strip() == html.strip(), "corps ≠ aperçu"
+        no_img = lambda h: re.sub(r'src="(data|cid):[^"]+"', 'src=""', h).strip()   # data: à l'aperçu, pièces CID dans le .eml
+        assert no_img(msg.get_body(("html",)).get_content()) == no_img(html), "corps ≠ aperçu"
         # Même générateur que les téléchargements (seul l'horodatage « généré le » diffère)
         atts = {p.get_filename(): p.get_content() for p in msg.iter_attachments()}
         assert _pdf_pages(atts[f"Rapport_Tarkhiss_{start}_{end}.pdf"]) == _pdf_pages(pdf)

@@ -262,7 +262,7 @@ function applyModuleBrand(){
   // même : le hotliner ne fait que consulter, jamais générer/envoyer.
   const hotlinerReadOnly = currentUser && currentUser.role === "hotliner";
   document.getElementById("monthPickerWrap").style.display = (hotlinerReadOnly && currentModule !== "tarkhiss") ? "none" : "";
-  ["xlsxBtn", "pdfBtn", "mailToggleBtn", "annualActions"].forEach(id=>{
+  ["xlsxBtn", "pdfBtn", "pptxBtn", "mailToggleBtn", "annualActions"].forEach(id=>{
     const el = document.getElementById(id);
     if(el) el.style.display = hotlinerReadOnly ? "none" : "";
   });
@@ -1473,98 +1473,6 @@ async function refreshEmailMetaStats(){
   }
 }
 
-// ---------- ONE-PAGER (image PNG condensée partageable) ----------
-function roundRect(ctx, x, y, w, h, r){
-  ctx.beginPath();
-  ctx.moveTo(x+r, y);
-  ctx.arcTo(x+w, y, x+w, y+h, r);
-  ctx.arcTo(x+w, y+h, x, y+h, r);
-  ctx.arcTo(x, y+h, x, y, r);
-  ctx.arcTo(x, y, x+w, y, r);
-  ctx.closePath();
-}
-
-function buildOnePagerCanvas(title, subtitle, kpis, chartCanvases){
-  const W = 900;
-  const cardH = 92, cardGap = 14, cols = 4;
-  const kpiRows = Math.ceil(kpis.length / cols);
-  const chartsH = chartCanvases.length ? 340*Math.ceil(chartCanvases.length/2) + 20 : 0;
-  const H = 150 + kpiRows*(cardH+cardGap) + chartsH + 60;
-
-  const canvas = document.createElement("canvas");
-  canvas.width = W; canvas.height = H;
-  const ctx = canvas.getContext("2d");
-
-  ctx.fillStyle = "#F5F7F9";
-  ctx.fillRect(0,0,W,H);
-
-  ctx.fillStyle = "#0B4965";
-  ctx.fillRect(0,0,W,86);
-  ctx.fillStyle = "#FFFFFF";
-  ctx.font = "bold 24px Arial";
-  ctx.fillText(title, 28, 40);
-  ctx.font = "13px Arial";
-  ctx.fillStyle = "#B9D3E0";
-  ctx.fillText(subtitle, 28, 64);
-  if(globalSettings.agency_name){
-    ctx.textAlign = "right";
-    ctx.fillText(globalSettings.agency_name, W-28, 64);
-    ctx.textAlign = "left";
-  }
-
-  let y = 110;
-  kpis.forEach((k,i)=>{
-    const col = i % cols, row = Math.floor(i/cols);
-    const cw = (W - 28*2 - cardGap*(cols-1)) / cols;
-    const x = 28 + col*(cw+cardGap);
-    const cy = y + row*(cardH+cardGap);
-    ctx.fillStyle = "#FFFFFF";
-    roundRect(ctx, x, cy, cw, cardH, 8); ctx.fill();
-    ctx.strokeStyle = "#DAE0E7"; ctx.lineWidth = 1;
-    roundRect(ctx, x, cy, cw, cardH, 8); ctx.stroke();
-    ctx.fillStyle = "#55616B";
-    ctx.font = "11px Arial";
-    ctx.fillText(k.label, x+12, cy+22);
-    ctx.fillStyle = k.color || "#0B4965";
-    ctx.font = "bold 26px Arial";
-    ctx.fillText(String(k.value), x+12, cy+56);
-    if(k.delta){
-      ctx.fillStyle = k.deltaColor || "#55616B";
-      ctx.font = "bold 11px Arial";
-      ctx.fillText(k.delta, x+12, cy+76);
-    }
-  });
-
-  let chartY = y + kpiRows*(cardH+cardGap) + 20;
-  chartCanvases.forEach((c,i)=>{
-    if(!c) return;
-    const col = i % 2, row = Math.floor(i/2);
-    const cw = (W - 28*2 - 14) / 2;
-    const ch = 320;
-    const x = 28 + col*(cw+14);
-    const cy = chartY + row*(ch+20);
-    ctx.fillStyle = "#FFFFFF";
-    roundRect(ctx, x, cy, cw, ch, 8); ctx.fill();
-    ctx.strokeStyle = "#DAE0E7"; roundRect(ctx, x, cy, cw, ch, 8); ctx.stroke();
-    const ratio = Math.min((cw-16)/c.width, (ch-16)/c.height);
-    const dw = c.width*ratio, dh = c.height*ratio;
-    ctx.drawImage(c, x + (cw-dw)/2, cy + (ch-dh)/2, dw, dh);
-  });
-
-  ctx.fillStyle = "#55616B";
-  ctx.font = "10px Arial";
-  ctx.fillText(`Généré le ${new Date().toLocaleDateString('fr-FR')}`, 28, H-16);
-
-  return canvas;
-}
-
-function downloadCanvas(canvas, filename){
-  const a = document.createElement("a");
-  a.href = canvas.toDataURL("image/png");
-  a.download = filename;
-  a.click();
-}
-
 // ---------- PDF / Excel ----------
 let _pdfPreviewBlobUrl = null;
 // Nom de fichier proposé par le serveur (Content-Disposition), sinon nom de repli
@@ -1614,24 +1522,11 @@ document.getElementById("pdfPreviewModalOverlay").addEventListener("click", (e)=
 document.getElementById("pdfBtn").addEventListener("click", ()=>{
   downloadPdfFromServer(apiM(`/export-pdf/${state.ym}`), {charts: collectTarkhissChartImages()}, `rapport_tarkhiss_${state.ym}.pdf`);
 });
-document.getElementById("onePagerBtn").addEventListener("click", ()=>{
-  const cur = computeMonthMetrics(state.calls, state.emails, state.analysis||{});
-  const kpis = [
-    {label:"EMAILS REÇUS", value: cur.received},
-    {label:"APPELS", value: cur.calls},
-    {label:"PROBLÈMES TECH.", value: cur.bugs, color:"#DC2828"},
-    {label:"DEMANDES INFO", value: cur.demandes, color:"#25935F"},
-  ];
-  const canvas = buildOnePagerCanvas(
-    `Support Tarkhiss — ${monthLabel(state.ym)}`,
-    "Synthèse mensuelle",
-    kpis,
-    [charts.weekly?.canvas, charts.problems?.canvas]
-  );
-  downloadCanvas(canvas, `onepager_tarkhiss_${state.ym}.png`);
-});
 document.getElementById("xlsxBtn").addEventListener("click", ()=>{
   window.location.href = apiM(`/export-xlsx/${state.ym}`);
+});
+document.getElementById("pptxBtn").addEventListener("click", ()=>{
+  window.location.href = apiM(`/export-pptx/${state.ym}`);
 });
 
 // ---------- Panneau d'envoi email (générique, réutilisé par tous les volets) ----------
@@ -1677,8 +1572,9 @@ function getSelectedRecipients(toListId="toCheckList", ccListId="ccCheckList"){
   return {to, cc};
 }
 
-function openPreviewModal(subject, html){
-  document.getElementById("previewSubject").textContent = subject;
+function openPreviewModal(subject, html, attachments){
+  const files = (attachments || []).map(a=>`${a.name} (${Math.max(1, Math.round(a.size/1024))} Ko)`).join(", ");
+  document.getElementById("previewSubject").textContent = subject + (files ? `  ·  📎 ${files}` : "");
   document.getElementById("previewFrame").srcdoc = html;
   document.getElementById("previewModalOverlay").style.display = "flex";
 }
@@ -2829,6 +2725,18 @@ function renderMDashboard(){
       </table>
     </div>
 
+    <div class="dash-table-wrap" id="mLateWrap">
+      <div style="display:flex;justify-content:space-between;align-items:flex-start;gap:12px;flex-wrap:wrap;margin-bottom:6px;">
+        <h3 style="margin:0;">⏰ Tickets en retard (non résolus, échéance dépassée)</h3>
+        <div style="display:flex;gap:8px;align-items:center;">
+          <label style="font-size:12.5px;color:var(--muted);">TOP <select id="mLateTopN"></select></label>
+          <button class="btn btn-outline" id="mLateXlsxBtn">⬇ Excel des retards</button>
+        </div>
+      </div>
+      <p class="hint" id="mLateMeta" style="margin:0 0 10px;"></p>
+      <div id="mLateBody"></div>
+    </div>
+
     <div class="charts-row">
       <div class="chart-card">
         <h3>Tendance ouverts/résolus/clos (12 mois)</h3>
@@ -3144,7 +3052,92 @@ async function refreshMoussanadaHeatmap(){
   } catch(e){
     card.style.display = "none";
   }
+  refreshMoussanadaLate();
   await refreshMoussanadaTicketAnalytics();
+}
+
+// Tickets en retard : situation actuelle (indépendante du mois affiché), d'après les tickets bruts importés.
+// Les techniciens cochés sont écartés du TOP de l'email uniquement ; l'Excel joint les contient tous.
+async function saveLateSettings(patch){
+  const cur = await (await fetch("/api/moussanada/settings")).json();
+  const late = Object.assign({top_n: 10, excluded_technicians: []}, cur.late_tickets || {}, patch);
+  const res = await fetch("/api/moussanada/settings", {
+    method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({late_tickets: late})
+  });
+  if(!res.ok){ toast("Modification réservée à l'administrateur"); return false; }
+  return true;
+}
+
+function lateRows(items, withExcluded){
+  return items.map(t=>`
+    <tr${withExcluded && t.excluded ? ' style="opacity:.45;"' : ""}>
+      <td>${esc(t.id)}</td>
+      <td>${esc(t.titre)}</td>
+      <td>${esc(t.technicien)}</td>
+      <td>${esc(t.priorite)}</td>
+      <td>${esc(t.echeance.slice(0,10))}</td>
+      <td style="font-weight:700;color:var(--danger);white-space:nowrap;">${esc(t.retard)}</td>
+    </tr>`).join("");
+}
+
+async function refreshMoussanadaLate(){
+  const body = document.getElementById("mLateBody");
+  if(!body) return;
+  const meta = document.getElementById("mLateMeta");
+  let d;
+  try{ d = await (await fetch("/api/moussanada/late-tickets")).json(); }
+  catch(e){ meta.textContent = ""; body.innerHTML = ""; return; }
+  const editable = currentUser && currentUser.role === "admin";
+  const sel = document.getElementById("mLateTopN");
+  sel.innerHTML = d.top_n_choices.map(n=>`<option value="${n}" ${n===d.top_n?"selected":""}>${n}</option>`).join("");
+  sel.disabled = !editable;
+  sel.onchange = async ()=>{ await saveLateSettings({top_n: parseInt(sel.value,10)}); refreshMoussanadaLate(); };
+  document.getElementById("mLateXlsxBtn").onclick = ()=>{ window.location.href = "/api/moussanada/late-tickets.xlsx"; };
+
+  if(!d.open_total && !d.total){
+    meta.textContent = "Aucun ticket brut importé : utilisez « Import tickets bruts » (Données sources) pour alimenter cette section.";
+    body.innerHTML = "";
+    return;
+  }
+  meta.textContent = `Situation au ${d.as_of} — ${d.total} ticket(s) en retard sur ${d.open_total} non résolus`
+    + (d.no_due ? ` (${d.no_due} sans échéance renseignée, non comptés)` : "") + ". Indépendant du mois sélectionné.";
+  if(!d.total){ body.innerHTML = `<p style="color:var(--success);font-weight:600;">Aucun ticket en retard à ce jour.</p>`; return; }
+
+  const techs = d.technicians.map(t=>`
+    <label class="email-section-check" style="display:inline-flex;margin:0 14px 6px 0;">
+      <input type="checkbox" data-late-tech="${esc(t.name)}" ${t.excluded?"checked":""} ${editable?"":"disabled"}>
+      ${esc(t.name)} <span style="color:var(--muted);">(${t.late})</span>
+    </label>`).join("");
+  body.innerHTML = `
+    <div class="kpi-grid" style="margin-bottom:14px;">
+      <div class="kpi-card danger"><div class="kpi-label">En retard</div><div class="kpi-value">${d.total}</div></div>
+      <div class="kpi-card"><div class="kpi-label">Retard moyen</div><div class="kpi-value">${d.avg_days.toFixed(1).replace(".",",")} j</div></div>
+      <div class="kpi-card danger"><div class="kpi-label">Retard maximal</div><div class="kpi-value">${d.max_days.toFixed(1).replace(".",",")} j</div></div>
+      <div class="kpi-card ${d.high?"danger":""}"><div class="kpi-label">Priorité haute</div><div class="kpi-value">${d.high}</div></div>
+    </div>
+    <div style="margin:0 0 12px;">
+      <div style="font-size:12.5px;font-weight:600;margin-bottom:6px;">Techniciens écartés du TOP de l'email${editable?"":" (lecture seule)"}</div>
+      ${techs}
+      <div class="hint" style="margin-top:2px;">Cocher un technicien retire ses tickets du TOP ${d.top_n} de l'email et de l'Excel (joint ou téléchargé).</div>
+    </div>
+    <h4 style="margin:10px 0 6px;font-size:13.5px;">TOP ${d.top_n} — tel qu'il figurera dans l'email${d.hidden ? ` <span style="font-weight:400;color:var(--muted);">(${d.hidden} ticket(s) écarté(s))</span>` : ""}</h4>
+    <table class="dash-table">
+      <thead><tr><th>N°</th><th>Titre</th><th>Technicien</th><th>Priorité</th><th>Échéance</th><th>Retard</th></tr></thead>
+      <tbody>${lateRows(d.top, false) || `<tr><td colspan="6" style="color:var(--muted);">Tous les tickets en retard appartiennent à des techniciens écartés.</td></tr>`}</tbody>
+    </table>
+    <details style="margin-top:12px;"><summary style="cursor:pointer;font-size:13px;font-weight:600;">Voir tous les tickets en retard (${d.total})</summary>
+      <table class="dash-table" style="margin-top:8px;">
+        <thead><tr><th>N°</th><th>Titre</th><th>Technicien</th><th>Priorité</th><th>Échéance</th><th>Retard</th></tr></thead>
+        <tbody>${lateRows(d.all, true)}</tbody>
+      </table>
+    </details>`;
+  body.querySelectorAll("input[data-late-tech]").forEach(cb=>{
+    cb.addEventListener("change", async ()=>{
+      const excluded = [...body.querySelectorAll("input[data-late-tech]:checked")].map(i=>i.dataset.lateTech);
+      await saveLateSettings({excluded_technicians: excluded});
+      refreshMoussanadaLate();
+    });
+  });
 }
 
 let mTypeChart = null, mDelayDistChart = null;
@@ -3200,24 +3193,11 @@ async function refreshMoussanadaTicketAnalytics(){
 document.getElementById("mPdfBtn").addEventListener("click", ()=>{
   downloadPdfFromServer(`/api/moussanada/export-pdf/${mState.ym}`, {charts: collectMoussanadaChartImages()}, `rapport_moussanada_${mState.ym}.pdf`);
 });
-document.getElementById("mOnePagerBtn").addEventListener("click", ()=>{
-  const cur = mMetricsFor(mState.ym);
-  const kpis = [
-    {label:"TICKETS OUVERTS", value: cur.ouverts},
-    {label:"TICKETS RÉSOLUS", value: cur.resolus, color:"#25935F"},
-    {label:"EN RETARD", value: cur.en_retard, color:"#DC2828"},
-    {label:"DÉLAI RÉSOLUTION", value: formatDH(cur.resolution_h)},
-  ];
-  const canvas = buildOnePagerCanvas(
-    `Support Moussanada — ${monthLabel(mState.ym)}`,
-    "Synthèse mensuelle — Helpdesk GLPI",
-    kpis,
-    [mCharts.volume?.canvas, mCharts.delay?.canvas]
-  );
-  downloadCanvas(canvas, `onepager_moussanada_${mState.ym}.png`);
-});
 document.getElementById("mXlsxBtn").addEventListener("click", ()=>{
   window.location.href = `/api/moussanada/export-xlsx/${mState.ym}`;
+});
+document.getElementById("mPptxBtn").addEventListener("click", ()=>{
+  window.location.href = `/api/moussanada/export-pptx/${mState.ym}`;
 });
 document.getElementById("mMailToggleBtn").addEventListener("click", ()=>{
   const panel = document.getElementById("mEmailPanel");
@@ -3287,7 +3267,7 @@ document.getElementById("mPreviewMailBtn").addEventListener("click", async ()=>{
     method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({to, cc, greeting, charts})
   });
   const data = await res.json();
-  openPreviewModal(data.subject, data.html);
+  openPreviewModal(data.subject, data.html, data.attachments);
 });
 document.getElementById("mConfirmSendBtn").addEventListener("click", async ()=>{
   const {to, cc} = getSelectedRecipients("mToCheckList","mCcCheckList");
@@ -3502,6 +3482,7 @@ document.getElementById("mImportRawTickets").addEventListener("change", async (e
       else toast("Import des tickets bruts réussi");
       notifyBrowser("Import terminé", `${r.rows} ticket(s) importé(s) sur Moussanada.`);
       refreshMoussanadaHeatmap();
+      refreshMoussanadaLate();
     } else {
       hint.textContent = "";
       toast(data.error || "Erreur d'import");
@@ -5027,6 +5008,8 @@ const EMAIL_SECTION_LABELS = {
     {key: "categories", label: "Catégories de demandes"},
     {key: "services", label: "Services les plus demandeurs"},
     {key: "team", label: "Charge de l'équipe SI"},
+    {key: "late", label: "Tickets en retard (TOP N)"},
+    {key: "late_xlsx", label: "Excel des tickets en retard en pièce jointe"},
     {key: "comparative", label: "Analyse comparative"},
     {key: "synth", label: "Synthèse finale"},
     {group: "Graphiques individuels (un graphique reste masqué si sa section l'est)"},

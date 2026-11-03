@@ -73,3 +73,9 @@ htmlcov/
 
 # References visuelles externes non utilisees par l'application
 /reference/nolvira/
+
+# Donnees et rapports d'exemple locaux
+/reference/glpi (1).csv
+/reference/rapport_tarkhiss_2026-10.pdf
+/mockups/charte_ammps/exemples/
+/mockups/charte_ammps/variante_*.pdf

@@ -35,6 +35,10 @@ import pchc_raw
 import pchc_excel
 import pchc_deliverables
 import tarkhiss_annual
+import ammps_charte
+import rapports_mensuels
+import retards
+import retards_xlsx
 import base64
 import subprocess
 import zipfile
@@ -1071,7 +1075,7 @@ def load_module_settings(module):
             "chart_weekly": True, "chart_problems": True,
         } if module == "tarkhiss" else {
             "volume": True, "delays": True, "categories": True, "services": True, "team": True,
-            "comparative": True, "synth": True,
+            "comparative": True, "synth": True, "late": True, "late_xlsx": True,
             "chart_volume": True, "chart_backlog": True, "chart_trend": True, "chart_cat": True,
             "chart_pareto": True, "chart_srv": True, "chart_techvol": True, "chart_tech": True, "chart_radar": True,
             "chart_delay": True,
@@ -1079,6 +1083,9 @@ def load_module_settings(module):
         # Libellés KPI personnalisés (surcharge de TARKHISS_DEFAULT_KPI_LABELS /
         # MOUSSANADA_DEFAULT_KPI_LABELS) — ex. {"tickets_retard": "Tickets en instance"}.
         "kpi_labels": {},
+        # Tickets en retard (Moussanada) : taille du TOP de l'email et techniciens dont les tickets
+        # sont écartés de ce TOP (l'Excel joint les contient tous).
+        "late_tickets": {"top_n": retards.DEFAULT_TOP_N, "excluded_technicians": []},
     }
     p = module_settings_file(module)
     if os.path.exists(p):
@@ -1151,9 +1158,10 @@ def append_send_log(module, entry):
     write_json_safely(send_log_file(module), log[:200])
 
 
-def new_draft_email(subject, to_list, cc_list, body_html):
+def new_draft_email(subject, to_list, cc_list, body_html, attachments=()):
     """Message HTML marqué « non envoyé » (X-Unsent: 1) : Outlook l'ouvre en brouillon, prêt à
-    être relu et envoyé, au lieu d'un message reçu en lecture seule."""
+    être relu et envoyé, au lieu d'un message reçu en lecture seule.
+    attachments = [(octets, type MIME, nom de fichier)]."""
     msg = EmailMessage()
     msg["Subject"] = subject
     msg["To"] = "; ".join(to_list)
@@ -1161,8 +1169,28 @@ def new_draft_email(subject, to_list, cc_list, body_html):
         msg["Cc"] = "; ".join(cc_list)
     msg["X-Unsent"] = "1"
     msg.set_content("Ce message nécessite un client compatible HTML.")
-    msg.add_alternative(body_html, subtype="html")
+    ammps_charte.inline_images(msg, body_html)
+    for data, mime, name in attachments:
+        maintype, subtype = mime.split("/", 1)
+        msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)
     return msg
+
+
+def monthly_attachments(module, module_settings):
+    """Pièces jointes de l'email mensuel : pour Moussanada, l'Excel des tickets en retard (gabarit AMMPS,
+    techniciens écartés exclus), si la section est active et qu'il reste des tickets à lister."""
+    if module != "moussanada":
+        return []
+    es = module_settings.get("email_sections", {})
+    if not (es.get("late", True) and es.get("late_xlsx", True)):
+        return []
+    tickets = load_raw_tickets()
+    if not tickets:
+        return []
+    v = retards.view(tickets, module_settings)
+    if not v["shown"]:
+        return []
+    return [(retards_xlsx.fill(v), retards_xlsx.MIME, retards_xlsx.filename(v["as_of"]))]
 
 
 def _is_wsl():
@@ -1241,9 +1269,7 @@ def system_reminder_check():
         if not to_list:
             results.append({"module": module, "sent": False, "reason": "aucun destinataire configuré"})
             continue
-        report_html, month_label = get_report_html_and_label(module, py, None, for_pdf=False)
-        greeting = settings.get("greeting", "Bonjour,")
-        body_html = build_email_body(month_label, report_html, greeting, settings, MODULES[module]["label"])
+        body_html, month_label = monthly_email(module, py, settings.get("greeting", "Bonjour,"), settings)
         subject = build_subject(module, month_label)
         msg = EmailMessage()
         msg["Subject"] = f"[Rappel automatique] {subject}"
@@ -1252,7 +1278,7 @@ def system_reminder_check():
         if cc_list:
             msg["Cc"] = "; ".join(cc_list)
         msg.set_content("Ce message nécessite un client compatible HTML.")
-        msg.add_alternative(body_html, subtype="html")
+        ammps_charte.inline_images(msg, body_html)
         ok, error = send_email_smtp(msg)
         if ok:
             append_send_log(module, {"date": today.isoformat(timespec="seconds"), "ym": py, "subject": subject, "to": to_list, "cc": cc_list, "opened": False, "auto": True})
@@ -1508,6 +1534,21 @@ def _filter_raw_tickets_period(tickets, start=None, end=None):
             return False
         return True
     return [t for t in tickets if in_range(t)] if (start or end) else tickets
+
+
+@app.route("/api/moussanada/late-tickets")
+def moussanada_late_tickets():
+    """Tickets en retard (non résolus, échéance TTR dépassée) d'après les tickets bruts importés :
+    TOP tel qu'il figurera dans l'email (techniciens exclus écartés) + liste complète."""
+    return jsonify(retards.to_json(retards.view(load_raw_tickets(), load_module_settings("moussanada"))))
+
+
+@app.route("/api/moussanada/late-tickets.xlsx")
+def moussanada_late_tickets_xlsx():
+    """Même classeur que la pièce jointe de l'email (gabarit AMMPS, techniciens écartés exclus)."""
+    v = retards.view(load_raw_tickets(), load_module_settings("moussanada"))
+    return send_file(io.BytesIO(retards_xlsx.fill(v)), as_attachment=True, download_name=retards_xlsx.filename(v["as_of"]),
+                     mimetype=retards_xlsx.MIME)
 
 
 @app.route("/api/moussanada/tickets-analytics")
@@ -2486,6 +2527,14 @@ def build_report_html_pchc(start, end, charts=None, for_pdf=False):
     return html
 
 
+def pchc_period_email(start, end, greeting, module_settings, charts=None):
+    """Corps d'email PCHC : modèle officiel si le classeur est importé, sinon rapport par période."""
+    if load_pchc_meta():
+        return pchc_email_parts(datetime.now(), greeting)[3]
+    report_html = build_report_html_pchc(start, end, charts)
+    return build_email_body(f"{start} au {end}", report_html, greeting, module_settings, "Reporting Métier (PCHC)")
+
+
 @app.route("/api/pchc/preview-email", methods=["POST"])
 def pchc_preview_email():
     payload = request.json or {}
@@ -2493,8 +2542,7 @@ def pchc_preview_email():
     end = payload.get("end") or pchc_default_period()[1]
     module_settings = load_module_settings("pchc")
     greeting = payload.get("greeting") or module_settings.get("greeting", "Bonjour,")
-    report_html = build_report_html_pchc(start, end, payload.get("charts"))
-    body_html = build_email_body(f"{start} au {end}", report_html, greeting, module_settings, "Reporting Métier (PCHC)")
+    body_html = pchc_period_email(start, end, greeting, module_settings, payload.get("charts"))
     subject = f"Rapport de Synthèse Reporting Métier PCHC - du {start} au {end}"
     return jsonify({"subject": subject, "html": body_html})
 
@@ -2509,8 +2557,7 @@ def pchc_send_email():
     to_list = payload.get("to") or [c["email"] for c in module_settings.get("contacts", []) if c.get("role") == "to"]
     cc_list = payload.get("cc") or [c["email"] for c in module_settings.get("contacts", []) if c.get("role") == "cc"]
 
-    report_html = build_report_html_pchc(start, end, payload.get("charts"))
-    body_html = build_email_body(f"{start} au {end}", report_html, greeting, module_settings, "Reporting Métier (PCHC)")
+    body_html = pchc_period_email(start, end, greeting, module_settings, payload.get("charts"))
     subject = f"Rapport de Synthèse Reporting Métier PCHC - du {start} au {end}"
 
     msg = new_draft_email(subject, to_list, cc_list, body_html)
@@ -2803,7 +2850,7 @@ def pchc_ctx(gen):
     label = pchc_deliverables.period_label(gen)
     return {"generated": gen, "period_label": label, "agency": gs.get("agency_name") or "AMMPS — DSID",
             "app_name": gs.get("app_name") or "SANAD", "title": "Reporting Métier PCHC – Plateforme Tarkhiss",
-            "subtitle": report_subtitle(gs, "pchc", label, label),
+            "subtitle": report_subtitle(gs, "pchc", label, label), "clean": strip_platform_mentions,
             "logo_path": os.path.join(UPLOAD_DIR, logo) if logo else None}
 
 
@@ -2857,7 +2904,7 @@ def pchc_eml_options():
     return flags, request.args.get("light") == "1"
 
 
-def pchc_email_parts(gen):
+def pchc_email_parts(gen, greeting=None):
     """Sujet, destinataires et corps HTML du .eml (identique à l'aperçu)."""
     meta = load_pchc_meta()
     if not meta:
@@ -2865,8 +2912,8 @@ def pchc_email_parts(gen):
     ms = load_module_settings("pchc")
     ctx = pchc_ctx(gen)
     comp = pchc_raw.pchc_compute(load_pchc_raw())
-    report = pchc_deliverables.summary_html(comp, meta, ctx, report_wrap_style(False))
-    body = build_email_body(ctx["period_label"], report, ms.get("greeting", "Bonjour,"), ms, "Reporting Métier (PCHC)")
+    body = strip_platform_mentions(pchc_deliverables.mail_html(comp, meta, ctx, greeting or ms.get("greeting", "Bonjour,"), rapports_mensuels.signature_parts(ms),
+                                                               rapports_mensuels.full_width(sys.modules[__name__])))
     subject = f"Reporting Métier PCHC – Plateforme Tarkhiss – {ctx['period_label']}"
     to_list = [c["email"] for c in ms.get("contacts", []) if c.get("role") == "to"]
     cc_list = [c["email"] for c in ms.get("contacts", []) if c.get("role") == "cc"]
@@ -3742,7 +3789,7 @@ def tarkhiss_annual_ctx(data, gen):
     agency = gs.get("agency_name") or "AMMPS — DSID"
     return {"title": title, "period_label": data["period_label"], "agency": agency, "generated": gen,
             "subtitle": f"{agency} — {MODULES['tarkhiss']['subtitle']} — {data['period_label']}",
-            "months_count": len(data["months"]), "logos_html": report_logos_html(gs),
+            "months_count": len(data["months"]), "logos_html": report_logos_html(gs), "clean": strip_platform_mentions,
             "logo_uri": logo_data_uri(logo), "logo_path": os.path.join(UPLOAD_DIR, logo) if logo else None}
 
 
@@ -3755,28 +3802,6 @@ def tarkhiss_annual_trend_png(data):
         "Bugs": [m["bugs"] for m in ms], "Demandes": [m["demandes"] for m in ms]}, "Tendance mensuelle", figsize=(9, 4)).read()
 
 
-def tarkhiss_month_metrics(ym):
-    """Éléments de l'envoi mensuel d'un mois (diapositives mensuelles du PPTX annuel)."""
-    calls = _load("tarkhiss", "calls", ym, {})
-    emails = _load("tarkhiss", "emails", ym, {})
-    an = _load("tarkhiss", "analysis", ym, empty_analysis(ym))
-    total_calls = sum((d.get("calls") or 0) for d in calls.values())
-    problems, demandes, weekly = an.get("problems", []) or [], an.get("demandes", []) or [], an.get("weekly", []) or []
-    tp, td = sum(p.get("count", 0) for p in problems), sum(d.get("count", 0) for d in demandes)
-    crit = max(weekly, key=lambda w: (w.get("bugs", 0) + w.get("demandes", 0))) if weekly else None
-    charts = server_report_charts("tarkhiss", ym)
-    png = lambda k: base64.b64decode(charts[k].split(",", 1)[1]) if charts.get(k) else None
-    return {"label": an.get("month_label") or month_label_fr(ym),
-            "kpis": {"received": sum((d.get("received") or 0) for d in emails.values()),
-                     "sent": sum((d.get("sent") or 0) for d in emails.values()), "calls": total_calls,
-                     "talk_time": format_hms(sum(duration_seconds(d) for d in calls.values())),
-                     "problems": tp, "demandes": td, "ratio": str(round(tp / td, 2) if td else 0).replace(".", ","),
-                     "critical_week": crit.get("week", "-") if crit else "-"},
-            "problems": problems, "demandes": demandes, "weekly": weekly,
-            "constats": an.get("constats", []) or [], "recommandations": an.get("recommandations", []) or [],
-            "chart_weekly": png("weekly"), "chart_problems": png("problems")}
-
-
 def build_tarkhiss_annual(fmt, start, end, gen=None):
     """Livrable annuel (pdf, pptx, xlsx) → (octets, type MIME, nom de fichier). Utilisé par les
     téléchargements ET par l'e-mail (aucune logique dupliquée)."""
@@ -3785,7 +3810,15 @@ def build_tarkhiss_annual(fmt, start, end, gen=None):
     ctx = tarkhiss_annual_ctx(data, gen)
     notes = load_annual_notes(start, end)
     base = f"Rapport_Tarkhiss_{start}_{end}"
+    if fmt in ("pdf", "pptx"):
+        months = [rapports_mensuels.tarkhiss_ctx(sys.modules[__name__], m["ym"]) for m in data["months"]]
+    if fmt == "pptx":
+        return tarkhiss_annual.build_pptx(ctx, data, months, notes), tarkhiss_annual.PPTX_MIME, base + ".pptx"
     if fmt == "pdf":
+        try:
+            return tarkhiss_annual.build_pdf(ctx, data, months, notes), "application/pdf", base + ".pdf"
+        except Exception as e:  # WeasyPrint absent ou en échec → ancien rapport (repli xhtml2pdf)
+            app.logger.exception("PDF annuel charte %s %s : %s", start, end, e)
         trend = tarkhiss_annual_trend_png(data)
         parts = [tarkhiss_annual.cover_html(ctx),
                  '<div class="pdf-break"></div>' + tarkhiss_annual.summary_html(
@@ -3795,9 +3828,6 @@ def build_tarkhiss_annual(fmt, start, end, gen=None):
             parts.append('<div class="pdf-break"></div>' + html)
         buf = render_pdf_bytes("".join(parts), header_label=f"{ctx['title']} — {ctx['period_label']}", cover=True, page_numbers=True)
         return buf.getvalue(), "application/pdf", base + ".pdf"
-    if fmt == "pptx":
-        months = [tarkhiss_month_metrics(m["ym"]) for m in data["months"]]
-        return tarkhiss_annual.build_pptx(ctx, data, months, tarkhiss_annual_trend_png(data), notes), tarkhiss_annual.PPTX_MIME, base + ".pptx"
     if fmt == "xlsx":
         import xlsxwriter
         buf = io.BytesIO()
@@ -3823,11 +3853,8 @@ def tarkhiss_annual_email(start, end, greeting=None):
     data = tarkhiss_annual_data("tarkhiss", start, end)
     ctx = tarkhiss_annual_ctx(data, datetime.now())
     ms = load_module_settings("tarkhiss")
-    trend = tarkhiss_annual_trend_png(data)
-    report = tarkhiss_annual.summary_html(data, ctx, ("data:image/png;base64," + base64.b64encode(trend).decode()) if trend else None,
-                                          report_wrap_style(False), load_annual_notes(start, end))
-    intro = f"Veuillez trouver ci-dessous la synthèse du support Tarkhiss sur la période {data['period_label']}."
-    body = build_email_body(data["period_label"], report, greeting or ms.get("greeting", "Bonjour,"), ms, "Tarkhiss", intro=intro)
+    body = strip_platform_mentions(tarkhiss_annual.mail_html(ctx, data, greeting or ms.get("greeting", "Bonjour,"), rapports_mensuels.signature_parts(ms), load_annual_notes(start, end),
+                                                             rapports_mensuels.full_width(sys.modules[__name__])))
     subject = f"Rapport de Synthèse du Support Tarkhiss - {data['period_label']}"
     return subject, body, ms
 
@@ -4303,12 +4330,13 @@ def build_email_body(month_label, report_html, greeting, module_settings, module
 
     wrap = "width:100%;margin:0;" if load_global_settings().get("email_full_width") else f"max-width:{EMAIL_MAX_WIDTH_PX}px;margin:0 auto;"
     intro = intro or f"Veuillez trouver ci-dessous le rapport mensuel du support {module_label} ({month_label})."
+    # Salutation et signature hors de la largeur du rapport, tout à gauche
     return strip_platform_mentions(f"""
-    <div style="{wrap}font-family:Arial,sans-serif;">
+    <div style="font-family:Arial,sans-serif;text-align:left;">
       <p style="font-size:14px;color:#0D1926;">{greeting}</p>
       <p style="font-size:14px;color:#0D1926;">{intro}</p>
-      {report_html}
-      <p style="font-size:13px;color:#0D1926;margin-top:22px;">Cordialement,{"<br>" + signature_html if signature_html else ""}</p>
+      <div style="{wrap}">{report_html}</div>
+      <p style="font-size:14px;color:#0D1926;margin-top:22px;">Cordialement,{"<br>" + signature_html if signature_html else ""}</p>
     </div>
     """)
 
@@ -4692,18 +4720,27 @@ def get_report_html_and_label(module, ym, charts=None, for_pdf=False, compact=Fa
     return build_report_html(module, ym, calls, emails, analysis, prev_calls, prev_emails, prev_analysis, charts, for_pdf=for_pdf, compact=compact), month_label
 
 
+def monthly_email(module, ym, greeting, module_settings, charts=None):
+    """(corps HTML, mois) : modèle charte AMMPS ; ancien rapport en secours si sa génération échoue."""
+    try:
+        return rapports_mensuels.monthly_mail(sys.modules[__name__], module, ym, greeting, module_settings)
+    except Exception as e:
+        app.logger.exception("Email charte %s %s : %s", module, ym, e)
+    report_html, month_label = get_report_html_and_label(module, ym, charts)
+    return build_email_body(month_label, report_html, greeting, module_settings, MODULES[module]["label"]), month_label
+
+
 @app.route("/api/<module>/preview-email/<ym>", methods=["POST"])
 def preview_email(module, ym):
     check_module(module)
     payload = request.json or {}
     module_settings = load_module_settings(module)
 
-    report_html, month_label = get_report_html_and_label(module, ym, payload.get("charts"))
     greeting = payload.get("greeting") or module_settings.get("greeting", "Bonjour,")
-
-    body_html = build_email_body(month_label, report_html, greeting, module_settings, MODULES[module]["label"])
+    body_html, month_label = monthly_email(module, ym, greeting, module_settings, payload.get("charts"))
     subject = build_subject(module, month_label)
-    return jsonify({"subject": subject, "html": body_html})
+    attachments = [{"name": name, "size": len(data)} for data, _, name in monthly_attachments(module, module_settings)]
+    return jsonify({"subject": subject, "html": body_html, "attachments": attachments})
 
 
 @app.route("/api/<module>/send-email/<ym>", methods=["POST"])
@@ -4712,15 +4749,15 @@ def send_email(module, ym):
     payload = request.json or {}
     module_settings = load_module_settings(module)
 
-    report_html, month_label = get_report_html_and_label(module, ym, payload.get("charts"))
     greeting = payload.get("greeting") or module_settings.get("greeting", "Bonjour,")
     to_list = payload.get("to") or [c["email"] for c in module_settings.get("contacts", []) if c.get("role") == "to"]
     cc_list = payload.get("cc") or [c["email"] for c in module_settings.get("contacts", []) if c.get("role") == "cc"]
 
-    body_html = build_email_body(month_label, report_html, greeting, module_settings, MODULES[module]["label"])
+    body_html, month_label = monthly_email(module, ym, greeting, module_settings, payload.get("charts"))
     subject = build_subject(module, month_label)
 
-    msg = new_draft_email(subject, to_list, cc_list, body_html)
+    attachments = monthly_attachments(module, module_settings)
+    msg = new_draft_email(subject, to_list, cc_list, body_html, attachments)
 
     fname = f"rapport_{module}_{ym}.eml"
     fpath = os.path.join(module_dir(module), "exports", fname)
@@ -4736,9 +4773,11 @@ def send_email(module, ym):
         "cc": cc_list,
         "opened": opened,
         "file": fname,
+        "attachments": [name for _, _, name in attachments],
     })
 
-    return jsonify({"ok": True, "file": fpath, "opened": opened, "error": error, "subject": subject})
+    return jsonify({"ok": True, "file": fpath, "opened": opened, "error": error, "subject": subject,
+                    "attachments": [name for _, _, name in attachments]})
 
 
 # ---------------------------------------------------------------------------
@@ -4817,10 +4856,24 @@ def render_pdf_bytes(inner_html, landscape=False, header_label=None, cover=False
 def export_pdf(module, ym):
     check_module(module)
     payload = request.json or {}
-    report_html, month_label = get_report_html_and_label(module, ym, payload.get("charts"), for_pdf=True)
-    header_label = f"{MODULES.get(module,{}).get('label', module)} — {month_label}"
-    buf = render_pdf_bytes(report_html, header_label=header_label)
+    try:
+        buf = io.BytesIO(rapports_mensuels.monthly_pdf(sys.modules[__name__], module, ym))
+    except Exception as e:  # WeasyPrint absent ou en échec → ancien rapport (repli xhtml2pdf)
+        app.logger.exception("PDF charte %s %s : %s", module, ym, e)
+        report_html, month_label = get_report_html_and_label(module, ym, payload.get("charts"), for_pdf=True)
+        header_label = f"{MODULES.get(module,{}).get('label', module)} — {month_label}"
+        buf = render_pdf_bytes(report_html, header_label=header_label)
     return send_file(buf, as_attachment=True, download_name=f"rapport_{module}_{ym}.pdf", mimetype="application/pdf")
+
+
+@app.route("/api/<module>/export-pptx/<ym>")
+def export_pptx(module, ym):
+    check_module(module)
+    if module not in ("tarkhiss", "moussanada"):
+        abort(404)
+    data = rapports_mensuels.monthly_pptx(sys.modules[__name__], module, ym)
+    log_audit("report_pptx_export", {"ym": ym, "size": len(data)}, module=module)
+    return send_file(io.BytesIO(data), as_attachment=True, download_name=f"rapport_{module}_{ym}.pptx", mimetype=pchc_deliverables.PPTX_MIME)
 
 
 @app.route("/api/pchc/export-pdf", methods=["POST"])

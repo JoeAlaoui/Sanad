@@ -1,7 +1,8 @@
 # -*- coding: utf-8 -*-
 """
 pchc_deliverables.py — Livrables du Reporting Métier PCHC : PPTX (16:9), PDF (A4 paysage, serveur),
-résumé HTML de l'e-mail et message .eml avec les 3 livrables en pièces jointes.
+corps de l'e-mail et message .eml avec les 3 livrables en pièces jointes. Modèle hybride : cadre de la
+charte AMMPS (ammps_charte) + paysage, tableau à gauche, graphique et constats à droite, couleur par volet.
 
 Toutes les valeurs viennent de pchc_raw.pchc_compute() (aucun calcul ici) : l'Excel, le PPTX, le PDF,
 l'e-mail et l'UI affichent donc exactement les mêmes chiffres.
@@ -9,19 +10,22 @@ l'e-mail et l'UI affichent donc exactement les mêmes chiffres.
 import base64
 import io
 import os
+import re
 from datetime import datetime
 from email.message import EmailMessage
 from email.utils import formatdate, make_msgid
 from html import escape as esc
 
+import ammps_charte as C
 import pchc_raw as R
 from pchc_excel import CAT_FILL, CAT_PT, TYPE_PAL, pt_colors
 
 PPTX_MIME = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 PDF_MIME = "application/pdf"
-NAVY = "1F4E79"
-INK, MUTED, LINE, SOFT = "1F2937", "5B6B7F", "D0D7E2", "F2F5F9"
+NAVY = C.hx(C.FOREST)
+RED = C.hx(C.RED)
+INK, MUTED, LINE, SOFT = C.hx(C.INK), C.hx(C.MUTED), C.hx(C.LINE), C.hx(C.PALE)
 VOYANT = {"🟢": ("2E8B57", "OK"), "🟡": ("F4B400", "Attention"), "🔴": ("D64541", "Critique"), "⚪ N/D": ("9AA5B1", "N/D")}
 ALERT_FILL = {"CRITIQUE": "FFCCCC", "ATTENTION": "FFE699", "OK": "C6EFCE", "N/D": "ECEFF3"}
 MOIS = ["janvier", "février", "mars", "avril", "mai", "juin", "juillet", "août", "septembre", "octobre", "novembre", "décembre"]
@@ -65,11 +69,8 @@ def _png(fig):
 
 
 def _plt():
-    import matplotlib
-    matplotlib.use("Agg")
-    import matplotlib.pyplot as plt
-    plt.rcParams.update({"font.family": "DejaVu Sans", "font.size": 9, "axes.edgecolor": "#B8C2CF",
-                         "axes.spines.top": False, "axes.spines.right": False})
+    plt = C.mpl()
+    plt.rcParams.update({"font.size": 9, "axes.edgecolor": "#B8C2CF", "axes.spines.top": False, "axes.spines.right": False})
     return plt
 
 
@@ -91,11 +92,11 @@ def chart_modules(comp, size=(7.2, 3.3)):
                 ax.text(i, bottom[i] + v / 2, f"{v:,}".replace(",", " "), ha="center", va="center", fontsize=7.5, color="white", fontweight="bold")
         bottom = [b + v for b, v in zip(bottom, vals)]
     for i, s in enumerate(syn):
-        ax.text(i, bottom[i] + top * 0.015, f"{s['taux'] * 100:.1f} %".replace(".", ","), ha="center", va="bottom", fontsize=8, color="#1F4E79", fontweight="bold")
+        ax.text(i, bottom[i] + top * 0.015, f"{s['taux'] * 100:.1f} %".replace(".", ","), ha="center", va="bottom", fontsize=8.5, color=C.FOREST, fontweight="bold")
     ax.set_ylim(0, top * 1.12)
-    ax.yaxis.set_major_formatter(plt.FuncFormatter(lambda x, _: f"{int(x):,}".replace(",", " ")))
-    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.1), ncol=3, frameon=False, fontsize=8)
-    ax.set_title("Dossiers par volet (taux de délivrance au-dessus)", fontsize=9.5, color="#1F4E79", loc="left")
+    ax.set_yticks([])
+    ax.spines["left"].set_visible(False)
+    ax.legend(loc="upper center", bbox_to_anchor=(0.5, -0.1), ncol=3, frameon=False, fontsize=8.5)
     return _png(fig)
 
 
@@ -202,236 +203,105 @@ def fmt_dt(iso):
         return "—"
 
 
+def keep_lines(comp):
+    t = comp["totals"]
+    return [f"{R.fmt_int(t['total'])} dossiers, {R.fmt_pct(t['taux'])} délivrés/validés.", f"{R.fmt_int(t['encours'])} dossiers en cours de traitement.",
+            f"{R.fmt_int(t['bloques'])} bloqués ou refusés.", f"{sum(1 for a in comp['alerts'] if 'CRITIQUE' in a['status'])} alerte(s) critique(s) sur {len(comp['alerts'])}."]
+
+
+def synth_rows(comp):
+    rows = [[r["module"], R.fmt_int(r["total"]), R.fmt_int(r["delivered"]), R.fmt_pct(r["taux"]), R.fmt_int(r["encours"]), "–" if r["bloques"] is None else R.fmt_int(r["bloques"]),
+             f"≥ {r['seuil_vert'] * 100:.0f} % / ≥ {r['seuil_orange'] * 100:.0f} %", "● " + voyant_info(r["voyant"])[1]] for r in comp["synthesis"]]
+    t = comp["totals"]
+    rows.append(["TOTAL", R.fmt_int(t["total"]), R.fmt_int(t["delivered"]), R.fmt_pct(t["taux"]), R.fmt_int(t["encours"]), R.fmt_int(t["bloques"]), "", ""])
+    return rows
+
+
+def alert_rows(comp):
+    out = []
+    for a in comp["alerts"]:
+        pf = a["type"] == "taux"
+        fmt = (lambda v: f"{v * 100:.0f} %") if pf else R.fmt_int
+        out.append([a["indicator"], a["module"], R.fmt_pct(a["value"]) if pf else R.fmt_int(a["value"]), fmt(a["warn"]), fmt(a["crit"]), "● " + ALERT_LABEL[alert_key(a["status"])], a["priority"].capitalize()])
+    return out
+
+
+SYN_HEAD = ["Module", "Total", "Délivrés / Validés", "Taux", "En cours*", "Bloqués / Refusés", "Seuils vert / orange", "Voyant"]
+ALERT_HEAD = ["Indicateur", "Module", "Valeur actuelle", "Seuil attention", "Seuil critique", "Statut", "Priorité"]
+NOTE_SYN = "* En cours = statuts de traitement + statuts non listés. Bloqués/Refusés = Non conforme + Irrecevable + Rejeté."
+NOTE_ALERT = "Seuils : « taux » → alerte si la valeur est inférieure au seuil ; « nombre » → supérieure. Seuils = paramètres du classeur."
+CARD_BG = {"ok": "C6EFCE", "info": "E4EEF9", "bad": "FFCCCC"}
+SUBTITLE = "Plateforme Tarkhiss — Produits Cosmétiques et d’Hygiène Corporelle"
+
+
+def no_emoji(line):
+    return line.replace("🟢", "vert").replace("🟡", "orange").replace("🔴", "rouge").replace("⚪ ", "")
+
+
+def module_subtitle(m, mod):
+    unit = "opérateurs" if m["key"] == "identification" else "dossiers"
+    return f"Feuille « {m['sheet']} » — {R.fmt_int(mod['total'])} {unit} · voyant {voyant_info(mod['voyant'])[1]}"
+
+
 # ----------------------------------------------------------------------------- PPTX
 def build_pptx(comp, meta, ctx):
     """Présentation 16:9 : garde, synthèse, chiffres clés & alertes, une section par KPI, méthodologie."""
-    from pptx import Presentation
-    from pptx.dml.color import RGBColor
-    from pptx.enum.shapes import MSO_SHAPE
-    from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
-    from pptx.util import Emu, Inches, Pt
-
-    prs = Presentation()
-    prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
-    W, H = prs.slide_width, prs.slide_height
-    blank = prs.slide_layouts[6]
     gen = ctx["generated"]
-    footer_txt = f"{ctx.get('agency', 'AMMPS — DSID')} · Reporting Métier PCHC · généré le {gen.strftime('%d/%m/%Y')}"
+    label = ctx["period_label"].capitalize()
+    d = C.Deck("Reporting Métier PCHC", label, f"AMMPS · Reporting Métier PCHC — {label}", ctx.get("clean"))
+    d.cover("Revue de direction", "Reporting Métier", "PCHC", SUBTITLE, [("Période", label), ("Situation au", fmt_dt(meta.get("imported_at")) if meta else "—")],
+            stripe=[m["theme"] for m in R.MODULES])
 
-    def rgb(h):
-        return RGBColor.from_string(h)
-
-    def rect(slide, x, y, w, h, color, line=None, shape=MSO_SHAPE.RECTANGLE):
-        s = slide.shapes.add_shape(shape, x, y, w, h)
-        s.fill.solid()
-        s.fill.fore_color.rgb = rgb(color)
-        if line:
-            s.line.color.rgb = rgb(line)
-            s.line.width = Pt(0.75)
-        else:
-            s.line.fill.background()
-        s.shadow.inherit = False
-        return s
-
-    def text(slide, x, y, w, h, value, size=12, bold=False, color=INK, align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.TOP, italic=False):
-        tb = slide.shapes.add_textbox(x, y, w, h)
-        tf = tb.text_frame
-        tf.word_wrap = True
-        tf.vertical_anchor = anchor
-        tf.margin_left = tf.margin_right = Inches(0.05)
-        tf.margin_top = tf.margin_bottom = Inches(0.02)
-        lines = value if isinstance(value, list) else [value]
-        for i, line in enumerate(lines):
-            p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-            p.alignment = align
-            r = p.add_run()
-            r.text = str(line)
-            r.font.size = Pt(size)
-            r.font.bold = bold
-            r.font.italic = italic
-            r.font.name = "Calibri"
-            r.font.color.rgb = rgb(color)
-        return tb
-
-    def header(slide, title, subtitle, theme):
-        rect(slide, 0, 0, W, Inches(0.95), theme)
-        rect(slide, 0, Inches(0.95), W, Inches(0.06), light_hex(theme, 0.55))
-        text(slide, Inches(0.45), Inches(0.12), Inches(10.5), Inches(0.5), title, 24, True, "FFFFFF")
-        text(slide, Inches(0.45), Inches(0.57), Inches(11), Inches(0.35), subtitle, 11.5, False, light_hex(theme, 0.75))
-
-    def table(slide, x, y, w, col_w, rows, header_row, theme, font=10, row_h=0.28, fills=None, aligns=None, bold_last=False):
-        nrows, ncols = len(rows) + 1, len(header_row)
-        shape = slide.shapes.add_table(nrows, ncols, x, y, w, Inches(row_h * nrows))
-        tbl = shape.table
-        tbl.first_row = True
-        tbl.horz_banding = False
-        total = sum(col_w)
-        for i, cw in enumerate(col_w):
-            tbl.columns[i].width = Emu(int(w * cw / total))
-        for r in range(nrows):
-            tbl.rows[r].height = Inches(row_h)
-        for r, row in enumerate([header_row] + rows):
-            for c in range(ncols):
-                cell = tbl.cell(r, c)
-                cell.margin_left = cell.margin_right = Inches(0.06)
-                cell.margin_top = cell.margin_bottom = Inches(0.01)
-                cell.vertical_anchor = MSO_ANCHOR.MIDDLE
-                val = row[c] if c < len(row) else ""
-                tf = cell.text_frame
-                tf.word_wrap = True
-                p = tf.paragraphs[0]
-                p.alignment = (aligns[c] if aligns else (PP_ALIGN.LEFT if c == 0 else PP_ALIGN.CENTER))
-                run = p.add_run()
-                run.text = str(val)
-                run.font.size = Pt(font)
-                run.font.name = "Calibri"
-                run.font.bold = r == 0 or (bold_last and r == nrows - 1)
-                run.font.color.rgb = rgb("FFFFFF" if r == 0 else INK)
-                cell.fill.solid()
-                if r == 0:
-                    cell.fill.fore_color.rgb = rgb(theme)
-                else:
-                    f = fills(r - 1, c) if fills else None
-                    cell.fill.fore_color.rgb = rgb(f or ("FFFFFF" if r % 2 else "F8FAFC"))
-        return shape
-
-    def cards(slide, items, x, y, w, h, value_size=20, theme=NAVY):
-        gap = Inches(0.12)
-        cw = int((w - gap * (len(items) - 1)) / len(items))
+    def cards(s, items, y, h, vs, theme):
+        gap, w = .12, 12.43
+        cw = (w - gap * (len(items) - 1)) / len(items)
         for i, (lab, val, bg) in enumerate(items):
-            cx = x + i * (cw + gap)
-            rect(slide, cx, y, cw, h, bg, line=LINE, shape=MSO_SHAPE.ROUNDED_RECTANGLE).adjustments[0] = 0.08
-            text(slide, cx, y + Inches(0.06), cw, Inches(0.3), lab.upper(), 8.5, True, MUTED, PP_ALIGN.CENTER)
-            text(slide, cx, y + Inches(0.3), cw, h - Inches(0.34), val, value_size, True, theme, PP_ALIGN.CENTER, MSO_ANCHOR.MIDDLE)
+            cx = .45 + i * (cw + gap)
+            d.rect(s, cx, y, cw, h, bg, LINE, True)
+            d.text(s, cx, y + .06, cw, .25, lab.upper(), 8.5, True, MUTED, "c")
+            d.text(s, cx, y + .3, cw, h - .34, val, vs, True, theme, "c", "m")
 
-    def picture(slide, png, x, y, w=None, h=None):
-        slide.shapes.add_picture(io.BytesIO(png), x, y, width=w, height=h)
-
-    def bullets(slide, x, y, w, h, title, lines, theme, size=11):
-        rect(slide, x, y, w, h, light_hex(theme, 0.9), line=light_hex(theme, 0.6))
-        rect(slide, x, y, Inches(0.07), h, theme)
-        text(slide, x + Inches(0.15), y + Inches(0.06), w - Inches(0.2), Inches(0.3), title, 11, True, theme)
-        text(slide, x + Inches(0.15), y + Inches(0.36), w - Inches(0.25), h - Inches(0.4), [f"• {l}" for l in lines], size, False, INK)
-
-    slides_meta = []
-
-    # 1. Page de garde
-    s = prs.slides.add_slide(blank)
-    rect(s, 0, 0, W, H, NAVY)
-    rect(s, 0, Inches(4.95), W, Inches(0.08), "2E75B6")
-    stripe = [m["theme"] for m in R.MODULES]
-    for i, col in enumerate(stripe):
-        rect(s, Inches(0.8 + i * 0.5), Inches(1.35), Inches(0.42), Inches(0.1), col if col != NAVY else "8FAADC")
-    text(s, Inches(0.8), Inches(1.7), Inches(11.5), Inches(1.0), ctx.get("title") or "Reporting Métier PCHC – Plateforme Tarkhiss", 36, True, "FFFFFF")
-    text(s, Inches(0.8), Inches(2.75), Inches(11.5), Inches(0.5), "Revue de direction — Produits Cosmétiques et d'Hygiène Corporelle", 17, False, "BDD7EE")
-    text(s, Inches(0.8), Inches(3.55), Inches(11.5), Inches(0.9),
-         [f"Période : {ctx['period_label']}", f"Situation des dossiers au {fmt_dt(meta.get('imported_at')) if meta else '—'}"], 14, False, "FFFFFF")
-    text(s, Inches(0.8), Inches(5.3), Inches(8), Inches(0.9), [ctx.get("agency") or "AMMPS — DSID", f"Document généré le {gen.strftime('%d/%m/%Y à %H:%M')}"], 13, False, "D6DCE4")
-    if ctx.get("logo_path") and os.path.isfile(ctx["logo_path"]) and not ctx["logo_path"].lower().endswith(".svg"):
-        try:
-            badge = rect(s, Inches(10.35), Inches(5.25), Inches(2.3), Inches(1.4), "FFFFFF", shape=MSO_SHAPE.ROUNDED_RECTANGLE)
-            badge.adjustments[0] = 0.1
-            s.shapes.add_picture(ctx["logo_path"], Inches(10.5), Inches(5.35), height=Inches(1.2))
-        except Exception:
-            pass
-    slides_meta.append(None)
-
-    # 2. Synthèse exécutive
-    s = prs.slides.add_slide(blank)
-    header(s, "Synthèse exécutive", f"Situation par volet — {ctx['period_label']}", NAVY)
-    rows = []
-    for r in comp["synthesis"]:
-        rows.append([r["module"], R.fmt_int(r["total"]), R.fmt_int(r["delivered"]), R.fmt_pct(r["taux"]),
-                     R.fmt_int(r["encours"]), "–" if r["bloques"] is None else R.fmt_int(r["bloques"]),
-                     f"≥ {r['seuil_vert'] * 100:.0f} % / ≥ {r['seuil_orange'] * 100:.0f} %", "● " + voyant_info(r["voyant"])[1]])
-    t = comp["totals"]
-    rows.append(["TOTAL", R.fmt_int(t["total"]), R.fmt_int(t["delivered"]), R.fmt_pct(t["taux"]), R.fmt_int(t["encours"]), R.fmt_int(t["bloques"]), "", ""])
     syn = comp["synthesis"]
+    p = d.band("Synthèse exécutive", f"Situation par volet — {label}", NAVY)
+    d.table(p, .45, 1.18, 12.43, [3.3, 1.2, 1.4, 1.2, 1.2, 1.4, 1.8, 1.3], SYN_HEAD, synth_rows(comp), font=11, row_h=.36, bolds=lambda r, c: r == len(syn),
+            fills=lambda r, c: "D9E2F3" if r == len(syn) else (light_hex(voyant_info(syn[r]["voyant"])[0], .7) if c == 7 else None))
+    d.text(p, .45, 3.72, 12.4, .28, NOTE_SYN, 8.5, False, MUTED, italic=True)
+    d.pic(p, chart_modules(comp, (8.6, 2.9)), .45, 4.02, 8.2, 2.9)
+    d.bullets(p, 8.95, 4.1, 3.93, 2.3, "À retenir", keep_lines(comp), 11.5, NAVY)
 
-    def syn_fill(r, c):
-        if r == len(syn):
-            return "D9E2F3"
-        if c == 7:
-            return light_hex(voyant_info(syn[r]["voyant"])[0], 0.7)
-        return None
-    table(s, Inches(0.45), Inches(1.25), Inches(12.4), [3.3, 1.2, 1.4, 1.2, 1.2, 1.4, 1.8, 1.3],
-          rows, ["Module", "Total", "Délivrés / Validés", "Taux", "En cours*", "Bloqués / Refusés", "Seuils vert / orange", "Voyant"],
-          NAVY, font=11, row_h=0.36, fills=syn_fill, bold_last=True)
-    picture(s, chart_modules(comp, size=(8.6, 2.9)), Inches(0.45), Inches(4.2), h=Inches(2.75))
-    bullets(s, Inches(8.95), Inches(4.25), Inches(3.9), Inches(2.0), "À retenir",
-            [f"{R.fmt_int(t['total'])} dossiers, {R.fmt_pct(t['taux'])} délivrés/validés.",
-             f"{R.fmt_int(t['encours'])} dossiers en cours de traitement.",
-             f"{R.fmt_int(t['bloques'])} bloqués ou refusés.",
-             f"{sum(1 for a in comp['alerts'] if 'CRITIQUE' in a['status'])} alerte(s) critique(s) sur {len(comp['alerts'])}."], NAVY, 11)
-    text(s, Inches(0.45), Inches(3.85), Inches(12), Inches(0.3), "* En cours = statuts de traitement + statuts non listés. Bloqués/Refusés = Non conforme + Irrecevable + Rejeté.", 8.5, False, MUTED, italic=True)
-    slides_meta.append(NAVY)
-
-    # 3. Chiffres clés + points d'alerte
-    s = prs.slides.add_slide(blank)
-    header(s, "Chiffres clés & points d'alerte", "Résumé décisionnel — actions requises", NAVY)
-    card_bg = {"ok": "C6EFCE", "info": "E4EEF9", "bad": "FFCCCC"}
-    cards(s, [(c["label"].title(), R.fmt_int(c["value"]), card_bg[c["kind"]]) for c in comp["cards"]],
-          Inches(0.45), Inches(1.2), Inches(12.4), Inches(1.15), 24)
-    arows = []
-    for a in comp["alerts"]:
-        pctf = a["type"] == "taux"
-        fmt = (lambda v: f"{v * 100:.0f} %") if pctf else R.fmt_int
-        arows.append([a["indicator"], a["module"], R.fmt_pct(a["value"]) if pctf else R.fmt_int(a["value"]),
-                      fmt(a["warn"]), fmt(a["crit"]), "● " + ALERT_LABEL[alert_key(a["status"])], a["priority"]])
+    p = d.band("Chiffres clés & points d’alerte", "Résumé décisionnel — actions requises", NAVY)
+    cards(p, [(c["label"].title(), R.fmt_int(c["value"]), CARD_BG[c["kind"]]) for c in comp["cards"]], 1.18, 1.15, 24, NAVY)
     al = comp["alerts"]
-    table(s, Inches(0.45), Inches(2.6), Inches(12.4), [3.6, 1.4, 1.5, 1.5, 1.5, 1.6, 1.3], arows,
-          ["Indicateur", "Module", "Valeur actuelle", "Seuil attention", "Seuil critique", "Statut", "Priorité"], "C00000",
-          font=10.5, row_h=0.36, fills=lambda r, c: ALERT_FILL[alert_key(al[r]["status"])] if c >= 5 else None)
-    text(s, Inches(0.45), Inches(6.35), Inches(12.4), Inches(0.4), "Seuils : « taux » → alerte si la valeur est INFÉRIEURE au seuil ; « nombre » → SUPÉRIEURE. Seuils = paramètres du classeur (en bleu dans l'Excel).", 9, False, MUTED, italic=True)
-    slides_meta.append(NAVY)
+    d.table(p, .45, 2.5, 12.43, [3.6, 1.4, 1.5, 1.5, 1.5, 1.6, 1.3], ALERT_HEAD, alert_rows(comp), RED, 10.5, .36, fills=lambda r, c: ALERT_FILL[alert_key(al[r]["status"])] if c >= 5 else None)
+    d.text(p, .45, 6.2, 12.4, .3, NOTE_ALERT, 9, False, MUTED, italic=True)
 
-    # 4. Une section par KPI
     for m in R.MODULES:
         mod = comp["modules"][m["key"]]
         th = m["theme"]
-        s = prs.slides.add_slide(blank)
-        header(s, f"KPI {m['label']}", f"Feuille « {m['sheet']} » — {R.fmt_int(mod['total'])} {'opérateurs' if m['key'] == 'identification' else 'dossiers'} · voyant {voyant_info(mod['voyant'])[1]}", th)
-        cards(s, key_indicators(mod), Inches(0.45), Inches(1.18), Inches(12.4), Inches(0.95), 18, th)
+        p = d.band(f"KPI {m['label']}", module_subtitle(m, mod), th)
+        cards(p, key_indicators(mod), 1.18, .95, 18, th)
         rows = status_table_rows(mod)
+        n = len(rows)
+        last = lambda r, c, n=n: r == n - 1
+        fills = lambda r, c, rows=rows: rows[r][4] if c in (0, 3) else None
+        head = ["Statut", "Nombre", "%", "Catégorie"]
         if m["key"] == "identification":
-            trows = [[t["label"], R.fmt_int(t["count"]), R.fmt_pct(t["pct"])] for t in mod["types"]]
-            trows.append(["TOTAL", R.fmt_int(mod["types_total"]), R.fmt_pct(1 if mod["types_total"] else 0)])
-            table(s, Inches(0.45), Inches(2.35), Inches(6.1), [3.2, 1.0, 1.0, 1.4], [r[:4] for r in rows],
-                  ["Statut", "Nombre", "%", "Catégorie"], th, font=10.5, row_h=0.32,
-                  fills=lambda r, c, rows=rows: rows[r][4] if c in (0, 3) else None, bold_last=True)
-            table(s, Inches(0.45), Inches(3.85), Inches(6.1), [3.8, 1.0, 1.0], trows, ["Type d'opérateur", "Nombre", "%"], th,
-                  font=10.5, row_h=0.32, fills=lambda r, c, n=len(trows): "D9E2F3" if r == n - 1 else None, bold_last=True)
+            ty = [[x["label"], R.fmt_int(x["count"]), R.fmt_pct(x["pct"])] for x in mod["types"]]
+            ty.append(["TOTAL", R.fmt_int(mod["types_total"]), R.fmt_pct(1 if mod["types_total"] else 0)])
+            d.table(p, .45, 2.35, 6.1, [3.2, 1, 1, 1.4], head, [r[:4] for r in rows], th, 10.5, .32, fills=fills, bolds=last)
+            d.table(p, .45, 3.85, 6.1, [3.8, 1, 1], ["Type d'opérateur", "Nombre", "%"], ty, th, 10.5, .32, fills=lambda r, c, k=len(ty): "D9E2F3" if r == k - 1 else None, bolds=lambda r, c, k=len(ty): r == k - 1)
         else:
-            rh = min(0.3, 4.1 / (len(rows) + 1))
-            table(s, Inches(0.45), Inches(2.35), Inches(6.1), [3.0, 1.0, 1.0, 1.3], [r[:4] for r in rows],
-                  ["Statut", "Nombre", "%", "Catégorie"], th, font=10 if len(rows) > 12 else 10.5, row_h=rh,
-                  fills=lambda r, c, rows=rows: rows[r][4] if c in (0, 3) else None, bold_last=True)
-        picture(s, module_chart(mod), Inches(6.8), Inches(2.3), w=Inches(6.05))
-        bullets(s, Inches(6.8), Inches(5.55), Inches(6.05), Inches(1.3), "Constats", comp["insights"][m["key"]], th, 10.5)
-        slides_meta.append(th)
+            d.table(p, .45, 2.35, 6.1, [3, 1, 1, 1.3], head, [r[:4] for r in rows], th, 10 if n > 12 else 10.5, min(.3, 4.5 / (n + 1)), fills=fills, bolds=last)
+        d.pic(p, module_chart(mod), 6.8, 2.3, 6.08, 3.15)
+        d.bullets(p, 6.8, 5.5, 6.08, 1.42, "Constats", comp["insights"][m["key"]], 10.5, th, light_hex(th, .9))
 
-    # 5. Méthodologie & qualité des données
-    s = prs.slides.add_slide(blank)
-    header(s, "Méthodologie & qualité des données", "Sources, contrôles, coquilles normalisées, hypothèses des seuils", NAVY)
     md = methodology(comp, meta, gen)
-    bullets(s, Inches(0.45), Inches(1.2), Inches(6.15), Inches(2.85), "Sources", md["sources"], NAVY, 9.5)
-    bullets(s, Inches(6.75), Inches(1.2), Inches(6.1), Inches(2.85), "Contrôles", md["controls"][:8], NAVY, 9.5)
-    bullets(s, Inches(0.45), Inches(4.2), Inches(6.15), Inches(2.65), "Coquilles normalisées & statuts non référencés",
-            md["typos"] + md["unknown"], NAVY, 9.5)
-    bullets(s, Inches(6.75), Inches(4.2), Inches(6.1), Inches(2.65), "Hypothèses des seuils", md["hypotheses"], NAVY, 9)
-    slides_meta.append(NAVY)
-
-    # Pied de page + numéros (sauf page de garde)
-    n = len(prs.slides)
-    for i, (slide, theme) in enumerate(zip(prs.slides, slides_meta), start=1):
-        if theme is None:
-            continue
-        rect(slide, Inches(0.45), Inches(7.02), Inches(12.4), Emu(9525), LINE)
-        text(slide, Inches(0.45), Inches(7.07), Inches(10.5), Inches(0.3), footer_txt, 8.5, False, MUTED)
-        text(slide, Inches(11.35), Inches(7.07), Inches(1.5), Inches(0.3), f"{i} / {n}", 9, True, theme, PP_ALIGN.RIGHT)
-    buf = io.BytesIO()
-    prs.save(buf)
-    return buf.getvalue()
+    p = d.band("Méthodologie & qualité des données", "Sources, contrôles, coquilles normalisées, hypothèses des seuils", NAVY)
+    d.bullets(p, .45, 1.18, 6.15, 3.15, "Sources", md["sources"], 9, NAVY)
+    d.bullets(p, 6.73, 1.18, 6.15, 2.25, "Contrôles", md["controls"][:8], 9, NAVY)
+    d.bullets(p, .45, 4.43, 6.15, 2.48, "Coquilles normalisées & statuts non référencés", md["typos"] + md["unknown"], 9, NAVY)
+    d.bullets(p, 6.73, 3.53, 6.15, 3.38, "Hypothèses des seuils", [no_emoji(h) for h in md["hypotheses"]], 8.5, NAVY)
+    return d.finish()
 
 
 # ----------------------------------------------------------------------------- PDF (HTML → WeasyPrint)
@@ -506,7 +376,7 @@ def alerts_table_html(comp, font=10.5):
         rows.append([esc(a["indicator"]), esc(a["module"]), R.fmt_pct(a["value"]) if pctf else R.fmt_int(a["value"]),
                      fmt(a["warn"]), fmt(a["crit"]), f"<b>{ALERT_LABEL[k]}</b>", a["priority"]])
     return _table(["Indicateur", "Module", "Valeur actuelle", "Seuil attention", "Seuil critique", "Statut", "Priorité"],
-                  rows, "C00000", [30, 12, 13, 12, 12, 11, 10], font=font,
+                  rows, RED, [30, 12, 13, 12, 12, 11, 10], font=font,
                   fills=lambda r, c: ALERT_FILL[alert_key(al[r]["status"])] if c >= 5 else None)
 
 
@@ -574,30 +444,76 @@ def report_html(comp, meta, ctx):
     return pages
 
 
+MIX_CSS = f"""
+@page {{ size:A4 landscape; margin:23mm 13mm 14mm; }}
+@page cover {{ margin:0; }}
+.cover {{ height:209.5mm; }}
+.cv-top {{ padding:9mm 20mm 0; }} .cv-top img {{ height:24mm; }} .cv-rule {{ margin:5mm 0 0; }} .cv-main {{ padding:15mm 20mm 0; }}
+.cv-meta {{ margin-top:8mm; }} .cv-foot {{ padding:6mm 20mm; }}
+.stripe {{ margin:8pt 0 6pt; }} .stripe span {{ display:inline-block; width:27pt; height:5pt; margin-right:5pt; }}
+.pg {{ break-before:page; }}
+.band {{ display:flex; align-items:center; gap:9pt; color:#fff; padding:6pt 11pt; border-radius:4pt; margin-bottom:7pt; }}
+.bi {{ width:22pt; height:22pt; flex:none; border-radius:4pt; background:rgba(255,255,255,.2); font:700 9pt/22pt Montserrat; text-align:center; }}
+.bt {{ font:700 14pt/1.15 Montserrat; }} .bs {{ font-size:8.2pt; opacity:.9; }}
+.split {{ display:grid; grid-template-columns:49fr 51fr; gap:11pt; }}
+.split img {{ width:100%; display:block; }}
+.syn {{ display:grid; grid-template-columns:66fr 34fr; gap:11pt; margin-top:6pt; align-items:start; }} .syn img {{ width:100%; display:block; }}
+.nt {{ font-size:7.2pt; color:{C.MUTED}; font-style:italic; margin-top:3pt; }}
+table {{ break-inside:avoid; }}
+.rh td, .rh th {{ height:var(--rh); vertical-align:middle; }}
+.cw {{ margin:0 -4px; }}
+"""
+
+
+def charte_pdf(comp, meta, ctx):
+    gen = ctx["generated"]
+    label = ctx["period_label"].capitalize()
+    uri = C.data_uri
+    cards = lambda items, th, size: '<div class="cw">' + _cards_html(items, th, size).replace("margin:0 -4px 10px", "margin:0 0 10px") + "</div>"
+    band = lambda n, t, sub, th: f'<div class="band" style="background:#{th}"><span class="bi">{n:02d}</span><div><div class="bt">{esc(t)}</div><div class="bs">{esc(sub)}</div></div></div>'
+    stripe = '<div class="stripe">' + "".join(f'<span style="background:#{m["theme"]}"></span>' for m in R.MODULES) + "</div>"
+    body = C.cover("Reporting Métier", "PCHC", SUBTITLE, [("Période", label), ("Situation au", fmt_dt(meta.get("imported_at")) if meta else "—"), ("Édition", gen.strftime("%d/%m/%Y"))],
+                   "Revue de direction", stripe) + C.head_html("Reporting Métier PCHC", label)
+    body += (f'<div class="pg">{band(1, "Synthèse exécutive", f"Situation par volet — {label}", NAVY)}<div class="rh" style="--rh:25px">{synthesis_table_html(comp, 12)}</div><div class="nt">{esc(NOTE_SYN)}</div>'
+             f'<div class="syn"><div><img src="{uri(chart_modules(comp, (8.6, 3.2)))}"></div><div>{_box("À retenir", keep_lines(comp), NAVY, 12.5)}</div></div></div>')
+    alerts = re.sub(r">(HAUTE|MOYENNE|BASSE)<", lambda x: f">{x.group(1).capitalize()}<", alerts_table_html(comp, 13))
+    body += (f'<div class="pg">{band(2, "Chiffres clés & points d’alerte", "Résumé décisionnel — actions requises", NAVY)}'
+             + cards([(c["label"], R.fmt_int(c["value"]), CARD_BG[c["kind"]]) for c in comp["cards"]], NAVY, 22)
+             + f'<div class="rh" style="--rh:32px">{alerts}</div><div class="nt">{esc(NOTE_ALERT)}</div></div>')
+    for i, m in enumerate(R.MODULES, 3):
+        mod = comp["modules"][m["key"]]
+        th = m["theme"]
+        rows = status_table_rows(mod)
+        tr = [[esc(r[0]), r[1], r[2], esc(r[3])] for r in rows]
+        tbl = _table(["Statut", "Nombre", "%", "Catégorie"], tr, th, [46, 16, 16, 22], font=12, fills=lambda r, c, rows=rows: rows[r][4] if c in (0, 3) else None, bold_last=True)
+        ident = m["key"] == "identification"
+        if ident:
+            ty = [[esc(x["label"]), R.fmt_int(x["count"]), R.fmt_pct(x["pct"])] for x in mod["types"]]
+            ty.append(["TOTAL", R.fmt_int(mod["types_total"]), R.fmt_pct(1 if mod["types_total"] else 0)])
+            tbl += '<div style="height:8px"></div>' + _table(["Type d'opérateur", "Nombre", "%"], ty, th, [62, 19, 19], font=12, bold_last=True, fills=lambda r, c, n=len(ty): "D9E2F3" if r == n - 1 else None)
+        nb = len(rows) + 1 + (len(mod["types"]) + 2 if ident else 0)
+        chart = chart_types(mod, (6.4, 4.1)) if ident else chart_status(mod, (6.4, 4.5))
+        body += (f'<div class="pg">{band(i, "KPI " + m["label"], module_subtitle(m, mod), th)}' + cards(key_indicators(mod), th, 17)
+                 + f'<div class="split"><div class="rh" style="--rh:{min(27, 440 // nb - 9)}px">{tbl}</div><div><img src="{uri(chart)}">'
+                 + _box("Constats", comp["insights"][m["key"]], th, 11.5) + "</div></div></div>")
+    md = methodology(comp, meta, gen)
+    n = len(R.MODULES) + 3
+    body += (f'<div class="pg">{band(n, "Méthodologie & qualité des données", "Sources, contrôles, coquilles normalisées, hypothèses des seuils", NAVY)}<div class="split" style="grid-template-columns:1fr 1fr">'
+             f'<div>{_box("Sources", md["sources"], NAVY, 10.5)}{_box("Coquilles normalisées & statuts non référencés", md["typos"] + md["unknown"], NAVY, 10.5)}</div>'
+             f'<div>{_box("Contrôles", md["controls"], NAVY, 10.5)}{_box("Hypothèses des seuils", [no_emoji(h) for h in md["hypotheses"]], NAVY, 10.5)}</div></div></div>')
+    return C.render_pdf("Reporting Métier PCHC", "Reporting Métier PCHC", label, ctx.get("clean", str)(body), MIX_CSS)
+
+
 def build_pdf(comp, meta, ctx):
-    """PDF A4 paysage côté serveur : WeasyPrint (en-tête/pied de page, « page n / N »), repli xhtml2pdf."""
+    """PDF A4 paysage côté serveur : modèle charte (WeasyPrint), repli xhtml2pdf sur le rapport simple."""
+    try:
+        return charte_pdf(comp, meta, ctx), "weasyprint"
+    except Exception:
+        pass
     pages = report_html(comp, meta, ctx)
     gen = ctx["generated"]
     head = f"{ctx.get('agency', 'AMMPS — DSID')} · Reporting Métier PCHC"
     foot = f"Généré le {gen.strftime('%d/%m/%Y à %H:%M')} · {ctx['period_label']}"
-    body = "".join(f'<div class="page{" first" if i == 0 else ""}">{p}</div>' for i, p in enumerate(pages))
-    try:
-        import weasyprint
-        css = f"""
-          @page {{ size: A4 landscape; margin: 1.5cm 1.3cm 1.3cm 1.3cm;
-                  @top-left {{ content: "{head}"; font: 8.5pt Arial, sans-serif; color: #{MUTED}; }}
-                  @top-right {{ content: "{ctx['period_label']}"; font: 8.5pt Arial, sans-serif; color: #{MUTED}; }}
-                  @bottom-left {{ content: "{foot}"; font: 8pt Arial, sans-serif; color: #{MUTED}; }}
-                  @bottom-right {{ content: "Page " counter(page) " / " counter(pages); font: bold 8.5pt Arial, sans-serif; color: #{NAVY}; }} }}
-          @page :first {{ margin: 0; @top-left {{ content: none; }} @top-right {{ content: none; }} @bottom-left {{ content: none; }} @bottom-right {{ content: none; }} }}
-          body {{ font-family: Arial, 'DejaVu Sans', sans-serif; color: #{INK}; margin: 0; }}
-          .page {{ page-break-after: always; }} .page:last-child {{ page-break-after: auto; }}
-          .first .cover {{ height: 21cm !important; box-sizing: border-box; padding: 2.4cm 2cm !important; }}
-          table {{ page-break-inside: avoid; }}"""
-        doc = f'<html><head><meta charset="utf-8"><style>{css}</style></head><body>{body}</body></html>'
-        return weasyprint.HTML(string=doc).write_pdf(), "weasyprint"
-    except Exception:
-        pass
     from xhtml2pdf import pisa
     css = f"""
       @page {{ size: A4 landscape; margin: 1.5cm 1.3cm 1.4cm 1.3cm;
@@ -614,27 +530,34 @@ def build_pdf(comp, meta, ctx):
 
 
 # ----------------------------------------------------------------------------- e-mail
-def summary_html(comp, meta, ctx, wrap_style):
-    """Résumé de la synthèse exécutive pour le corps de l'e-mail (tableau modules + alertes)."""
+def mail_html(comp, meta, ctx, greeting, signature, full_width=False):
+    """Corps de l'e-mail : synthèse exécutive et points d'alerte, salutation et signature hors gabarit."""
+    label = ctx["period_label"].capitalize()
     t = comp["totals"]
+    m = C.Mail
+    tone = {"ok": "good", "bad": "alert"}
+    cards = [(c["label"].capitalize(), R.fmt_int(c["value"]), "", tone.get(c["kind"], "")) for c in comp["cards"]]
     crit = sum(1 for a in comp["alerts"] if "CRITIQUE" in a["status"])
-    return f"""
-    <div style="{wrap_style}">
-      <div style="background:#{NAVY};padding:20px 24px;border-radius:6px 6px 0 0;">
-        <div style="color:#FFFFFF;font-size:20px;font-weight:bold;">{esc(ctx.get('title') or 'Reporting Métier PCHC – Plateforme Tarkhiss')}</div>
-        <div style="color:#BDD7EE;font-size:13px;margin-top:4px;">{esc(ctx.get('subtitle') or '')}</div>
-      </div>
-      <div style="padding:18px 22px;border:1px solid #{LINE};border-top:none;">
-        <p style="font-size:13px;color:#{INK};margin:0 0 12px;">Situation des dossiers au {fmt_dt(meta.get('imported_at')) if meta else '—'} :
-          <b>{R.fmt_int(t['total'])}</b> dossiers, <b>{R.fmt_pct(t['taux'])}</b> délivrés/validés, <b>{R.fmt_int(t['encours'])}</b> en cours,
-          <b>{R.fmt_int(t['bloques'])}</b> bloqués ou refusés — {crit} alerte(s) critique(s).</p>
-        <div style="font-size:14px;font-weight:bold;color:#{NAVY};margin:6px 0 8px;">Synthèse exécutive</div>
-        {synthesis_table_html(comp, font=12)}
-        <div style="font-size:14px;font-weight:bold;color:#C00000;margin:18px 0 8px;">Points d'alerte</div>
-        {alerts_table_html(comp, font=12)}
-        <p style="font-size:11.5px;color:#{MUTED};margin-top:14px;">Détail par volet, graphiques et méthodologie : voir les pièces jointes (Excel, PowerPoint, PDF).</p>
-      </div>
-    </div>"""
+    dot = lambda col, txt: f'<span style="color:#{col};">&#9632;</span> {esc(txt)}'
+    rows = synth_rows(comp)
+    syn = []
+    for r, row in zip(comp["synthesis"], rows):
+        col, name = voyant_info(r["voyant"])
+        syn.append([f"<b>{esc(row[0])}</b>", row[1], row[2], f"<b>{row[3]}</b>", row[4], row[5], dot(col, name)])
+    syn.append({"cls": "tot", "cells": [f"<b>{x}</b>" for x in rows[-1][:6]] + [""]})
+    colors = {"Critique": RED, "Attention": C.hx(C.AMBER), "OK": "2E8B57"}
+    al = [[esc(r[0]), esc(r[1]), f"<b>{r[2]}</b>", r[3], r[4], dot(colors.get(r[5][2:], MUTED), r[5][2:])] for r in alert_rows(comp)]
+    blocks = (m.sec(1, "Synthèse exécutive")
+              + m.note(f"Situation des dossiers au {fmt_dt(meta.get('imported_at')) if meta else '—'} : {R.fmt_int(t['total'])} dossiers, {R.fmt_pct(t['taux'])} délivrés/validés, "
+                       f"{R.fmt_int(t['encours'])} en cours, {R.fmt_int(t['bloques'])} bloqués ou refusés — {crit} alerte(s) critique(s).")
+              + m.kpis(cards[:3], 3) + m.kpis(cards[3:], 3)
+              + m.table(["Module", "Total", "Délivrés", "Taux", "En cours", "Bloqués", "Voyant"], syn, ["left", "center", "center", "center", "center", "center", "left"])
+              + m.img(C.data_uri(chart_modules(comp, (8.2, 2.6))), "Dossiers par volet")
+              + m.sec(2, "Points d’alerte")
+              + m.table(["Indicateur", "Module", "Valeur", "Attention", "Critique", "Statut"], al, ["left", "left", "center", "center", "center", "left"])
+              + m.note("Détail par volet, graphiques et méthodologie : voir les pièces jointes."))
+    intro = f"Veuillez trouver ci-dessous le reporting métier PCHC ({label})."
+    return m.shell("Reporting Métier PCHC", label, greeting, intro, blocks, signature, "Revue de direction", full_width)
 
 
 def _attach(msg, data, mime, filename):
@@ -659,7 +582,7 @@ def build_eml(subject, to_list, cc_list, body_html, attachments):
     msg["Message-ID"] = make_msgid(domain="ammps.local")
     msg["X-Unsent"] = "1"  # Outlook ouvre le message en brouillon, prêt à être envoyé
     msg.set_content("Ce message nécessite un client compatible HTML. Les livrables sont en pièces jointes.")
-    msg.add_alternative(body_html, subtype="html")
+    C.inline_images(msg, body_html)
     for data, mime, name in attachments:
         _attach(msg, data, mime, name)
     return bytes(msg)

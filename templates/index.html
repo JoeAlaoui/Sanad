@@ -250,7 +250,7 @@
         <div class="dash-actions">
           <button class="btn btn-outline" id="xlsxBtn">⬇ Excel</button>
           <button class="btn btn-outline" id="pdfBtn">⬇ PDF</button>
-          <button class="btn btn-outline" id="onePagerBtn">🖼 One-pager</button>
+          <button class="btn btn-outline" id="pptxBtn">⬇ PPTX</button>
           <button class="btn btn-primary" id="mailToggleBtn">✉ Envoyer par email</button>
         </div>
       </div>
@@ -511,7 +511,7 @@
         <div class="dash-actions">
           <button class="btn btn-outline" id="mXlsxBtn">⬇ Excel consolidé</button>
           <button class="btn btn-outline" id="mPdfBtn">⬇ PDF</button>
-          <button class="btn btn-outline" id="mOnePagerBtn">🖼 One-pager</button>
+          <button class="btn btn-outline" id="mPptxBtn">⬇ PPTX</button>
           <button class="btn btn-primary" id="mMailToggleBtn">✉ Envoyer par email</button>
         </div>
       </div>
@@ -595,7 +595,7 @@
 
       <div class="card">
         <h2>🗓️ Import tickets bruts (ticket par ticket)</h2>
-        <p class="hint">Export GLPI brut — une ligne par ticket, avec colonnes ID, Statut, Date d'ouverture, Priorité, Catégorie, Type, Technicien... Distinct de l'import consolidé ci-dessus. Alimente la répartition par Type/Priorité et la <strong>heatmap de charge (jour × heure)</strong>, calculée à partir des horodatages réels — ré-importer régulièrement pour la tenir à jour (les tickets déjà connus sont mis à jour, pas dupliqués).</p>
+        <p class="hint">Export GLPI brut — une ligne par ticket, avec colonnes ID, Statut, Date d'ouverture, Priorité, Catégorie, Type, Technicien... Distinct de l'import consolidé ci-dessus. Alimente la répartition par Type/Priorité, la <strong>heatmap de charge (jour × heure)</strong>, calculée à partir des horodatages réels, et les <strong>tickets en retard</strong> (statut non résolu + échéance TTR dépassée : TOP du dashboard, de l'email et Excel joint) — ré-importer régulièrement pour la tenir à jour (les tickets déjà connus sont mis à jour, pas dupliqués).</p>
         <label class="btn btn-outline file-btn">
           ⬆ Importer un export GLPI brut (.csv)
           <input type="file" id="mImportRawTickets" accept=".csv" hidden>

@@ -2,17 +2,18 @@
 """
 tarkhiss_annual.py — Rapport annuel (ou de période) Tarkhiss « Support Email & Hotline ».
 
-Rendus purs (aucun accès disque/Flask) à partir des données préparées par app.py :
-- summary_html()  : éléments de la « Vue annuelle » (KPI, tendance mensuelle, charge par jour de
-                    semaine, top 3 des catégories, détail par mois) — corps de l'e-mail et résumé du PDF ;
-- cover_html()    : page de garde du PDF ;
-- build_pptx()    : garde, résumé de la période, puis 2 diapositives par mois (éléments de l'envoi mensuel) ;
+Rendus purs (aucun accès disque/Flask) à partir des données préparées par app.py. Charte AMMPS,
+comme les rapports mensuels (months = contextes rapports_mensuels.tarkhiss_ctx) :
+- build_pdf()     : garde, sommaire, résumé de la période, puis chaque mois ;
+- build_pptx()    : garde, résumé de la période, analyse, puis 2 diapositives par mois ;
+- mail_html()     : éléments de la « Vue annuelle » (KPI, tendance mensuelle, charge par jour de
+                    semaine, top 3 des catégories, détail par mois) ;
 - write_summary_sheet() : feuille Excel « Synthèse » (tableaux + graphique natif).
-Charte identique au rapport mensuel (bleu #0B4965, cartes KPI, tableaux à en-tête bleu).
+summary_html() et cover_html() : ancien rendu, repli du PDF quand WeasyPrint est indisponible.
 """
-import io
-import os
-from html import escape as esc
+import ammps_charte as C
+import rapports_mensuels as M
+from ammps_charte import Deck, Mail, esc
 
 NAVY, RED, GREEN, AMBER, GREY, LINE, SOFT, INK = "0B4965", "DC2828", "25935F", "F59F0A", "55616B", "DAE0E7", "F5F7F9", "0D1926"
 HEAT = [(0.15, "E7F5EE"), (0.35, "CFEBDD"), (0.55, "6FC49A"), (0.75, "25935F"), (0.9, "F59F0A"), (9, "DC2828")]
@@ -187,219 +188,185 @@ def cover_html(ctx):
     </div>"""
 
 
-# ----------------------------------------------------------------------------- PPTX
-def build_pptx(ctx, data, months, trend_png, notes=None):
-    """months : [{label, kpis:{...}, problems, demandes, weekly, constats, recommandations,
-    chart_weekly (PNG), chart_problems (PNG)}] — mêmes éléments que l'envoi mensuel.
-    notes : descriptifs {bloc: texte} → diapositives « Analyse de la période » (2 blocs par diapositive)."""
-    notes = notes or {}
-    from pptx import Presentation
-    from pptx.dml.color import RGBColor
-    from pptx.enum.shapes import MSO_SHAPE
-    from pptx.enum.text import MSO_ANCHOR, PP_ALIGN
-    from pptx.util import Emu, Inches, Pt
+# ----------------------------------------------------------------------------- charte AMMPS
+DETAIL_HEAD = ["Mois", "Emails reçus", "Emails envoyés", "Appels", "Bugs", "Demandes"]
+MONTH_HEAD = ["Type", "Nb", "%"]
+SUBTITLE = "Synthèse de la période et rapports mensuels"
+NO_ANALYSIS = "Aucune analyse saisie pour ce mois."
 
-    prs = Presentation()
-    prs.slide_width, prs.slide_height = Inches(13.333), Inches(7.5)
-    W, H = prs.slide_width, prs.slide_height
-    blank = prs.slide_layouts[6]
-    rgb = RGBColor.from_string
 
-    def rect(s, x, y, w, h, color, line=None, shape=MSO_SHAPE.RECTANGLE):
-        r = s.shapes.add_shape(shape, x, y, w, h)
-        r.fill.solid()
-        r.fill.fore_color.rgb = rgb(color)
-        if line:
-            r.line.color.rgb = rgb(line)
-            r.line.width = Pt(0.75)
-        else:
-            r.line.fill.background()
-        r.shadow.inherit = False
-        return r
+def title_parts(ctx):
+    """« Rapport annuel — Support Tarkhiss » → les deux lignes de la page de garde."""
+    first, _, second = ctx["title"].partition(" — ")
+    return first, second
 
-    def text(s, x, y, w, h, value, size=12, bold=False, color=INK, align=PP_ALIGN.LEFT, anchor=MSO_ANCHOR.TOP, italic=False):
-        tb = s.shapes.add_textbox(x, y, w, h)
-        tf = tb.text_frame
-        tf.word_wrap = True
-        tf.vertical_anchor = anchor
-        tf.margin_left = tf.margin_right = Inches(0.05)
-        tf.margin_top = tf.margin_bottom = Inches(0.02)
-        for i, line in enumerate(value if isinstance(value, list) else [value]):
-            p = tf.paragraphs[0] if i == 0 else tf.add_paragraph()
-            p.alignment = align
-            r = p.add_run()
-            r.text = str(line)
-            r.font.size, r.font.bold, r.font.italic, r.font.name = Pt(size), bold, italic, "Arial"
-            r.font.color.rgb = rgb(color)
-        return tb
 
-    def header(s, title, subtitle):
-        rect(s, 0, 0, W, Inches(0.95), NAVY)
-        rect(s, 0, Inches(0.95), W, Inches(0.06), AMBER)
-        text(s, Inches(0.45), Inches(0.12), Inches(11.5), Inches(0.5), title, 24, True, "FFFFFF")
-        text(s, Inches(0.45), Inches(0.57), Inches(12), Inches(0.35), subtitle, 12, False, "B9D3E0")
+def period_charts(data):
+    ms, hm = data["months"], data["weekday_heatmap"]
+    multi = len({m["label"].split()[-1] for m in ms}) > 1
+    labs = [m["label"].split()[0][:4] + "." + (" " + m["label"].split()[-1][2:] if multi else "") for m in ms]
+    series = {"Emails reçus": [m["emails_received"] for m in ms], "Appels": [m["calls"] for m in ms],
+              "Bugs": [m["bugs"] for m in ms], "Demandes": [m["demandes"] for m in ms]}
+    trend = lambda size: C.lines(labs, series, figsize=size, colors=(C.FOREST, C.GREEN, C.RED, C.TINT))
+    heat = lambda size: C.heat([[h["avg"] for h in hm]], [""], [h["day"][:3] for h in hm], size)
+    makers = {}
+    if ms:
+        makers.update(trend=lambda: trend((8.2, 2.9)), trend_slide=lambda: trend((7.6, 4.2)))
+    if any(h["avg"] for h in hm):
+        makers.update(heat=lambda: heat((8.2, 1.1)), heat_slide=lambda: heat((12.2, 1.2)))
+    return M.Charts(makers)
 
-    def table(s, x, y, w, col_w, rows, head, font=10, row_h=0.28, fills=None, colors=None, bold_last=False):
-        n, ncol = len(rows) + 1, len(head)
-        tbl = s.shapes.add_table(n, ncol, x, y, w, Inches(row_h * n)).table
-        tbl.first_row, tbl.horz_banding = True, False
-        for i, cw in enumerate(col_w):
-            tbl.columns[i].width = Emu(int(w * cw / sum(col_w)))
-        for r, row in enumerate([head] + rows):
-            tbl.rows[r].height = Inches(row_h)
-            for c in range(ncol):
-                cell = tbl.cell(r, c)
-                cell.margin_left = cell.margin_right = Inches(0.06)
-                cell.margin_top = cell.margin_bottom = Inches(0.01)
-                cell.vertical_anchor = MSO_ANCHOR.MIDDLE
-                p = cell.text_frame.paragraphs[0]
-                cell.text_frame.word_wrap = True
-                p.alignment = PP_ALIGN.LEFT if c == 0 else PP_ALIGN.CENTER
-                run = p.add_run()
-                run.text = str(row[c] if c < len(row) else "")
-                run.font.size, run.font.name = Pt(font), "Arial"
-                run.font.bold = r == 0 or (bold_last and r == n - 1)
-                run.font.color.rgb = rgb("FFFFFF" if r == 0 else ((colors(r - 1, c) if colors else None) or INK))
-                cell.fill.solid()
-                cell.fill.fore_color.rgb = rgb(NAVY if r == 0 else ((fills(r - 1, c) if fills else None) or ("FFFFFF" if r % 2 else "F8FAFC")))
 
-    def cards(s, items, x, y, w, h, vsize=20):
-        gap = Inches(0.12)
-        cw = int((w - gap * (len(items) - 1)) / len(items))
-        for i, (lab, val, bg, col) in enumerate(items):
-            cx = x + i * (cw + gap)
-            rect(s, cx, y, cw, h, bg, line=LINE)
-            text(s, cx, y + Inches(0.06), cw, Inches(0.3), lab.upper(), 9, True, GREY, PP_ALIGN.CENTER)
-            text(s, cx, y + Inches(0.3), cw, h - Inches(0.34), val, vsize, True, col, PP_ALIGN.CENTER, MSO_ANCHOR.MIDDLE)
-
-    def picture(s, png, x, y, w, h):
-        """Image ajustée au cadre (w × h) en conservant ses proportions, centrée dans le cadre."""
-        if not png:
-            return
-        from PIL import Image
-        iw, ih = Image.open(io.BytesIO(png)).size
-        scale = min(w / iw, h / ih)
-        pw, ph = int(iw * scale), int(ih * scale)
-        s.shapes.add_picture(io.BytesIO(png), x + (w - pw) // 2, y + (h - ph) // 2, width=pw, height=ph)
-
-    def box(s, x, y, w, h, title, lines, size=10.5):
-        rect(s, x, y, w, h, "F2F6F9", line=LINE)
-        rect(s, x, y, Inches(0.07), h, NAVY)
-        text(s, x + Inches(0.15), y + Inches(0.06), w - Inches(0.2), Inches(0.3), title, 11.5, True, NAVY)
-        text(s, x + Inches(0.15), y + Inches(0.38), w - Inches(0.25), h - Inches(0.42), [f"• {l}" for l in lines] or ["—"], size)
-
-    # 1. Page de garde
-    s = prs.slides.add_slide(blank)
-    rect(s, 0, 0, W, H, NAVY)
-    rect(s, Inches(0.8), Inches(1.45), Inches(1.0), Inches(0.08), AMBER)
-    text(s, Inches(0.8), Inches(1.7), Inches(11.5), Inches(1.0), ctx["title"], 36, True, "FFFFFF")
-    text(s, Inches(0.8), Inches(2.75), Inches(11.5), Inches(0.5), "Support Email & Hotline — synthèse de la période et rapports mensuels", 17, False, "B9D3E0")
-    text(s, Inches(0.8), Inches(3.6), Inches(11.5), Inches(0.9), [f"Période : {ctx['period_label']}", f"{ctx['months_count']} mois avec données"], 15, False, "FFFFFF")
-    rect(s, 0, Inches(5.0), W, Inches(0.06), AMBER)
-    text(s, Inches(0.8), Inches(5.3), Inches(8), Inches(0.9), [ctx["agency"], f"Document généré le {ctx['generated'].strftime('%d/%m/%Y à %H:%M')}"], 13, False, "D6DCE4")
-    if ctx.get("logo_path") and os.path.isfile(ctx["logo_path"]) and not ctx["logo_path"].lower().endswith(".svg"):
-        try:
-            rect(s, Inches(10.35), Inches(5.25), Inches(2.3), Inches(1.4), "FFFFFF")
-            s.shapes.add_picture(ctx["logo_path"], Inches(10.5), Inches(5.35), height=Inches(1.2))
-        except Exception:
-            pass
-
-    # 2. Résumé de la période : KPI + tendance + top 3
+def detail_rows(data):
+    n = fmt_int
+    red = lambda v: f'<b style="color:{C.RED};">{n(v)}</b>'
+    green = lambda v: f'<b style="color:{C.GREEN};">{n(v)}</b>'
+    rows = [[esc(m["label"]), n(m["emails_received"]), n(m["emails_sent"]), n(m["calls"]), red(m["bugs"]), green(m["demandes"])] for m in data["months"]]
     t = data["totals"]
-    s = prs.slides.add_slide(blank)
-    header(s, "Synthèse de la période", f"{ctx['period_label']} — vue annuelle")
-    cards(s, [("Emails reçus", fmt_int(t["emails_received"]), SOFT, NAVY), ("Emails envoyés", fmt_int(t["emails_sent"]), SOFT, NAVY),
-              ("Appels", fmt_int(t["calls"]), SOFT, NAVY), ("Bugs", fmt_int(t["bugs"]), "FCE9E9", RED),
-              ("Demandes", fmt_int(t["demandes"]), "E7F5EE", GREEN)], Inches(0.45), Inches(1.2), Inches(12.4), Inches(1.05), 22)
-    picture(s, trend_png, Inches(0.45), Inches(2.45), Inches(7.7), Inches(4.4))
-    top = data["top_categories"]
-    text(s, Inches(8.4), Inches(2.45), Inches(4.4), Inches(0.35), "Top 3 catégories récurrentes", 13, True, NAVY)
-    if top:
-        table(s, Inches(8.4), Inches(2.85), Inches(4.45), [3.2, 1.2], [[f"{i + 1}. {cut(c['label'], 40)}", fmt_int(c["count"])] for i, c in enumerate(top)],
-              ["Catégorie", "Total"], 11, 0.38)
+    if rows:
+        rows.append({"cls": "tot", "cells": ["Total période", n(t["emails_received"]), n(t["emails_sent"]), n(t["calls"]), n(t["bugs"]), n(t["demandes"])]})
+    return rows
+
+
+def period_kpis(t):
+    return [("Emails reçus", fmt_int(t["emails_received"]), ""), ("Emails envoyés", fmt_int(t["emails_sent"]), ""), ("Appels", fmt_int(t["calls"]), ""),
+            ("Bugs", fmt_int(t["bugs"]), "", "alert"), ("Demandes", fmt_int(t["demandes"]), "", "good")]
+
+
+def top_rows(data):
+    return [[f"<b>{i}.</b> {esc(c['label'])}", f"<b>{fmt_int(c['count'])}</b>"] for i, c in enumerate(data["top_categories"], 1)]
+
+
+def sorted_items(items, limit=7):
+    return sorted(items, key=lambda i: -i[1])[:limit]
+
+
+def month_pdf(c, n, anchor):
+    ch = c["charts"]
+    rows = lambda items: [[esc(l), f"<b>{k}</b>", p] for l, k, p, _ in sorted_items(items)]
+    block = lambda title, items: f"<div><h4>{esc(title)}</h4>" + (C.table(MONTH_HEAD, rows(items), ["l", "c w11", "c w14"], "tight") if items else f'<p class="note">Aucune donnée.</p>') + "</div>"
+    out = f"""<div class="newp">{C.sec(n, c['period'], 'Rapport mensuel', anchor)}<h4>Volumes</h4>{C.kpi_grid(c['kpi_volume'])}<h4>Qualification</h4>{C.kpi_grid(c['kpi_quali'])}"""
+    if c["weekly"] or c["problems"]:
+        out += f'<div class="two">{C.fig(ch["weekly_month"], "Bugs vs Demandes", "Semaine critique en rouge.")}{C.fig(ch["problems_month"], "Problèmes techniques", "Répartition par type.")}</div>'
     else:
-        text(s, Inches(8.4), Inches(2.85), Inches(4.4), Inches(0.4), "Aucune donnée d'analyse sur la période.", 11, False, GREY)
+        out += f'<p class="note">{NO_ANALYSIS}</p>'
+    out += "</div>"
+    if c["problems"] or c["demandes"] or c["constats"] or c["recos"]:
+        out += f"""<div class="gap"><div class="two">{block(f"Problèmes techniques ({c['nb_prob']})", c['problems'])}{block(f"Demandes d’information ({c['nb_dem']})", c['demandes'])}</div>"""
+        if c["constats"]:
+            out += f"<h3>Constats clés</h3>{C.points(c['constats'])}"
+        if c["recos"]:
+            out += f'<div class="keep"><h3>Recommandations</h3>{C.recos(c["recos"])}</div>'
+        out += "</div>"
+    return out
 
-    # 3. Détail par mois + charge par jour de semaine
-    s = prs.slides.add_slide(blank)
-    header(s, "Détail par mois & charge hebdomadaire", ctx["period_label"])
-    ms = data["months"]
-    rows = [[m["label"], fmt_int(m["emails_received"]), fmt_int(m["emails_sent"]), fmt_int(m["calls"]), fmt_int(m["bugs"]), fmt_int(m["demandes"])] for m in ms]
-    rows.append(["Total période", fmt_int(t["emails_received"]), fmt_int(t["emails_sent"]), fmt_int(t["calls"]), fmt_int(t["bugs"]), fmt_int(t["demandes"])])
-    rh = min(0.34, 4.3 / (len(rows) + 1))
-    table(s, Inches(0.45), Inches(1.2), Inches(12.4), [2.6, 1.6, 1.6, 1.4, 1.2, 1.4], rows,
-          ["Mois", "Emails reçus", "Emails envoyés", "Appels", "Bugs", "Demandes"], 10.5 if len(rows) < 12 else 9.5, rh,
-          fills=lambda r, c, n=len(rows): "E8EEF3" if r == n - 1 else None,
-          colors=lambda r, c: RED if c == 4 else (GREEN if c == 5 else None), bold_last=True)
-    hm = data["weekday_heatmap"]
-    mx = max([h["avg"] for h in hm] + [0])
-    y = Inches(1.35 + rh * (len(rows) + 1))
-    text(s, Inches(0.45), y, Inches(12), Inches(0.35), "Charge moyenne par jour de la semaine (appels + emails reçus)", 12, True, NAVY)
-    cw = Inches(12.4 / 7)
-    for i, h in enumerate(hm):
-        col = heat_color(h["avg"], mx)
-        rect(s, Inches(0.45) + i * cw, y + Inches(0.4), cw - Inches(0.05), Inches(0.75), col)
-        text(s, Inches(0.45) + i * cw, y + Inches(0.42), cw - Inches(0.05), Inches(0.72), [h["day"][:3], str(h["avg"])], 12, True,
-             "FFFFFF" if col in ("25935F", "F59F0A", "DC2828") else INK, PP_ALIGN.CENTER, MSO_ANCHOR.MIDDLE)
 
-    # Analyse de la période : descriptifs rédigés, deux blocs par diapositive (texte long → coupé à 1 500 caractères)
-    filled = [(k, lab, notes[k].strip()) for k, lab in BLOCKS if (notes.get(k) or "").strip()]
+def build_pdf(ctx, data, months, notes=None):
+    notes = notes or {}
+    ch = period_charts(data)
+    first, second = title_parts(ctx)
+    items = [("a1", "Indicateurs & tendance mensuelle"), ("a2", "Charge par jour de la semaine"), ("a3", "Top 3 catégories récurrentes"), ("a4", "Détail par mois")]
+    synth = (notes.get("synthese") or "").strip()
+    if synth:
+        items.append(("a5", "Synthèse & conclusion"))
+    base = len(items)
+    items += [(f"m{i}", c["period"]) for i, c in enumerate(months)]
+    body = C.cover(first, second, SUBTITLE, [("Période", ctx["period_label"]), ("Mois avec données", str(ctx["months_count"])), ("Édition", ctx["generated"].strftime("%d/%m/%Y"))], first)
+    body += f"""{C.head_html(ctx['title'], ctx['period_label'])}<div>{C.sec(0, 'Sommaire', first)}{C.toc(items)}</div>
+    <div class="newp">{C.sec(1, items[0][1], 'Vue d’ensemble', 'a1')}{C.kpi_grid(period_kpis(data['totals']), 5)}{C.notebox(notes.get('indicateurs'))}
+      <div class="gap">{C.fig(ch['trend'], 'Tendance mensuelle', 'Évolution mensuelle des emails, appels, bugs et demandes sur la période.')}</div></div>
+    <div class="gap keep">{C.sec(2, items[1][1], 'Rythme', 'a2')}{C.fig(ch['heat'], 'Charge moyenne par jour de la semaine (appels + emails reçus)', 'Moyenne par jour travaillé.')}{C.notebox(notes.get('charge'))}</div>
+    <div class="gap keep">{C.sec(3, items[2][1], 'Qualification', 'a3')}{C.table(['Catégorie', 'Total signalé sur la période'], top_rows(data), ['l', 'c']) if data['top_categories'] else '<p class="note">Aucune donnée d’analyse pour la période.</p>'}{C.notebox(notes.get('top3'))}</div>
+    <div class="gap">{C.sec(4, items[3][1], 'Consolidation', 'a4')}{C.table(DETAIL_HEAD, detail_rows(data), ['l', 'c', 'c', 'c', 'c', 'c'])}{C.notebox(notes.get('detail'))}</div>"""
+    if synth:
+        body += f"""<div class="gap keep">{C.sec(5, items[4][1], 'Synthèse', 'a5')}{C.notebox(synth, 'Conclusion')}</div>"""
+    for i, c in enumerate(months):
+        body += month_pdf(c, base + i + 1, f"m{i}")
+    return C.render_pdf(ctx["title"], "Tarkhiss", ctx["period_label"], ctx["clean"](body), ".c5 {grid-template-columns:repeat(5,1fr);}")
+
+
+def build_pptx(ctx, data, months, notes=None):
+    """months : contextes mensuels ; notes : descriptifs {bloc: texte} → diapositives « Analyse de la période »."""
+    notes = notes or {}
+    per = ctx["period_label"]
+    ch = period_charts(data)
+    first, second = title_parts(ctx)
+    d = Deck(ctx["title"], per, f"AMMPS · Tarkhiss — {per}", ctx["clean"])
+    d.cover(first, first, second, SUBTITLE, [("Période", per), ("Mois avec données", str(ctx["months_count"]))])
+
+    t = data["totals"]
+    p = d.page(1, "Synthèse de la période", "Vue d’ensemble")
+    d.kcards(p, period_kpis(t), .45, 1.72, 12.43, 1.0)
+    d.box_pic(p, ch["trend_slide"], .45, 2.84, 7.7, 4.06, "Tendance mensuelle")
+    d.text(p, 8.3, 2.84, 4.58, .32, "Top 3 catégories récurrentes", 12.5, True, C.FOREST)
+    if data["top_categories"]:
+        d.table(p, 8.3, 3.2, 4.58, [3.3, 1], ["Catégorie", "Total"], [[f"{i}. {cut(c['label'], 40)}", fmt_int(c["count"])] for i, c in enumerate(data["top_categories"], 1)],
+                font=11, row_h=.5, bolds=lambda r, k: k == 1)
+    else:
+        d.text(p, 8.3, 3.2, 4.58, .4, "Aucune donnée d’analyse sur la période.", 11, False, C.MUTED)
+
+    p = d.page(2, "Détail par mois & charge hebdomadaire", "Consolidation")
+    rows = detail_rows(data)
+    n = len(rows)
+    plain = [r["cells"] if isinstance(r, dict) else r for r in rows]
+    rh = min(.32, 3.6 / (n + 1)) if n else .32
+    d.table(p, .45, 1.72, 12.43, [2.6, 1.6, 1.6, 1.4, 1.2, 1.4], DETAIL_HEAD, plain, font=10.5 if n < 12 else 9.5, row_h=rh,
+            fills=lambda r, k: C.LIGHT if r == n - 1 else None, bolds=lambda r, k: r == n - 1 or k >= 4)
+    y = 1.8 + rh * (n + 1)
+    d.box_pic(p, ch["heat_slide"], .45, y, 12.43, 6.92 - y, "Charge moyenne par jour de la semaine (appels + emails reçus)")
+
+    k = 2
+    filled = [(key, lab, notes[key].strip()) for key, lab in BLOCKS if (notes.get(key) or "").strip()]
     for i in range(0, len(filled), 2):
-        s = prs.slides.add_slide(blank)
-        header(s, "Analyse de la période", ctx["period_label"])
-        for j, (k, lab, txt) in enumerate(filled[i:i + 2]):
-            x = Inches(0.45 + j * 6.3)
-            rect(s, x, Inches(1.2), Inches(6.1), Inches(5.65), "F2F6F9", line=LINE)
-            rect(s, x, Inches(1.2), Inches(0.07), Inches(5.65), NAVY)
-            text(s, x + Inches(0.18), Inches(1.28), Inches(5.8), Inches(0.4), lab, 14, True, NAVY)
-            text(s, x + Inches(0.18), Inches(1.75), Inches(5.75), Inches(5.0),
-                 [p for p in cut(txt, 1500).split("\n") if p.strip()], 11)
+        k += 1
+        p = d.page(k, "Analyse de la période", "Commentaires")
+        for j, (_, lab, txt) in enumerate(filled[i:i + 2]):
+            d.note(p, .45 + j * 6.3, 1.72, 6.13, 5.18, lab, [x for x in cut(txt, 1500).split("\n") if x.strip()], 13)
 
-    # 4. Deux diapositives par mois (éléments de l'envoi mensuel)
-    for m in months:
-        k = m["kpis"]
-        s = prs.slides.add_slide(blank)
-        header(s, f"{m['label']} — indicateurs", "Rapport mensuel du support Tarkhiss")
-        cards(s, [("Emails reçus", fmt_int(k["received"]), SOFT, NAVY), ("Emails envoyés", fmt_int(k["sent"]), SOFT, NAVY),
-                  ("Appels", fmt_int(k["calls"]), SOFT, NAVY), ("Temps comm.", k["talk_time"], SOFT, NAVY)],
-              Inches(0.45), Inches(1.15), Inches(12.4), Inches(0.9), 18)
-        cards(s, [("Problèmes tech.", fmt_int(k["problems"]), "FCE9E9", RED), ("Demandes info", fmt_int(k["demandes"]), "E7F5EE", GREEN),
-                  ("Ratio bugs/demandes", k["ratio"], SOFT, NAVY), ("Semaine critique", cut(k["critical_week"], 18), "FEF3E0", "B9791F")],
-              Inches(0.45), Inches(2.15), Inches(12.4), Inches(0.9), 16)
-        picture(s, m.get("chart_weekly"), Inches(0.45), Inches(3.2), Inches(6.1), Inches(3.7))
-        picture(s, m.get("chart_problems"), Inches(6.75), Inches(3.2), Inches(6.1), Inches(3.7))
-        if not m.get("chart_weekly") and not m.get("chart_problems"):
-            text(s, Inches(0.45), Inches(3.4), Inches(12), Inches(0.4), "Aucune analyse saisie pour ce mois.", 12, False, GREY)
+    for c in months:
+        ch_m = c["charts"]
+        k += 1
+        p = d.page(k, f"{c['period']} — indicateurs", "Rapport mensuel")
+        d.kcards(p, c["kpi_volume"], .45, 1.72, 12.43, 1.0, 20)
+        d.kcards(p, c["kpi_quali"], .45, 2.8, 12.43, 1.0, 20)
+        if c["weekly"] or c["problems"]:
+            d.box_pic(p, ch_m["weekly_month"], .45, 3.9, 6.13, 3.02, "Bugs vs Demandes")
+            d.box_pic(p, ch_m["problems_month"], 6.75, 3.9, 6.13, 3.02, "Problèmes techniques")
+        else:
+            d.text(p, .45, 4.0, 12, .4, NO_ANALYSIS, 12, False, C.MUTED)
 
-        s = prs.slides.add_slide(blank)
-        header(s, f"{m['label']} — analyse", "Problèmes, demandes, évolution hebdomadaire, constats")
-        for x, title, items, color in ((Inches(0.45), "Problèmes techniques", m["problems"], RED), (Inches(6.75), "Demandes d'information", m["demandes"], GREEN)):
-            tot = sum(i.get("count", 0) for i in items)
-            rows = [[cut(i.get("label", ""), 46), fmt_int(i.get("count", 0)), f"{(i.get('count', 0) / tot * 100 if tot else 0):.1f} %".replace(".", ",")]
-                    for i in sorted(items, key=lambda i: -i.get("count", 0))[:7]]
-            text(s, x, Inches(1.15), Inches(6.1), Inches(0.35), f"{title} ({fmt_int(tot)})", 12.5, True, color)
-            if rows:
-                table(s, x, Inches(1.5), Inches(6.1), [4.0, 0.9, 1.0], rows, ["Type", "Nb", "%"], 10, 0.3)
+        k += 1
+        p = d.page(k, f"{c['period']} — analyse", "Rapport mensuel")
+        for x, title, items, col, nb in ((.45, "Problèmes techniques", c["problems"], C.RED, c["nb_prob"]), (6.75, "Demandes d’information", c["demandes"], C.GREEN, c["nb_dem"])):
+            d.text(p, x, 1.66, 6.13, .3, f"{title} ({fmt_int(nb)})", 12, True, col)
+            if items:
+                d.table(p, x, 1.98, 6.13, [4.2, .8, 1], MONTH_HEAD, [[cut(l, 48), v, q] for l, v, q, _ in sorted_items(items)], font=10, row_h=.29, bolds=lambda r, j: j == 1)
             else:
-                text(s, x, Inches(1.5), Inches(6.1), Inches(0.35), "Aucune donnée.", 11, False, GREY)
-        wk = [[cut(w.get("week", ""), 22), fmt_int(w.get("bugs", 0)), fmt_int(w.get("demandes", 0))] for w in m["weekly"][:6]]
-        text(s, Inches(0.45), Inches(4.05), Inches(6.1), Inches(0.35), "Évolution hebdomadaire", 12.5, True, NAVY)
-        if wk:
-            table(s, Inches(0.45), Inches(4.4), Inches(6.1), [3.0, 1.4, 1.4], wk, ["Semaine", "Bugs", "Demandes"], 10, 0.3,
-                  colors=lambda r, c: RED if c == 1 else (GREEN if c == 2 else None))
-        lines = [cut(c, 120) for c in m["constats"][:4]] + [cut("Reco. : " + r, 120) for r in m["recommandations"][:3]]
-        box(s, Inches(6.75), Inches(4.05), Inches(6.1), Inches(2.8), "Constats & recommandations", lines, 10)
+                d.text(p, x, 1.98, 6.13, .3, "Aucune donnée.", 11, False, C.MUTED)
+        d.text(p, .45, 4.42, 6.13, .3, "Évolution hebdomadaire", 12, True, C.FOREST)
+        crit = c["crit"]
+        if c["weekly"]:
+            d.table(p, .45, 4.74, 6.13, [3, 1.4, 1.4], ["Semaine", "Bugs", "Demandes"], [[cut(w[0], 22), w[1], w[2]] for w in c["weekly"][:6]], font=10, row_h=.3,
+                    fills=lambda r, j: M.ALERT_BG if r == crit else None)
+        d.bullets(p, 6.75, 4.42, 6.13, 2.5, "Constats & recommandations", [cut(x, 120) for x in c["constats"][:4]] + [cut("Reco. : " + r, 120) for r in c["recos"][:3]] or ["—"], 10.5)
+    return d.finish()
 
-    n = len(prs.slides)
-    for i, slide in enumerate(prs.slides, start=1):
-        if i == 1:
-            continue
-        rect(slide, Inches(0.45), Inches(7.02), Inches(12.4), Emu(9525), LINE)
-        text(slide, Inches(0.45), Inches(7.07), Inches(10.5), Inches(0.3), f"{ctx['agency']} · {ctx['title']} · {ctx['period_label']}", 9, False, GREY)
-        text(slide, Inches(11.35), Inches(7.07), Inches(1.5), Inches(0.3), f"{i} / {n}", 9, True, NAVY, PP_ALIGN.RIGHT)
-    buf = io.BytesIO()
-    prs.save(buf)
-    return buf.getvalue()
+
+def mail_html(ctx, data, greeting, signature, notes=None, full_width=False):
+    notes = notes or {}
+    ch = period_charts(data)
+    m = Mail
+    b = m.sec(1, "Indicateurs") + m.kpis(period_kpis(data["totals"]), 5) + m.note(notes.get("indicateurs"))
+    b += m.sec(2, "Tendance mensuelle") + m.img(ch["trend"], "Emails, appels, bugs et demandes par mois")
+    b += m.sec(3, "Charge moyenne par jour de la semaine") + m.img(ch["heat"], "Appels + emails reçus") + m.note(notes.get("charge"))
+    b += m.sec(4, "Top 3 catégories récurrentes")
+    b += m.table(["Catégorie", "Total signalé"], top_rows(data), ["left", "center"]) if data["top_categories"] else m.note("Aucune donnée d’analyse pour la période.")
+    b += m.note(notes.get("top3")) + m.sec(5, "Détail par mois")
+    b += m.table(DETAIL_HEAD, detail_rows(data), ["left"] + ["center"] * 5) + m.note(notes.get("detail"))
+    if (notes.get("synthese") or "").strip():
+        b += m.sec(6, "Synthèse & conclusion") + m.note(notes["synthese"])
+    intro = f"Veuillez trouver ci-dessous la synthèse du support Tarkhiss sur la période {ctx['period_label']}."
+    return m.shell(ctx["title"], ctx["period_label"], greeting, intro, b, signature, title_parts(ctx)[0], full_width)
 
 
 # ----------------------------------------------------------------------------- Excel (xlsxwriter)

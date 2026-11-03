@@ -110,8 +110,8 @@ qui restent toujours complets indépendamment de ce qui est choisi pour l'email.
 ### 4.3 Reporting Métier PCHC
 - Import Excel/CSV, voyants, table statut → couleur paramétrable, backlog par ancienneté,
   top 10 opérateurs, export Excel/PDF/PPTX ("Revue de Direction")/email.
-- Seul volet disposant d'un export PowerPoint (décision de conception : pas de PPTX pour
-  Tarkhiss/Moussanada).
+- Rapports PDF, PPTX et email selon la charte AMMPS, en modèle hybride (couleur par volet).
+  Tarkhiss et Moussanada ont aussi leur export PPTX mensuel (`rapports_mensuels.py`).
 
 ## 5. Partager SANAD sur le réseau local
 
@@ -193,7 +193,7 @@ l'accès applicatif est refusé en mode local, ce qui diffère d'un port réelle
 - Stockage JSON à plat dans `data/<volet>/` — aucune base de données. Comptes : `data/users.json`.
   Notes : `data/notes/thread_<id>.json`. Base de connaissances : `data/knowledge.json`.
 - Dépendances (`requirements.txt`) : Flask, openpyxl (lecture des imports), xlsxwriter (génération
-  Excel), matplotlib + seaborn (graphiques en images PNG), python-pptx (PPTX PCHC), weasyprint
+  Excel), matplotlib + seaborn (graphiques en images PNG), python-pptx (rapports PPTX), weasyprint
   (PDF principal), xhtml2pdf (repli), requests (client GLPI).
 - Aucune donnée envoyée à l'extérieur : tout reste local à la machine qui exécute l'application.
 

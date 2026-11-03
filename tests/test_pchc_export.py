@@ -361,7 +361,9 @@ def test_server_end_to_end():
         parts = list(msg.iter_parts())
         assert parts[0].get_content_type() == "multipart/alternative"
         html = parts[0].get_body(("html",)).get_content()
-        assert html.strip() == pv["html"].strip(), "corps HTML ≠ aperçu"
+        no_img = lambda h: re.sub(r'src="(data|cid):[^"]+"', 'src=""', h).strip()   # data: à l'aperçu, pièces CID dans le .eml
+        assert no_img(html) == no_img(pv["html"]), "corps HTML ≠ aperçu"
+        assert 'src="cid:' in html and "data:image" not in html, "images non converties en CID"
         atts = {p.get_filename(): (p.get_content_type(), p.get_content()) for p in msg.iter_attachments()}
         assert set(atts) == {"Reporting_PCHC_2026-10.xlsx", "Reporting_PCHC_2026-10.pptx", "Reporting_PCHC_2026-10.pdf"}
         assert atts["Reporting_PCHC_2026-10.xlsx"][0] == pchc_excel.XLSX_MIME
