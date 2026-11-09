@@ -192,22 +192,28 @@ class Server:
     """Copie isolée de l'application (code seul, data/ vierge) lancée sur un port libre.
     seed = {volet: dossier source} : copie de fichiers de données (lecture seule de la source)."""
 
-    def __init__(self, seed=None):
+    def __init__(self, seed=None, seed_all=None):
         self.seed = seed or {}
+        self.seed_all = seed_all   # dossier data/ complet à copier (hors utilisateurs, clé secrète, sauvegardes, snapshots)
 
     def __enter__(self):
         self.dir = tempfile.mkdtemp(prefix="sanad_test_")
         for module, src in self.seed.items():
             os.makedirs(os.path.join(self.dir, "data", module), exist_ok=True)
             for fn in os.listdir(src):
-                if re.match(r"^(calls|emails|analysis|meta_calls|meta_emails)_\d{4}-\d{2}\.json$", fn):
+                if re.match(r"^((calls|emails|analysis|meta_calls|meta_emails|sources)_\d{4}-\d{2}\.json|timeseries\.json|tickets_raw\.json)$", fn):
                     shutil.copy2(os.path.join(src, fn), os.path.join(self.dir, "data", module, fn))
+        if self.seed_all:
+            shutil.copytree(self.seed_all, os.path.join(self.dir, "data"), dirs_exist_ok=True,
+                            ignore=shutil.ignore_patterns("users.json", ".secret_key", "_backups", "_snapshots", "sanad.db*", "*.tmp-*"))
         for fn in os.listdir(ROOT):
             if fn.endswith(".py"):
                 shutil.copy2(os.path.join(ROOT, fn), self.dir)
         shutil.copytree(os.path.join(ROOT, "templates"), os.path.join(self.dir, "templates"))
         shutil.copytree(os.path.join(ROOT, "pchc_template"), os.path.join(self.dir, "pchc_template"))
         shutil.copytree(os.path.join(ROOT, "static"), os.path.join(self.dir, "static"), ignore=shutil.ignore_patterns("uploads"))
+        if os.environ.get("SANAD_STORE") == "sqlite" and (self.seed or self.seed_all):   # mêmes données de départ, mais dans la base SQLite
+            subprocess.run([sys.executable, os.path.join(ROOT, "tools", "migrate_json_to_sqlite.py"), os.path.join(self.dir, "data")], check=True, capture_output=True)
         self.port = _free_port()
         env = dict(os.environ, SANAD_NO_AUTO_SNAPSHOT="1", SANAD_NO_OUTLOOK="1", SANAD_PORT=str(self.port))
         boot = (f"import sys; sys.path.insert(0, {self.dir!r}); import app; "
@@ -222,6 +228,28 @@ class Server:
             except requests.ConnectionError:
                 time.sleep(0.2)
         raise RuntimeError("Serveur non démarré : " + open(os.path.join(self.dir, "server.log")).read()[-2000:])
+
+    def audit_text(self):
+        """Journal d'audit (fichier JSONL ou table journal selon SANAD_STORE)."""
+        if os.environ.get("SANAD_STORE") == "sqlite":
+            import sqlite3
+            c = sqlite3.connect(os.path.join(self.dir, "data", "sanad.db"))
+            try:
+                return "\n".join(r[0] for r in c.execute("SELECT data FROM journal WHERE name='audit_log.jsonl' ORDER BY id"))
+            finally:
+                c.close()
+        return open(os.path.join(self.dir, "data", "audit_log.jsonl"), encoding="utf-8").read()
+
+    def has_doc(self, rel):
+        """Document de data/ présent (fichier JSON ou ligne de la table docs)."""
+        if os.environ.get("SANAD_STORE") == "sqlite":
+            import sqlite3
+            c = sqlite3.connect(os.path.join(self.dir, "data", "sanad.db"))
+            try:
+                return c.execute("SELECT 1 FROM docs WHERE key=?", (rel,)).fetchone() is not None
+            finally:
+                c.close()
+        return os.path.isfile(os.path.join(self.dir, "data", *rel.split("/")))
 
     def session(self, user=None):
         s = requests.Session()
@@ -306,8 +334,8 @@ def test_server_end_to_end():
         assert d["snapshot"] and d["snapshot"].endswith("_pchc-import.zip")
         assert os.path.isfile(os.path.join(srv.dir, "data", "_snapshots", d["snapshot"]))
         for k in ("identification", "declaration", "ce", "clv", "aimp", "meta", "history"):
-            assert os.path.isfile(os.path.join(srv.dir, "data", "pchc", "raw", f"{k}.json")), k
-        audit = open(os.path.join(srv.dir, "data", "audit_log.jsonl"), encoding="utf-8").read()
+            assert srv.has_doc(f"pchc/raw/{k}.json"), k
+        audit = srv.audit_text()
         assert '"pchc_import"' in audit and '"pchc_import_refused"' in audit
 
         s = sup.get(U + "/api/pchc/summary").json()
@@ -392,7 +420,7 @@ def test_server_end_to_end():
         hist = admin.get(U + "/api/pchc/summary").json()["history"]
         assert {h["type"] for h in hist} >= {"import", "export", "eml"}
         assert any(e.get("file") == "Reporting_PCHC_2026-10.eml" for e in admin.get(U + "/api/pchc/send-log").json())
-        audit = open(os.path.join(srv.dir, "data", "audit_log.jsonl"), encoding="utf-8").read()
+        audit = srv.audit_text()
         assert audit.count('"pchc_export"') >= 3 and '"pchc_eml"' in audit
 
         # Compatibilité : Dashboard « période » existant alimenté par le même import

@@ -34,7 +34,10 @@ from pchc_import import (
 import pchc_raw
 import pchc_excel
 import pchc_deliverables
+import sqlite3
+import store
 import tarkhiss_annual
+import moussanada_annual
 import ammps_charte
 import rapports_mensuels
 import retards
@@ -65,6 +68,7 @@ BACKUP_RETENTION_PER_FILE = 20
 os.makedirs(DATA_DIR, exist_ok=True)
 os.makedirs(UPLOAD_DIR, exist_ok=True)
 os.makedirs(BACKUP_DIR, exist_ok=True)
+store.configure(DATA_DIR, BACKUP_DIR, BACKUP_RETENTION_PER_FILE)
 
 # État réseau en mémoire — piloté par /api/system/network-config. Le serveur écoute TOUJOURS sur
 # 0.0.0.0 (voir le lancement en bas de fichier) ; c'est ce flag, vérifié à chaque requête dans
@@ -132,33 +136,9 @@ def get_kpi_labels(module):
 
 
 def write_json_safely(path, data):
-    """Écriture JSON sécurisée : sauvegarde horodatée de l'ancien contenu avant écrasement,
-    puis écriture atomique (fichier temporaire + remplacement) pour éviter toute corruption
-    en cas de coupure/crash pendant l'écriture. Purge les anciennes sauvegardes au-delà de
-    BACKUP_RETENTION_PER_FILE par fichier source."""
-    if os.path.exists(path):
-        try:
-            rel = os.path.relpath(path, DATA_DIR).replace(os.sep, "__")
-            stamp = datetime.now().strftime("%Y%m%d-%H%M%S-%f")
-            backup_path = os.path.join(BACKUP_DIR, f"{rel}.{stamp}.bak")
-            shutil.copy2(path, backup_path)
-            prefix = f"{rel}."
-            existing = sorted(
-                (f for f in os.listdir(BACKUP_DIR) if f.startswith(prefix) and f.endswith(".bak")),
-                reverse=True,
-            )
-            for old in existing[BACKUP_RETENTION_PER_FILE:]:
-                try:
-                    os.remove(os.path.join(BACKUP_DIR, old))
-                except OSError:
-                    pass
-        except OSError:
-            pass  # une sauvegarde ratée ne doit jamais bloquer l'écriture principale
-
-    tmp_path = f"{path}.tmp-{os.getpid()}"
-    with open(tmp_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=2)
-    os.replace(tmp_path, path)
+    """Écriture sécurisée d'un document (sauvegarde horodatée de l'ancien contenu puis écriture atomique).
+    Enveloppe de store.write_json : tout accès aux données passe par store.py (futur backend SQLite)."""
+    store.write_json(path, data)
 
 
 def log_audit(action, details=None, module=None):
@@ -177,9 +157,8 @@ def log_audit(action, details=None, module=None):
         "details": details or {},
     }
     try:
-        with open(AUDIT_LOG_FILE, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
-    except OSError:
+        store.append_jsonl(AUDIT_LOG_FILE, entry)
+    except (OSError, sqlite3.Error):
         pass
 
 
@@ -239,10 +218,7 @@ ROLES = ("admin", "hotliner", "superviseur")
 
 
 def load_users():
-    if os.path.exists(USERS_FILE):
-        with open(USERS_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    return store.read_json(USERS_FILE, [])
 
 
 def save_users(users):
@@ -495,10 +471,7 @@ def notes_thread_path(hotliner_id):
 
 def load_notes_thread(hotliner_id):
     p = notes_thread_path(hotliner_id)
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    return store.read_json(p, [])
 
 
 def save_notes_thread(hotliner_id, thread):
@@ -578,10 +551,7 @@ KNOWLEDGE_FILE = os.path.join(DATA_DIR, "knowledge.json")
 
 
 def load_knowledge():
-    if os.path.exists(KNOWLEDGE_FILE):
-        with open(KNOWLEDGE_FILE, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    return store.read_json(KNOWLEDGE_FILE, [])
 
 
 def save_knowledge(items):
@@ -643,17 +613,7 @@ def last_sync(module):
     ou timeseries/sources pour Moussanada, ou records pour PCHC) — utilisé pour l'indicateur
     'Dernière synchro' du dashboard."""
     check_module(module)
-    latest = None
-    d = module_dir(module)
-    for root, _, files in os.walk(d):
-        if os.path.basename(root) == "exports":
-            continue
-        for fn in files:
-            if not fn.endswith(".json"):
-                continue
-            mtime = os.path.getmtime(os.path.join(root, fn))
-            if latest is None or mtime > latest:
-                latest = mtime
+    latest = store.latest_mtime(module_dir(module))
     if latest is None:
         return jsonify({"last_sync": None})
     return jsonify({"last_sync": datetime.fromtimestamp(latest).isoformat()})
@@ -668,10 +628,7 @@ def _path(module, kind, ym):
 
 def _load(module, kind, ym, default):
     p = _path(module, kind, ym)
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return default
+    return store.read_json(p, default)
 
 
 def _save(module, kind, ym, payload):
@@ -689,10 +646,7 @@ def email_meta_stats_file():
 
 def load_email_meta_stats():
     p = email_meta_stats_file()
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return None
+    return store.read_json(p, None)
 
 
 def save_email_meta_stats(data):
@@ -775,10 +729,7 @@ def raw_imports_history_file():
 
 def load_raw_imports_history():
     p = raw_imports_history_file()
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    return store.read_json(p, [])
 
 
 def save_raw_import(kind, file_storage, extra=None):
@@ -871,7 +822,7 @@ def tarkhiss_call_meta_stats():
     """Synthèse tous mois confondus du journal d'appels importé (compteurs sommables + série mensuelle)."""
     d = module_dir("tarkhiss")
     months = []
-    for fname in sorted(os.listdir(d)):
+    for fname in store.names(d):
         if fname.startswith("meta_calls_") and fname.endswith(".json"):
             m = _load("tarkhiss", "meta_calls", fname[len("meta_calls_"):-5], {})
             if m:
@@ -1039,9 +990,7 @@ def load_global_settings():
         # Intégration GLPI (Lot A) — API REST legacy (apirest.php), en complément de l'import CSV
         "glpi_url": "", "glpi_app_token": "", "glpi_user_token": "", "glpi_entity_id": "",
     }
-    if os.path.exists(GLOBAL_SETTINGS_FILE):
-        with open(GLOBAL_SETTINGS_FILE, "r", encoding="utf-8") as f:
-            defaults.update(json.load(f))
+    defaults.update(store.read_json(GLOBAL_SETTINGS_FILE, {}))
     return defaults
 
 
@@ -1085,12 +1034,10 @@ def load_module_settings(module):
         "kpi_labels": {},
         # Tickets en retard (Moussanada) : taille du TOP de l'email et techniciens dont les tickets
         # sont écartés de ce TOP (l'Excel joint les contient tous).
-        "late_tickets": {"top_n": retards.DEFAULT_TOP_N, "excluded_technicians": []},
+        "late_tickets": {"top_n": retards.DEFAULT_TOP_N, "excluded_technicians": [], "excluded_tickets": []},
     }
-    p = module_settings_file(module)
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            data = json.load(f)
+    data = store.read_json(module_settings_file(module), None)
+    if data is not None:
         defaults.update(data)
         if data.get("recipients") and not data.get("contacts"):
             defaults["contacts"] = [{"email": e, "name": "", "role": "to"} for e in data["recipients"]]
@@ -1111,10 +1058,7 @@ def alert_history_file(module):
 
 def load_alert_history(module):
     p = alert_history_file(module)
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    return store.read_json(p, [])
 
 
 def save_alert_history(module, history):
@@ -1146,10 +1090,7 @@ def post_alert_history(module):
 
 def load_send_log(module):
     p = send_log_file(module)
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    return store.read_json(p, [])
 
 
 def append_send_log(module, entry):
@@ -1184,10 +1125,9 @@ def monthly_attachments(module, module_settings):
     es = module_settings.get("email_sections", {})
     if not (es.get("late", True) and es.get("late_xlsx", True)):
         return []
-    tickets = load_raw_tickets()
-    if not tickets:
+    if not raw_tickets_count():
         return []
-    v = retards.view(tickets, module_settings)
+    v = retards.view(load_raw_tickets(open_only=True), module_settings)
     if not v["shown"]:
         return []
     return [(retards_xlsx.fill(v), retards_xlsx.MIME, retards_xlsx.filename(v["as_of"]))]
@@ -1305,10 +1245,7 @@ def timeseries_file():
 
 def load_timeseries():
     p = timeseries_file()
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {}
+    return store.read_json(p, {})
 
 
 def save_timeseries(data):
@@ -1321,10 +1258,7 @@ def sources_path(ym):
 
 def load_sources(ym):
     p = sources_path(ym)
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"categories": [], "services": [], "techniciens": [], "demandeurs": []}
+    return store.read_json(p, {"categories": [], "services": [], "techniciens": [], "demandeurs": []})
 
 
 def save_sources(ym, data):
@@ -1354,10 +1288,8 @@ def empty_moussanada_notes():
 
 
 def load_notes(ym):
-    p = notes_path(ym)
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            data = json.load(f)
+    data = store.read_json(notes_path(ym), None)
+    if data is not None:
         base = empty_moussanada_notes()
         sections = data.pop("sections", None)
         base.update(data)
@@ -1382,10 +1314,7 @@ def technicien_filter_file():
 
 def load_technicien_filter():
     defaults = {"mode": "exclude", "technicians": []}  # mode: "exclude" ou "whitelist"
-    p = technicien_filter_file()
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            defaults.update(json.load(f))
+    defaults.update(store.read_json(technicien_filter_file(), {}))
     return defaults
 
 
@@ -1430,12 +1359,16 @@ def raw_tickets_file():
     return os.path.join(module_dir("moussanada"), "tickets_raw.json")
 
 
-def load_raw_tickets():
-    p = raw_tickets_file()
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+def load_raw_tickets(start=None, end=None, open_only=False):
+    """Tickets bruts. start/end (AAAA-MM) et open_only filtrent côté stockage (index SQLite) : à privilégier
+    dès qu'on n'a pas besoin de tout l'historique, qui grossit avec les années."""
+    if not (start or end or open_only):
+        return store.read_json(raw_tickets_file(), [])
+    return store.tickets(raw_tickets_file(), start, end, open_only)
+
+
+def raw_tickets_count():
+    return store.tickets_count(raw_tickets_file())
 
 
 def save_raw_tickets(tickets):
@@ -1540,15 +1473,18 @@ def _filter_raw_tickets_period(tickets, start=None, end=None):
 def moussanada_late_tickets():
     """Tickets en retard (non résolus, échéance TTR dépassée) d'après les tickets bruts importés :
     TOP tel qu'il figurera dans l'email (techniciens exclus écartés) + liste complète."""
-    return jsonify(retards.to_json(retards.view(load_raw_tickets(), load_module_settings("moussanada"))))
+    return jsonify(retards.to_json(retards.view(load_raw_tickets(open_only=True), load_module_settings("moussanada"))))
 
 
 @app.route("/api/moussanada/late-tickets.xlsx")
 def moussanada_late_tickets_xlsx():
     """Même classeur que la pièce jointe de l'email (gabarit AMMPS, techniciens écartés exclus)."""
-    v = retards.view(load_raw_tickets(), load_module_settings("moussanada"))
+    v = retards.view(load_raw_tickets(open_only=True), load_module_settings("moussanada"))
     return send_file(io.BytesIO(retards_xlsx.fill(v)), as_attachment=True, download_name=retards_xlsx.filename(v["as_of"]),
                      mimetype=retards_xlsx.MIME)
+
+
+SOUFFRANCE_SAMPLE = 10   # tickets en souffrance affichés dans le dashboard (échantillon)
 
 
 @app.route("/api/moussanada/tickets-analytics")
@@ -1556,7 +1492,7 @@ def moussanada_tickets_analytics():
     """Analyses tirées des tickets bruts GLPI (Type, Priorité, distribution des délais, tickets
     en souffrance) — ce que le module reporting natif de GLPI n'agrège pas. Filtrable par
     période (start/end au format YYYY-MM)."""
-    tickets = _filter_raw_tickets_period(load_raw_tickets(), request.args.get("start"), request.args.get("end"))
+    tickets = load_raw_tickets(request.args.get("start") or None, request.args.get("end") or None)
 
     type_counts = {}
     priority_counts = {}
@@ -1575,6 +1511,7 @@ def moussanada_tickets_analytics():
 
     return jsonify({
         "total_tickets": len(tickets),
+        "en_souffrance_total": len(en_souffrance),
         "type_counts": type_counts,
         "priority_counts": priority_counts,
         "delay_buckets": delay_buckets,
@@ -1583,7 +1520,7 @@ def moussanada_tickets_analytics():
             {"id": t["id"], "titre": t.get("titre", ""), "statut": t.get("statut", ""),
              "date_ouverture": t.get("date_ouverture", ""), "technicien": t.get("technicien", ""),
              "priorite": t.get("priorite", "")}
-            for t in en_souffrance
+            for t in en_souffrance[:SOUFFRANCE_SAMPLE]   # échantillon (les plus anciens) : ne pas encombrer le dashboard
         ],
     })
 
@@ -1602,10 +1539,7 @@ def import_history_file():
 
 def load_import_history():
     p = import_history_file()
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    return store.read_json(p, [])
 
 
 def record_import_history(kind, ym, mode, source):
@@ -2005,10 +1939,7 @@ def pchc_records_file():
 
 def load_pchc_records():
     p = pchc_records_file()
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"categories": {k: [] for k in PCHC_CATEGORIES}, "last_import": None}
+    return store.read_json(p, {"categories": {k: [] for k in PCHC_CATEGORIES}, "last_import": None})
 
 
 def save_pchc_records(data):
@@ -2026,10 +1957,7 @@ def pchc_notes_file():
 
 def load_pchc_notes():
     p = pchc_notes_file()
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return {"copilot_text": ""}
+    return store.read_json(p, {"copilot_text": ""})
 
 
 def save_pchc_notes(data):
@@ -2729,10 +2657,7 @@ def pchc_raw_file(name):
 
 def load_pchc_meta():
     p = pchc_raw_file("meta")
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return None
+    return store.read_json(p, None)
 
 
 def load_pchc_raw():
@@ -2744,20 +2669,16 @@ def load_pchc_raw():
     if _pchc_raw_cache["sig"] != sig:
         raw = {}
         for m in pchc_raw.MODULES:
-            p = pchc_raw_file(m["key"])
-            if os.path.exists(p):
-                with open(p, "r", encoding="utf-8") as f:
-                    raw[m["key"]] = json.load(f)
+            doc = store.read_json(pchc_raw_file(m["key"]), None)
+            if doc is not None:
+                raw[m["key"]] = doc
         _pchc_raw_cache.update(sig=sig, raw=raw)
     return _pchc_raw_cache["raw"]
 
 
 def load_pchc_history():
     p = pchc_raw_file("history")
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            return json.load(f)
-    return []
+    return store.read_json(p, [])
 
 
 def append_pchc_history(entry):
@@ -3061,17 +2982,7 @@ def save_analysis(module, ym):
 @app.route("/api/admin/audit-log")
 def get_audit_log():
     limit = min(int(request.args.get("limit", 200)), 1000)
-    entries = []
-    if os.path.exists(AUDIT_LOG_FILE):
-        with open(AUDIT_LOG_FILE, "r", encoding="utf-8") as f:
-            for line in f:
-                line = line.strip()
-                if not line:
-                    continue
-                try:
-                    entries.append(json.loads(line))
-                except json.JSONDecodeError:
-                    continue
+    entries = store.read_jsonl(AUDIT_LOG_FILE)
     entries.reverse()
     return jsonify(entries[:limit])
 
@@ -3207,7 +3118,7 @@ def moussanada_technicien_names():
     stockés indépendamment de la série mensuelle des tickets)."""
     names = set()
     d = module_dir("moussanada")
-    for fn in os.listdir(d):
+    for fn in store.names(d):
         if fn.startswith("sources_") and fn.endswith(".json"):
             ym = fn[len("sources_"):-len(".json")]
             src = load_sources(ym)
@@ -3289,9 +3200,21 @@ def moussanada_glpi_import_direct():
 # ---------------------------------------------------------------------------
 # API - Paramètres globaux (agence, logo)
 # ---------------------------------------------------------------------------
+# Réglages lisibles avant connexion (écran de login : nom, logos, palette) — rien de sensible.
+PUBLIC_SETTING_KEYS = ("agency_name", "app_name", "app_subtitle", "logo_filename", "sanad_logo_filename", "ui_palette", "ui_theme", "pchc_enabled")
+# Secrets : réservés à l'administrateur (jamais renvoyés aux autres rôles ni sans connexion).
+SECRET_SETTING_KEYS = ("glpi_app_token", "glpi_user_token", "smtp_password", "reminder_api_token")
+
+
 @app.route("/api/global-settings", methods=["GET"])
 def get_global_settings():
-    return jsonify(load_global_settings())
+    gs = load_global_settings()
+    user = current_user()
+    if not user:
+        return jsonify({k: gs[k] for k in PUBLIC_SETTING_KEYS if k in gs})
+    if user["role"] != "admin":
+        return jsonify({k: v for k, v in gs.items() if k not in SECRET_SETTING_KEYS})
+    return jsonify(gs)
 
 
 @app.route("/api/global-settings", methods=["POST"])
@@ -3392,7 +3315,7 @@ def months_list(module):
     months = set()
     if module == "moussanada":
         prefixes = ("sources_", "notes_")
-        for fname in os.listdir(d):
+        for fname in store.names(d):
             for kind in prefixes:
                 if fname.startswith(kind) and fname.endswith(".json"):
                     months.add(fname[len(kind):-5])
@@ -3403,12 +3326,12 @@ def months_list(module):
                 "ym": ym,
                 "label": month_label_fr(ym),
                 "has_calls": ym in load_timeseries(),
-                "has_emails": os.path.exists(sources_path(ym)),
-                "has_analysis": os.path.exists(notes_path(ym)),
+                "has_emails": store.exists(sources_path(ym)),
+                "has_analysis": store.exists(notes_path(ym)),
             })
         return jsonify(out)
 
-    for fname in os.listdir(d):
+    for fname in store.names(d):
         for kind in ("calls_", "emails_", "analysis_"):
             if fname.startswith(kind) and fname.endswith(".json"):
                 months.add(fname[len(kind):-5])
@@ -3417,9 +3340,9 @@ def months_list(module):
         out.append({
             "ym": ym,
             "label": month_label_fr(ym),
-            "has_calls": os.path.exists(_path(module, "calls", ym)),
-            "has_emails": os.path.exists(_path(module, "emails", ym)),
-            "has_analysis": os.path.exists(_path(module, "analysis", ym)),
+            "has_calls": store.exists(_path(module, "calls", ym)),
+            "has_emails": store.exists(_path(module, "emails", ym)),
+            "has_analysis": store.exists(_path(module, "analysis", ym)),
         })
     return jsonify(out)
 
@@ -3430,8 +3353,7 @@ def delete_month(module, ym):
     removed = []
     if module == "moussanada":
         for p, label in ((sources_path(ym), "sources"), (notes_path(ym), "notes")):
-            if os.path.exists(p):
-                os.remove(p)
+            if store.remove(p):
                 removed.append(label)
         ts = load_timeseries()
         if ym in ts:
@@ -3442,8 +3364,7 @@ def delete_month(module, ym):
 
     for kind in ("calls", "emails", "analysis", "meta_calls", "meta_emails"):
         p = _path(module, kind, ym)
-        if os.path.exists(p):
-            os.remove(p)
+        if store.remove(p):
             removed.append(kind)
     return jsonify({"ok": True, "removed": removed})
 
@@ -3527,7 +3448,7 @@ def pchc_export_csv_raw():
 @app.route("/api/moussanada/export-csv-tickets")
 def moussanada_export_csv_tickets():
     """Export CSV brut des tickets GLPI importés (ticket par ticket), pour analyse ad hoc."""
-    tickets = _filter_raw_tickets_period(load_raw_tickets(), request.args.get("start"), request.args.get("end"))
+    tickets = load_raw_tickets(request.args.get("start") or None, request.args.get("end") or None)
     buf = io.StringIO()
     writer = csv.writer(buf)
     cols = ["id", "titre", "statut", "date_ouverture", "priorite", "demandeur", "groupe_demandeur",
@@ -3552,7 +3473,11 @@ def export_all(module):
             for fn in files:
                 full = os.path.join(root, fn)
                 arcname = os.path.relpath(full, d)
+                if store.backend_name() == "sqlite" and fn.endswith(".json"):
+                    continue   # documents exportés depuis la base ci-dessous
                 zf.write(full, arcname)
+        for rel, content in store.export_documents(d):
+            zf.writestr(rel, content)
     buf.seek(0)
     stamp = datetime.now().strftime("%Y%m%d_%H%M")
     return send_file(buf, as_attachment=True, download_name=f"{module}_backup_{stamp}.zip",
@@ -3567,7 +3492,20 @@ def import_all(module):
         return jsonify({"ok": False, "error": "Aucun fichier reçu"}), 400
     try:
         with zipfile.ZipFile(f) as zf:
-            zf.extractall(module_dir(module))
+            if store.backend_name() == "sqlite":
+                root = os.path.normpath(module_dir(module))
+                for n in zf.namelist():
+                    target = os.path.normpath(os.path.join(root, n))
+                    if n.endswith("/") or not target.startswith(root + os.sep):
+                        continue
+                    if n.endswith(".json"):
+                        store.write_json(target, json.loads(zf.read(n).decode("utf-8")))
+                    else:
+                        os.makedirs(os.path.dirname(target), exist_ok=True)
+                        with open(target, "wb") as out:
+                            out.write(zf.read(n))
+            else:
+                zf.extractall(module_dir(module))
     except zipfile.BadZipFile:
         return jsonify({"ok": False, "error": "Fichier zip invalide"}), 400
     return jsonify({"ok": True})
@@ -3620,7 +3558,7 @@ def moussanada_category_trend():
 
     # Ne garder que le Top 8 des catégories (en volume cumulé) pour un graphique lisible
     totals = {label: sum(per_month[ym].get(label, 0) for ym in months) for label in all_labels}
-    top_labels = [l for l, _ in sorted(totals.items(), key=lambda kv: kv[1], reverse=True)[:8]]
+    top_labels = [l for l, _ in sorted(totals.items(), key=lambda kv: (-kv[1], kv[0]))[:8]]   # égalités : ordre alphabétique (déterministe)
 
     series = {label: [per_month[ym].get(label, 0) for ym in months] for label in top_labels}
     return jsonify({
@@ -3637,20 +3575,127 @@ def annual(module, year):
     months = month_range(start_ym, end_ym)
 
     if module == "moussanada":
-        ts = load_timeseries()
-        months_out = []
-        for ym in months:
-            row = ts.get(ym)
-            if not row or not any((row.get(k) or 0) for k in ("ouverts", "resolus", "en_retard", "clos")):
-                continue  # mois sans donnée : absent des graphiques
-            months_out.append({
-                "ym": ym, "label": month_label_fr(ym),
-                "ouverts": row.get("ouverts", 0), "resolus": row.get("resolus", 0),
-                "en_retard": row.get("en_retard", 0), "clos": row.get("clos", 0),
-                "resolution_h": row.get("resolution_h", 0), "cloture_h": row.get("cloture_h", 0),
-            })
-        return jsonify({"year": year, "start": start_ym, "end": end_ym, "months": months_out})
+        return jsonify({"year": year, **moussanada_annual_data(start_ym, end_ym, annual_source_arg())})
     return jsonify({"year": year, **tarkhiss_annual_data(module, start_ym, end_ym)})
+
+
+# --- Fichier source annuel Moussanada : alternative aux données mois par mois -----------------------
+def annual_import_file():
+    return os.path.join(module_dir("moussanada"), "annual_import.json")
+
+
+def load_annual_import():
+    p = annual_import_file()
+    return store.read_json(p, None)
+
+
+def annual_source_arg():
+    """« monthly » (données mois par mois, défaut) ou « import » (fichier annuel importé)."""
+    body = request.get_json(silent=True) or {}
+    return "import" if (request.args.get("source") or body.get("source")) == "import" else "monthly"
+
+
+def annual_import_info():
+    imp = load_annual_import()
+    if not imp:
+        return {"available": False}
+    return {"available": True, "filename": imp.get("filename"), "imported_at": imp.get("imported_at"), "user": imp.get("user"),
+            "months": sorted(imp.get("months", {})), "categories": len(imp.get("categories", [])), "demandeurs": len(imp.get("demandeurs", [])),
+            "services": len(imp.get("services", []))}
+
+
+@app.route("/api/moussanada/annual-import")
+def moussanada_annual_import_info():
+    return jsonify(annual_import_info())
+
+
+@app.route("/api/moussanada/annual-import", methods=["POST"])
+def moussanada_annual_import():
+    f = request.files.get("file")
+    if not f:
+        return jsonify({"ok": False, "error": "Aucun fichier reçu"}), 400
+    if os.path.splitext(f.filename)[1].lower() not in (".xlsx", ".xlsm"):
+        return jsonify({"ok": False, "error": "Format non supporté (.xlsx, .xlsm : export GLPI consolidé)"}), 400
+    try:
+        result, ts, src = _parse_moussanada_xlsx(f, {}, {"categories": [], "services": [], "techniciens": [], "demandeurs": []})
+    except Exception as e:
+        return jsonify({"ok": False, "error": f"Erreur d'analyse du fichier : {e}"}), 400
+    ts = {k: v for k, v in ts.items() if re.match(r"^\d{4}-\d{2}$", k)}
+    if not ts and not src["categories"] and not src["demandeurs"]:
+        return jsonify({"ok": False, "error": "Aucune donnée détectée : feuilles attendues « rawData - Tickets », « rawData - Ticket - Catégories », « rawData - Ticket - Demandeur »."}), 400
+    u = current_user()
+    write_json_safely(annual_import_file(), {
+        "filename": f.filename, "imported_at": datetime.now().isoformat(timespec="seconds"), "user": u["username"] if u else "system",
+        "months": ts, "categories": src["categories"], "demandeurs": src["demandeurs"], "services": src["services"]})
+    log_audit("annual_import", {"file": f.filename, "months": len(ts), "categories": len(src["categories"]), "demandeurs": len(src["demandeurs"]), "services": len(src["services"])}, module="moussanada")
+    warnings = []
+    if not ts:
+        warnings.append("Aucune série mensuelle (feuille « rawData - Tickets ») : tendance et détail par mois resteront vides.")
+    if not src["categories"] or not src["demandeurs"] or not src["services"]:
+        warnings.append("Catégories, demandeurs ou services absents du fichier : les tops correspondants resteront vides.")
+    return jsonify({"ok": True, "info": annual_import_info(), "result": result, "warnings": warnings})
+
+
+@app.route("/api/moussanada/annual-import/clear", methods=["POST"])
+def moussanada_annual_import_clear():
+    p = annual_import_file()
+    if store.remove(p):
+        log_audit("annual_import_clear", {}, module="moussanada")
+    return jsonify({"ok": True})
+
+
+def moussanada_annual_data(start_ym, end_ym, source="monthly"):
+    """Données de la « Vue annuelle » Moussanada (écran, e-mail, PDF, PPTX, Excel) : mois avec données,
+    totaux, catégories les plus demandées et top des demandeurs sur la période.
+    Total = tickets reçus (tous statuts) ; En cours = tickets de la période ni résolus ni clos (tickets
+    bruts importés, repli ouverts − résolus) ; En instance = tickets dont l'échéance est dépassée."""
+    imp = load_annual_import() if source == "import" else None
+    if source == "import" and not imp:
+        abort(409, description="Aucun fichier annuel importé : importez-le ou choisissez les données mois par mois.")
+    ts = imp["months"] if imp else load_timeseries()
+    raw_by_month = {}
+    for t in ([] if imp else load_raw_tickets(start_ym, end_ym)):
+        ym = (t.get("date_ouverture") or "")[:7]
+        raw_by_month.setdefault(ym, []).append(t.get("statut") or "")
+    months_out, cats, dems, srvs = [], {}, {}, {}
+    if imp:   # catégories, demandeurs et services du fichier : totaux de toute la période couverte par le fichier
+        for key, acc in (("categories", cats), ("demandeurs", dems), ("services", srvs)):
+            for it in imp.get(key, []):
+                label = (it.get("label") or "").strip()
+                if label:
+                    cur = acc.setdefault(label, {"label": label, "ouverts": 0, "resolus": 0})
+                    cur["ouverts"] += it.get("ouverts", 0) or 0
+                    cur["resolus"] += it.get("resolus", 0) or 0
+    for ym in month_range(start_ym, end_ym):
+        row = ts.get(ym)
+        if not row or not any((row.get(k) or 0) for k in ("ouverts", "resolus", "en_retard", "clos")):
+            continue  # mois sans donnée : absent des graphiques
+        total = row.get("ouverts", 0) or 0
+        if ym in raw_by_month:
+            en_cours = sum(1 for s in raw_by_month[ym] if s and s not in ("Résolu", "Clos"))
+        else:
+            en_cours = max(0, total - (row.get("resolus", 0) or 0))
+        months_out.append({
+            "ym": ym, "label": month_label_fr(ym), "total": total, "en_cours": en_cours,
+            "ouverts": total, "resolus": row.get("resolus", 0), "clos": row.get("clos", 0),
+            "en_instance": row.get("en_retard", 0), "en_retard": row.get("en_retard", 0),
+            "resolution_h": row.get("resolution_h", 0), "cloture_h": row.get("cloture_h", 0),
+        })
+        src = {} if imp else load_sources(ym)
+        for key, acc in (("categories", cats), ("demandeurs", dems), ("services", srvs)):
+            for it in src.get(key, []):
+                label = (it.get("label") or "").strip()
+                if label:
+                    cur = acc.setdefault(label, {"label": label, "ouverts": 0, "resolus": 0})
+                    cur["ouverts"] += it.get("ouverts", 0) or 0
+                    cur["resolus"] += it.get("resolus", 0) or 0
+    top = lambda acc: sorted((v for v in acc.values() if v["ouverts"] > 0), key=lambda v: (-v["ouverts"], v["label"]))[:10]
+    totals = {k: sum(m[k] for m in months_out) for k in ("total", "en_cours", "resolus", "clos", "en_instance")}
+    # Libellé de période = premier et dernier mois AVEC données (et non les bornes demandées)
+    first, last = (months_out[0]["ym"], months_out[-1]["ym"]) if months_out else (start_ym, end_ym)
+    return {"start": start_ym, "end": end_ym, "period_label": annual_period_label(first, last), "months": months_out,
+            "totals": totals, "top_categories": top(cats), "top_demandeurs": top(dems), "top_services": top(srvs), "source": "import" if imp else "monthly",
+            "source_label": f"Fichier annuel importé ({imp['filename']})" if imp else "Données mois par mois"}
 
 
 def tarkhiss_annual_data(module, start_ym, end_ym):
@@ -3747,11 +3792,7 @@ def annual_notes_file():
 
 def load_annual_notes(start, end):
     """Descriptifs rédigés de la Vue annuelle pour une période {bloc: texte}."""
-    p = annual_notes_file()
-    if not os.path.exists(p):
-        return {}
-    with open(p, "r", encoding="utf-8") as f:
-        return (json.load(f).get(f"{start}_{end}") or {}).get("notes", {})
+    return (store.read_json(annual_notes_file(), {}).get(f"{start}_{end}") or {}).get("notes", {})
 
 
 @app.route("/api/tarkhiss/annual-notes")
@@ -3768,10 +3809,7 @@ def tarkhiss_annual_notes_save():
     payload = request.json or {}
     notes = {k: str((payload.get("notes") or {}).get(k) or "").strip() for k in tarkhiss_annual.BLOCK_LABEL}
     p = annual_notes_file()
-    allnotes = {}
-    if os.path.exists(p):
-        with open(p, "r", encoding="utf-8") as f:
-            allnotes = json.load(f)
+    allnotes = store.read_json(p, {})
     u = current_user()
     allnotes[f"{start}_{end}"] = {"notes": notes, "updated_at": datetime.now().isoformat(timespec="seconds"),
                                   "user": u["username"] if u else "system"}
@@ -3893,6 +3931,95 @@ def tarkhiss_annual_send_email():
     log_audit("annual_send_email", {"start": start, "end": end, "attachments": names, "size": len(eml), "to": to_list}, module="tarkhiss")
     return jsonify({"ok": True, "file": fname, "opened": opened, "error": error, "subject": subject, "attachments": names,
                     "size": len(eml), "download": f"/api/tarkhiss/send-log/download/{fname}"})
+
+
+# ---------------------------------------------------------------------------
+# MOUSSANADA — Rapport annuel / de période (Vue annuelle) : e-mail, PDF, PPTX, Excel
+# Même contenu partout (moussanada_annual.py) : KPI, tendance, catégories les plus demandées,
+# top des demandeurs, détail par mois.
+# ---------------------------------------------------------------------------
+def moussanada_annual_ctx(data, gen):
+    gs = load_global_settings()
+    s, e = data["start"], data["end"]
+    full_year = s[:4] == e[:4] and s[5:] == "01" and e[5:] == "12"
+    title = f"Rapport {'annuel' if full_year else 'de période'} — Support Moussanada"
+    agency = gs.get("agency_name") or "AMMPS — DSID"
+    return {"title": title, "period_label": data["period_label"], "agency": agency, "generated": gen,
+            "months_count": len(data["months"]), "clean": strip_platform_mentions}
+
+
+def build_moussanada_annual(fmt, start, end, gen=None, source="monthly"):
+    """Livrable annuel Moussanada (pdf, pptx, xlsx) → (octets, type MIME, nom). Même fonction pour les
+    téléchargements et les pièces jointes."""
+    gen = gen or datetime.now()
+    data = moussanada_annual_data(start, end, source)
+    ctx = moussanada_annual_ctx(data, gen)
+    base = f"Rapport_Moussanada_{start}_{end}"
+    if fmt == "pptx":
+        return moussanada_annual.build_pptx(ctx, data), moussanada_annual.PPTX_MIME, base + ".pptx"
+    if fmt == "pdf":
+        return moussanada_annual.build_pdf(ctx, data), "application/pdf", base + ".pdf"
+    if fmt == "xlsx":
+        import xlsxwriter
+        buf = io.BytesIO()
+        wb = xlsxwriter.Workbook(buf, {"in_memory": True})
+        moussanada_annual.write_summary_sheet(wb, xlsx_formats(wb), data, ctx)
+        wb.close()
+        return buf.getvalue(), moussanada_annual.XLSX_MIME, base + ".xlsx"
+    abort(404, description="Format inconnu (pdf, pptx, xlsx)")
+
+
+@app.route("/api/moussanada/annual-report/<fmt>")
+def moussanada_annual_report(fmt):
+    start, end = annual_period_args()
+    data, mime, name = build_moussanada_annual(fmt, start, end, source=annual_source_arg())
+    log_audit("annual_export", {"format": fmt, "start": start, "end": end, "file": name, "size": len(data), "source": annual_source_arg()}, module="moussanada")
+    return send_file(io.BytesIO(data), as_attachment=True, download_name=name, mimetype=mime)
+
+
+def moussanada_annual_email(start, end, greeting=None, source="monthly"):
+    data = moussanada_annual_data(start, end, source)
+    ctx = moussanada_annual_ctx(data, datetime.now())
+    ms = load_module_settings("moussanada")
+    body = strip_platform_mentions(moussanada_annual.mail_html(ctx, data, greeting or ms.get("greeting", "Bonjour,"), rapports_mensuels.signature_parts(ms),
+                                                               rapports_mensuels.full_width(sys.modules[__name__])))
+    return f"Rapport de Synthèse du Support Moussanada - {data['period_label']}", body, ms
+
+
+@app.route("/api/moussanada/annual-email-preview")
+def moussanada_annual_email_preview():
+    start, end = annual_period_args()
+    subject, body, _ = moussanada_annual_email(start, end, request.args.get("greeting"), annual_source_arg())
+    return jsonify({"subject": subject, "html": body})
+
+
+@app.route("/api/moussanada/annual-send-email", methods=["POST"])
+def moussanada_annual_send_email():
+    payload = request.json or {}
+    start, end = annual_period_args()
+    subject, body, ms = moussanada_annual_email(start, end, payload.get("greeting"), annual_source_arg())
+    to_list = payload.get("to") or [c["email"] for c in ms.get("contacts", []) if c.get("role") == "to"]
+    cc_list = payload.get("cc") or [c["email"] for c in ms.get("contacts", []) if c.get("role") == "cc"]
+    attach = payload.get("attachments") or {}
+    msg = new_draft_email(subject, to_list, cc_list, body)
+    names = []
+    for fmt in ("pdf", "pptx", "xlsx"):
+        if attach.get(fmt):
+            data, mime, name = build_moussanada_annual(fmt, start, end, source=annual_source_arg())
+            maintype, subtype = mime.split("/", 1)
+            msg.add_attachment(data, maintype=maintype, subtype=subtype, filename=name)
+            names.append(name)
+    fname = f"rapport_moussanada_{start}_{end}.eml"
+    fpath = os.path.join(module_dir("moussanada"), "exports", fname)
+    eml = bytes(msg)
+    with open(fpath, "wb") as f:
+        f.write(eml)
+    opened, error = open_in_outlook(fpath)
+    append_send_log("moussanada", {"date": datetime.now().isoformat(timespec="seconds"), "ym": f"{start}_{end}", "subject": subject,
+                                   "to": to_list, "cc": cc_list, "opened": opened, "file": fname, "attachments": names})
+    log_audit("annual_send_email", {"start": start, "end": end, "attachments": names, "size": len(eml), "to": to_list, "source": annual_source_arg()}, module="moussanada")
+    return jsonify({"ok": True, "file": fname, "opened": opened, "error": error, "subject": subject, "attachments": names,
+                    "size": len(eml), "download": f"/api/moussanada/send-log/download/{fname}"})
 
 
 # ---------------------------------------------------------------------------
@@ -4396,7 +4523,7 @@ def build_report_html_moussanada(ym, month_label, charts=None, for_pdf=False):
 
     # Heatmap de charge (jour x heure) — seulement si des tickets bruts ont été importés pour
     # ce mois (fonctionnalité optionnelle, distincte de l'import agrégé habituel).
-    raw_tickets_for_month = [t for t in load_raw_tickets() if (t.get("date_ouverture") or "")[:7] == ym]
+    raw_tickets_for_month = load_raw_tickets(ym, ym)
     heatmap_matrix = compute_heatmap_matrix(raw_tickets_for_month) if raw_tickets_for_month else None
     heatmap_b64 = ""
     if heatmap_matrix:
@@ -5093,16 +5220,24 @@ def network_config_file():
     return os.path.join(DATA_DIR, "network_config.json")
 
 
+def mirror_network_for_launcher(cfg):
+    """Copie en clair {host, port} dans data/network.json : lue par Lancer-SANAD.bat (le .bat ne sait pas lire la
+    base). Simple miroir à l'usage du lanceur, jamais relu par l'application (source de vérité : network_config.json)."""
+    try:
+        with open(os.path.join(DATA_DIR, "network.json"), "w", encoding="utf-8") as f:
+            json.dump({"host": cfg["host"], "port": cfg["port"]}, f)
+    except OSError:
+        pass
+
+
 def load_network_config():
     p = network_config_file()
     default = {"host": "127.0.0.1", "port": 5050}
-    if os.path.exists(p):
-        try:
-            with open(p, "r", encoding="utf-8") as f:
-                cfg = json.load(f)
-            default.update({k: v for k, v in cfg.items() if k in ("host", "port")})
-        except Exception:
-            pass
+    try:
+        cfg = store.read_json(p, {})
+        default.update({k: v for k, v in cfg.items() if k in ("host", "port")})
+    except Exception:
+        pass
     return default
 
 
@@ -5154,6 +5289,7 @@ def system_network_config_save():
     port_changed = port != NETWORK_STATE["port"]
     os.makedirs(DATA_DIR, exist_ok=True)
     write_json_safely(network_config_file(), {"host": host, "port": port})
+    mirror_network_for_launcher({"host": host, "port": port})
     log_audit("network_config_change", {"host": host, "port": port, "restart": port_changed})
 
     # Bascule local/réseau : appliquée immédiatement (le serveur écoute déjà sur 0.0.0.0 — voir
@@ -5177,6 +5313,7 @@ ops.register(app, sys.modules[__name__])
 
 if __name__ == "__main__":
     net_cfg = load_network_config()
+    mirror_network_for_launcher(net_cfg)
     NETWORK_STATE["enabled"] = (net_cfg["host"] == "0.0.0.0")
     NETWORK_STATE["port"] = net_cfg["port"]
     lan_ip = get_lan_ip()

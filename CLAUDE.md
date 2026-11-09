@@ -1,6 +1,6 @@
 # SANAD — contexte pour Claude Code
 
-Application web locale **Flask + fichiers JSON** (aucune base) de pilotage du Helpdesk SI de l'AMMPS (DSID).
+Application web locale **Flask + fichiers JSON** (migration progressive vers **SQLite** en cours, voir HANDOFF § 5 sexies) de pilotage du Helpdesk SI de l'AMMPS (DSID).
 Volets : **Tarkhiss** (Support Email & Hotline), **Moussanada** (Helpdesk GLPI), **Reporting Métier PCHC**.
 UI : **legacy unique** = `templates/index.html` + `static/app.js` (JS vanilla, Chart.js CDN) + `static/style.css`. Pas de framework.
 Thème **Nolvira** (défaut sur `/`) = couche `static/nolvira/nolvira.css|js` injectée par la route `/` ; `/classic` = ancien thème brut (rollback).
@@ -13,7 +13,7 @@ Lire `HANDOFF.md` (contexte complet) avant toute modification importante.
 - Après chaque livraison : proposer suggestions / améliorations / ajouts (par rôle admin/superviseur/hotliner si pertinent) et dire ce qui n'est pas testé.
 
 ## Règles fermes
-- Stack simple : JSON > base de données ; JS vanilla > frameworks. NE PAS réintroduire React/shadcn (supprimés volontairement).
+- Stack simple ; JS vanilla > frameworks. **Données : décision du 09/11/2026 = migration progressive JSON → SQLite** (usage sur plusieurs années, volumes croissants). Tout accès aux données passe par `store.py` (jamais `open()`/`json.load` direct sur `data/`). NE PAS réintroduire React/shadcn (supprimés volontairement).
 - Écritures JSON atomiques via `write_json_safely` ; actions sensibles tracées par `log_audit`.
 - PDF toujours générés côté serveur (WeasyPrint prioritaire, xhtml2pdf en repli), jamais `window.print()`.
 - Aucune mention « SANAD » dans les fichiers exportés et les emails (nom de l'agence à la place) ; l'interface garde le nom.
@@ -34,12 +34,20 @@ python tests/e2e_smoke.py                     # Playwright : parcourt tous les o
 python tests/test_pchc_export.py              # Reporting Métier PCHC : calcul, Excel = référence, serveur isolé, .eml
 python tests/test_tarkhiss_annual.py          # Vue annuelle Tarkhiss : PDF/PPTX/Excel, email, droits, aucune mention SANAD
 python tests/test_rapports_mensuels.py        # Rapports mensuels charte AMMPS : routes PDF/PPTX/email, droits, aucune mention SANAD
+python tests/test_store.py                    # couche d'accès aux données (store.py), backends json ET sqlite
+python tests/test_store_ops.py                # snapshots / restauration / export-all ; relancer avec SANAD_STORE=sqlite
+python tests/test_migration.py                # migration JSON→SQLite (refus si corrompu / base existante), snapshots entre modes
+python tools/compare_backends.py              # même copie de data/ en JSON et SQLite : réponses d'API identiques ?
+python tests/test_hardening.py                # /api/global-settings public vs secrets, miroir network.json, sauvegarde SQLite
+python tools/backup_sqlite.py <dossier>       # copie cohérente de la base (ou Sauvegarde-SANAD.bat), serveur démarré
+python tools/bench_store.py                   # volumétrie JSON vs SQLite (données synthétiques ×1/×10/×50)
+SANAD_STORE=sqlite python tests/<test>.py     # n'importe quel test sur le backend SQLite (le serveur de test migre ses données)
 python tests/test_retards.py                  # Tickets en retard Moussanada : calcul (reference/glpi (1).csv), TOP email + exclusions, Excel joint, droits
 python tools/build_retards_template.py        # reconstruit static/charte/modele_tickets_en_retard.xlsx (gabarit Excel des retards)
 # hors-ligne : SANAD_CDN_DIR=<dossier avec node_modules/chart.js@4.4.4 + chartjs-plugin-datalabels@2.2.0>
 ```
 Tester tout changement avec un vrai serveur + `curl`/`requests` (et Playwright pour l'UI) avant de livrer. Lancer le serveur et les requêtes dans la **même** commande shell.
-**Livraison** : modifier directement les fichiers du projet (pas d'archive zip), puis redémarrer le serveur SANAD de Youssef (il tourne dans WSL : `.venv/bin/python app.py`, port 5050) pour que le code soit pris en compte. Ne jamais toucher `data/` (données réelles) : tests dans une copie isolée.
+**Livraison** : modifier directement les fichiers du projet (pas d'archive zip), puis redémarrer le serveur SANAD de Youssef (il tourne dans WSL : `.venv/bin/python app.py`, port 5050) pour que le code soit pris en compte. Ne jamais toucher `data/` ni `~/sanad-data/sanad.db` (données réelles) : tests dans une copie isolée. **Depuis le 09/11/2026 les données vivent dans la base SQLite `~/sanad-data/sanad.db` (WSL)** ; les JSON de `data/` sont figés (voir HANDOFF § 5 sexies) ; lancer le serveur avec `SANAD_STORE=sqlite SANAD_DB_PATH=$HOME/sanad-data/sanad.db` (le `.bat` le fait).
 Tout bouton existant qui produit un livrable doit appeler le même générateur que le nouveau (ex. Excel PCHC du Dashboard → gabarit).
 
 ## Pièges connus

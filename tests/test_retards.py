@@ -58,6 +58,14 @@ def test_calcul():
     v2 = retards.view(tickets, cfg, NOW)
     assert v2["total"] == 44 and len(v2["top"]) == 5 and v2["hidden"] == 6
     assert all(t["technicien"] != EXCLUDED for t in v2["top"]) and v2["late"] == v["late"]
+    # tickets écartés un par un (n° en texte ou nombre), cumulés avec les techniciens écartés
+    cfg_t = {"late_tickets": {"top_n": 5, "excluded_tickets": ["1369", 1352]}}
+    v3 = retards.view(tickets, cfg_t, NOW)
+    assert v3["total"] == 44 and v3["hidden"] == 2 and not {"1369", "1352"} & {str(t["id"]) for t in v3["shown"]} and v3["excluded_tickets"] == ["1352", "1369"]
+    cfg_both = {"late_tickets": {"top_n": 5, "excluded_technicians": [EXCLUDED], "excluded_tickets": ["1369"]}}
+    assert retards.view(tickets, cfg_both, NOW)["hidden"] >= v2["hidden"]
+    row = {t["id"]: t for t in retards.to_json(v3)["all"]}
+    assert row["1369"]["excluded"] and row["1369"]["excluded_ticket"] and not row["1111"]["excluded_ticket"]
     # un ticket résolu ou clos n'est jamais en retard
     done = [dict(t, statut="Résolu") for t in tickets]
     assert retards.view(done, None, NOW)["total"] == 0
@@ -88,6 +96,9 @@ def test_excel_gabarit():
     cfg = {"late_tickets": {"top_n": 5, "excluded_technicians": [EXCLUDED]}}
     rows = _check_workbook(X.fill(retards.view(_tickets(), cfg, NOW)), 38)
     assert not any(r[4] == EXCLUDED for r in rows) and rows[0][0] == "1111"
+    # ticket écarté : absent de l'Excel
+    rows = _check_workbook(X.fill(retards.view(_tickets(), {"late_tickets": {"excluded_tickets": ["1369"]}}, NOW)), 43)
+    assert rows[0][0] != "1369"
     # peu de tickets, puis aucun : le gabarit se remplit sans reste des lignes d'exemple
     few = retards.view([t for t in _tickets() if t["id"] in ("1369", "1352")], None, NOW)
     assert len(_check_workbook(X.fill(few), 2)) == 2
@@ -129,6 +140,10 @@ def test_serveur():
         api = admin.get(U + "/api/moussanada/late-tickets").json()
         assert api["total"] == expect and len(api["top"]) == 10 and len(api["all"]) == expect
         assert EXCLUDED in {t["name"] for t in api["technicians"]}
+
+        # dashboard : tickets en souffrance = échantillon seulement
+        an = admin.get(U + "/api/moussanada/tickets-analytics").json()
+        assert len(an["tickets_en_souffrance"]) <= 10 and an["en_souffrance_total"] >= len(an["tickets_en_souffrance"])
 
         # email : section, TOP, pièce jointe
         d = admin.post(U + "/api/moussanada/preview-email/2026-10", json={}).json()

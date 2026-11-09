@@ -74,7 +74,7 @@ let annualChart = null, dailyLoadChart = null, weeklyEmailsChart = null, channel
 let mState = { ym: null, month: null, timeseries: {}, notes: {} };
 let mCharts = {};
 let mAggMode = "leaf"; // "racine" | "leaf" — Nœud final par défaut au chargement
-let mAnnualChart = null, mBacklogChart = null, mCategoryTrendChart = null;
+let mAnnualChart = null, mBacklogChart = null, mCategoryTrendChart = null, mTopCatChart = null, mTopDemChart = null, mTopSrvChart = null;
 
 // ---------- API helpers ----------
 function apiM(path){ return `/api/${currentModule}${path}`; }
@@ -267,8 +267,10 @@ function applyModuleBrand(){
     if(el) el.style.display = hotlinerReadOnly ? "none" : "";
   });
   // Envoi d'email (POST) réservé à l'administrateur — le superviseur garde les exports
-  const annualMail = document.getElementById("annualMailToggleBtn");
-  if(annualMail) annualMail.style.display = currentUser && currentUser.role === "admin" ? "" : "none";
+  ["annualMailToggleBtn", "mAnnualMailToggleBtn", "mAnnualImportBtn"].forEach(id=>{
+    const el = document.getElementById(id);
+    if(el) el.style.display = currentUser && currentUser.role === "admin" ? "" : "none";
+  });
 
   // Filtre les items de nav (et titres de sous-groupe) selon le GROUPE de volet actif ET le rôle.
   // Quand le groupe actif est "tarkhiss", les deux sous-volets (Hotline&Emails + Métier) restent
@@ -2707,7 +2709,7 @@ function renderMDashboard(){
     <div class="charts-row" id="mTicketAnalyticsRow" style="display:none;">
       <div class="chart-card">
         <h3>Répartition par Type</h3>
-        <canvas id="mTypeChart" height="150"></canvas>
+        <div style="position:relative;height:230px;"><canvas id="mTypeChart"></canvas></div>
         <p class="chart-caption">Répartition des tickets par type de demande (incident, demande de service, etc.).</p>
       </div>
       <div class="chart-card">
@@ -2719,6 +2721,7 @@ function renderMDashboard(){
 
     <div class="dash-table-wrap" id="mSouffranceWrap" style="display:none;">
       <h3>⚠️ Tickets en souffrance (non résolus/clos)</h3>
+      <p class="hint" id="mSouffranceMeta" style="margin:0 0 8px;"></p>
       <table class="dash-table">
         <thead><tr><th>ID</th><th>Titre</th><th>Statut</th><th>Ouvert le</th><th>Technicien</th></tr></thead>
         <tbody id="mSouffranceBody"></tbody>
@@ -3060,7 +3063,7 @@ async function refreshMoussanadaHeatmap(){
 // Les techniciens cochés sont écartés du TOP de l'email uniquement ; l'Excel joint les contient tous.
 async function saveLateSettings(patch){
   const cur = await (await fetch("/api/moussanada/settings")).json();
-  const late = Object.assign({top_n: 10, excluded_technicians: []}, cur.late_tickets || {}, patch);
+  const late = Object.assign({top_n: 10, excluded_technicians: [], excluded_tickets: []}, cur.late_tickets || {}, patch);
   const res = await fetch("/api/moussanada/settings", {
     method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({late_tickets: late})
   });
@@ -3068,9 +3071,10 @@ async function saveLateSettings(patch){
   return true;
 }
 
-function lateRows(items, withExcluded){
+function lateRows(items, withExcluded, editable, excludedIds){
   return items.map(t=>`
     <tr${withExcluded && t.excluded ? ' style="opacity:.45;"' : ""}>
+      <td style="text-align:center;"><input type="checkbox" data-late-ticket="${esc(t.id)}" title="Écarter ce ticket du TOP, de l'email et de l'Excel" ${excludedIds.includes(String(t.id))?"checked":""} ${editable?"":"disabled"}></td>
       <td>${esc(t.id)}</td>
       <td>${esc(t.titre)}</td>
       <td>${esc(t.technicien)}</td>
@@ -3083,6 +3087,7 @@ function lateRows(items, withExcluded){
 async function refreshMoussanadaLate(){
   const body = document.getElementById("mLateBody");
   if(!body) return;
+  const wasOpen = !!body.querySelector("details")?.open;
   const meta = document.getElementById("mLateMeta");
   let d;
   try{ d = await (await fetch("/api/moussanada/late-tickets")).json(); }
@@ -3116,21 +3121,29 @@ async function refreshMoussanadaLate(){
       <div class="kpi-card ${d.high?"danger":""}"><div class="kpi-label">Priorité haute</div><div class="kpi-value">${d.high}</div></div>
     </div>
     <div style="margin:0 0 12px;">
-      <div style="font-size:12.5px;font-weight:600;margin-bottom:6px;">Techniciens écartés du TOP de l'email${editable?"":" (lecture seule)"}</div>
+      <div style="font-size:12.5px;font-weight:600;margin-bottom:6px;">Techniciens écartés${editable?"":" (lecture seule)"}</div>
       ${techs}
-      <div class="hint" style="margin-top:2px;">Cocher un technicien retire ses tickets du TOP ${d.top_n} de l'email et de l'Excel (joint ou téléchargé).</div>
+      <div class="hint" style="margin-top:2px;">Cocher un technicien retire ses tickets du TOP ${d.top_n}, des KPI de l'email et de l'Excel (joint ou téléchargé). Vous pouvez aussi écarter des tickets un par un avec la colonne « Écarter » des tableaux ci-dessous${d.excluded_tickets.length ? ` (${d.excluded_tickets.length} ticket(s) écarté(s) individuellement)` : ""}.</div>
     </div>
     <h4 style="margin:10px 0 6px;font-size:13.5px;">TOP ${d.top_n} — tel qu'il figurera dans l'email${d.hidden ? ` <span style="font-weight:400;color:var(--muted);">(${d.hidden} ticket(s) écarté(s))</span>` : ""}</h4>
     <table class="dash-table">
-      <thead><tr><th>N°</th><th>Titre</th><th>Technicien</th><th>Priorité</th><th>Échéance</th><th>Retard</th></tr></thead>
-      <tbody>${lateRows(d.top, false) || `<tr><td colspan="6" style="color:var(--muted);">Tous les tickets en retard appartiennent à des techniciens écartés.</td></tr>`}</tbody>
+      <thead><tr><th title="Écarter">Écarter</th><th>N°</th><th>Titre</th><th>Technicien</th><th>Priorité</th><th>Échéance</th><th>Retard</th></tr></thead>
+      <tbody>${lateRows(d.top, false, editable, d.excluded_tickets) || `<tr><td colspan="7" style="color:var(--muted);">Tous les tickets en retard appartiennent à des techniciens écartés.</td></tr>`}</tbody>
     </table>
-    <details style="margin-top:12px;"><summary style="cursor:pointer;font-size:13px;font-weight:600;">Voir tous les tickets en retard (${d.total})</summary>
+    <details style="margin-top:12px;"${wasOpen ? " open" : ""}><summary style="cursor:pointer;font-size:13px;font-weight:600;">Voir tous les tickets en retard (${d.total})</summary>
       <table class="dash-table" style="margin-top:8px;">
-        <thead><tr><th>N°</th><th>Titre</th><th>Technicien</th><th>Priorité</th><th>Échéance</th><th>Retard</th></tr></thead>
-        <tbody>${lateRows(d.all, true)}</tbody>
+        <thead><tr><th title="Écarter">Écarter</th><th>N°</th><th>Titre</th><th>Technicien</th><th>Priorité</th><th>Échéance</th><th>Retard</th></tr></thead>
+        <tbody>${lateRows(d.all, true, editable, d.excluded_tickets)}</tbody>
       </table>
     </details>`;
+  body.querySelectorAll("input[data-late-ticket]").forEach(cb=>{
+    cb.addEventListener("change", async ()=>{
+      const ids = new Set(d.excluded_tickets.map(String));
+      if(cb.checked) ids.add(cb.dataset.lateTicket); else ids.delete(cb.dataset.lateTicket);
+      await saveLateSettings({excluded_tickets: [...ids]});
+      refreshMoussanadaLate();
+    });
+  });
   body.querySelectorAll("input[data-late-tech]").forEach(cb=>{
     cb.addEventListener("change", async ()=>{
       const excluded = [...body.querySelectorAll("input[data-late-tech]:checked")].map(i=>i.dataset.lateTech);
@@ -3159,7 +3172,7 @@ async function refreshMoussanadaTicketAnalytics(){
     mTypeChart = new Chart(document.getElementById("mTypeChart"), {
       type:"doughnut",
       data:{ labels: typeEntries.map(([k])=>k), datasets:[{ data: typeEntries.map(([,v])=>v), backgroundColor:["#0B4965","#F59F0A","#25935F","#DC2828"] }] },
-      options:{responsive:true, animation:{duration:700}, plugins:{legend:{position:"bottom"}}}
+      options:{responsive:true, maintainAspectRatio:false, animation:{duration:700}, plugins:{legend:{position:"right", labels:{boxWidth:12}}}}
     });
 
     const delayEntries = Object.entries(data.delay_buckets);
@@ -3172,6 +3185,10 @@ async function refreshMoussanadaTicketAnalytics(){
 
     if(data.tickets_en_souffrance && data.tickets_en_souffrance.length){
       souffranceWrap.style.display = "";
+      const shownN = data.tickets_en_souffrance.length, totalN = data.en_souffrance_total || shownN;
+      document.getElementById("mSouffranceMeta").textContent = totalN > shownN
+        ? `Échantillon : les ${shownN} plus anciens sur ${totalN} tickets non résolus/clos. La liste complète des tickets en retard est ci-dessous.`
+        : `${totalN} ticket(s) non résolu(s)/clos.`;
       document.getElementById("mSouffranceBody").innerHTML = data.tickets_en_souffrance.map(t=>`
         <tr>
           <td>${esc(t.id)}</td>
@@ -3635,21 +3652,26 @@ async function loadMAnnual(){
   const start = document.getElementById("mPeriodStart").value || `${new Date().getFullYear()}-01`;
   const end = document.getElementById("mPeriodEnd").value || `${new Date().getFullYear()}-12`;
   const year = start.split("-")[0];
-  const res = await fetch(`/api/moussanada/annual/${year}?start=${start}&end=${end}`);
+  await refreshMAnnualSource();
+  const res = await fetch(`/api/moussanada/annual/${year}?start=${start}&end=${end}&source=${mAnnualSource()}`);
   const data = await res.json();
+  if(!res.ok){ document.getElementById("mAnnualContent").innerHTML = `<p style="color:var(--danger);">${esc(data.description || data.error || "Erreur")}</p>`; return; }
   const months = data.months;
 
-  const totals = months.reduce((acc,m)=>{
-    acc.ouverts+=m.ouverts; acc.resolus+=m.resolus; acc.clos+=m.clos; acc.en_retard+=m.en_retard;
-    return acc;
-  }, {ouverts:0,resolus:0,clos:0,en_retard:0});
+  const totals = data.totals;
+  const topCats = data.top_categories || [], topDem = data.top_demandeurs || [], topSrv = data.top_services || [];
+  const topTable = (items, first)=> items.length ? `
+    <table class="dash-table"><thead><tr><th>${first}</th><th>Total</th><th>Résolus</th></tr></thead>
+      <tbody>${items.map((it,i)=>`<tr><td>${i+1}. ${esc(it.label)}</td><td><strong>${it.ouverts}</strong></td><td>${it.resolus}</td></tr>`).join("")}</tbody></table>`
+    : `<p style="color:var(--muted);">Aucune donnée sur la période.</p>`;
 
   document.getElementById("mAnnualContent").innerHTML = `
     <div class="kpi-grid">
-      <div class="kpi-card"><div class="kpi-label">🎫 Ouverts (période)</div><div class="kpi-value">${totals.ouverts}</div></div>
-      <div class="kpi-card success"><div class="kpi-label">✅ Résolus (période)</div><div class="kpi-value">${totals.resolus}</div></div>
-      <div class="kpi-card"><div class="kpi-label">📦 Clos (période)</div><div class="kpi-value">${totals.clos}</div></div>
-      <div class="kpi-card danger"><div class="kpi-label">⚠️ En retard (cumul)</div><div class="kpi-value">${totals.en_retard}</div></div>
+      <div class="kpi-card"><div class="kpi-label">🎫 Total tickets (période)</div><div class="kpi-value">${totals.total}</div><div class="chart-caption">ouverts, résolus, clos…</div></div>
+      <div class="kpi-card"><div class="kpi-label">🔄 En cours</div><div class="kpi-value">${totals.en_cours}</div><div class="chart-caption">non résolus</div></div>
+      <div class="kpi-card success"><div class="kpi-label">✅ Résolus</div><div class="kpi-value">${totals.resolus}</div></div>
+      <div class="kpi-card"><div class="kpi-label">📦 Clos</div><div class="kpi-value">${totals.clos}</div></div>
+      <div class="kpi-card danger"><div class="kpi-label">⚠️ En instance</div><div class="kpi-value">${totals.en_instance}</div></div>
     </div>
     <div class="chart-card" style="margin-bottom:16px;">
       <h3>Tendance annuelle</h3>
@@ -3657,21 +3679,42 @@ async function loadMAnnual(){
       <p class="chart-caption">Évolution mensuelle des tickets ouverts, résolus et clos sur la période.</p>
     </div>
     <div class="chart-card" style="margin-bottom:16px;">
-      <h3>Évolution du backlog</h3>
+      <h3>Tickets en instance</h3>
       <canvas id="mBacklogAnnualCanvas" height="90"></canvas>
-      <p class="chart-caption">Évolution du stock de tickets en retard sur la période.</p>
+      <p class="chart-caption">Tickets en instance (échéance dépassée), mois par mois.</p>
+    </div>
+    <div class="chart-card" style="margin-bottom:16px;">
+      <h3>Catégories les plus demandées (Top 10, sur la période)</h3>
+      <canvas id="mTopCatCanvas" height="${Math.max(70, topCats.length * 16 + 30)}"></canvas>
+      <p class="chart-caption">Tickets et résolus par catégorie, cumulés sur la période.</p>
+    </div>
+    <div class="chart-card" style="margin-bottom:16px;">
+      <h3>Top des demandeurs (Top 10, sur la période)</h3>
+      <canvas id="mTopDemCanvas" height="${Math.max(70, topDem.length * 16 + 30)}"></canvas>
+      <p class="chart-caption">Tickets et résolus par demandeur, cumulés sur la période.</p>
+    </div>
+    <div class="chart-card" style="margin-bottom:16px;">
+      <h3>Top des services demandeurs (Top 10, sur la période)</h3>
+      <canvas id="mTopSrvCanvas" height="${Math.max(70, topSrv.length * 16 + 30)}"></canvas>
+      <p class="chart-caption">Tickets et résolus par service demandeur, cumulés sur la période.</p>
     </div>
     <div class="chart-card" style="margin-bottom:16px;">
       <h3>Tendance des catégories (Top 8, sur la période)</h3>
       <canvas id="mCategoryTrendCanvas" height="100"></canvas>
       <p class="chart-caption">Évolution du volume des principales catégories de demandes dans le temps.</p>
     </div>
+    <div class="two-col" style="display:grid;grid-template-columns:repeat(auto-fit,minmax(340px,1fr));gap:16px;margin-bottom:16px;">
+      <div class="dash-table-wrap"><h3>Catégories les plus demandées</h3>${topTable(topCats, "Catégorie")}</div>
+      <div class="dash-table-wrap"><h3>Top des demandeurs</h3>${topTable(topDem, "Demandeur")}</div>
+      <div class="dash-table-wrap"><h3>Top des services demandeurs</h3>${topTable(topSrv, "Service")}</div>
+    </div>
     <div class="dash-table-wrap">
       <h3>Détail par mois</h3>
       <table class="dash-table">
-        <thead><tr><th>Mois</th><th>Ouverts</th><th>Résolus</th><th>En retard</th><th>Clos</th><th>Délai résolution</th><th>Délai clôture</th></tr></thead>
+        <thead><tr><th>Mois</th><th>Total tickets</th><th>En cours</th><th>Résolus</th><th>Clos</th><th>En instance</th><th>Délai résolution</th><th>Délai clôture</th></tr></thead>
         <tbody>
-          ${months.map(m=>`<tr><td>${m.label}</td><td>${m.ouverts}</td><td>${m.resolus}</td><td style="color:var(--danger);font-weight:700;">${m.en_retard}</td><td>${m.clos}</td><td>${formatDH(m.resolution_h)}</td><td>${formatDH(m.cloture_h)}</td></tr>`).join("") || `<tr><td colspan="7" style="color:var(--muted);">Aucune donnée</td></tr>`}
+          ${months.map(m=>`<tr><td>${m.label}</td><td><strong>${m.total}</strong></td><td>${m.en_cours}</td><td>${m.resolus}</td><td>${m.clos}</td><td style="color:var(--danger);font-weight:700;">${m.en_instance}</td><td>${formatDH(m.resolution_h)}</td><td>${formatDH(m.cloture_h)}</td></tr>`).join("") || `<tr><td colspan="8" style="color:var(--muted);">Aucune donnée</td></tr>`}
+          ${months.length ? `<tr style="font-weight:700;background:var(--surface-2,#f5f7f9);"><td>Total période</td><td>${totals.total}</td><td>${totals.en_cours}</td><td>${totals.resolus}</td><td>${totals.clos}</td><td style="color:var(--danger);">${totals.en_instance}</td><td>—</td><td>—</td></tr>` : ""}
         </tbody>
       </table>
     </div>
@@ -3681,7 +3724,7 @@ async function loadMAnnual(){
   mAnnualChart = new Chart(document.getElementById("mAnnualChartCanvas"), {
     type:"line",
     data:{ labels: months.map(m=>m.label), datasets:[
-      {label:"Ouverts", data: months.map(m=>m.ouverts), borderColor:"#0B4965", backgroundColor:"#0B496522", tension:.3},
+      {label:"Total", data: months.map(m=>m.total), borderColor:"#0B4965", backgroundColor:"#0B496522", tension:.3},
       {label:"Résolus", data: months.map(m=>m.resolus), borderColor:"#25935F", backgroundColor:"#25935F22", tension:.3},
       {label:"Clos", data: months.map(m=>m.clos), borderColor:"#F59F0A", backgroundColor:"#F59F0A22", tension:.3},
     ]},
@@ -3691,9 +3734,26 @@ async function loadMAnnual(){
   if(mBacklogChart) mBacklogChart.destroy();
   mBacklogChart = new Chart(document.getElementById("mBacklogAnnualCanvas"), {
     type:"bar",
-    data:{ labels: months.map(m=>m.label), datasets:[{label:"En retard", data: months.map(m=>m.en_retard), backgroundColor:"#DC2828", borderRadius:5}] },
+    data:{ labels: months.map(m=>m.label), datasets:[{label:"En instance", data: months.map(m=>m.en_instance), backgroundColor:"#DC2828", borderRadius:5}] },
     options:{responsive:true, animation:{duration:700}, plugins:{legend:{display:false}}, scales:{y:{beginAtZero:true}}}
   });
+
+  // Catégories les plus demandées / top des demandeurs : barres horizontales Total + Résolus
+  const topChart = (canvasId, items, labels)=> new Chart(document.getElementById(canvasId), {
+    type:"bar",
+    data:{ labels, datasets:[
+      {label:"Total", data: items.map(i=>i.ouverts), backgroundColor:"#0B4965", borderRadius:4},
+      {label:"Résolus", data: items.map(i=>i.resolus), backgroundColor:"#25935F", borderRadius:4},
+    ]},
+    options:{indexAxis:"y", responsive:true, animation:{duration:700}, plugins:{legend:{position:"bottom"}}, scales:{x:{beginAtZero:true}}}
+  });
+  const tailLabel = l => String(l).split(">").pop().trim();
+  if(mTopCatChart) mTopCatChart.destroy();
+  mTopCatChart = topChart("mTopCatCanvas", topCats, topCats.map(c=>tailLabel(c.label)));
+  if(mTopDemChart) mTopDemChart.destroy();
+  mTopDemChart = topChart("mTopDemCanvas", topDem, topDem.map(d=>d.label));
+  if(mTopSrvChart) mTopSrvChart.destroy();
+  mTopSrvChart = topChart("mTopSrvCanvas", topSrv, topSrv.map(s=>tailLabel(s.label)));
   // Tendance des catégories — endpoint dédié (s'appuie sur les sources mensuelles déjà stockées)
   const trendRes = await fetch(`/api/moussanada/category-trend?start=${start}&end=${end}`);
   const trend = await trendRes.json();
@@ -3708,8 +3768,118 @@ async function loadMAnnual(){
     options:{responsive:true, animation:{duration:700}, plugins:{legend:{position:"bottom", labels:{boxWidth:10,font:{size:10.5}}}}, scales:{y:{beginAtZero:true}}}
   });
 
-  addPngExportButtons({mAnnualChart, mBacklogChart, mCategoryTrendChart});
+  addPngExportButtons({mAnnualChart, mBacklogChart, mTopCatChart, mTopDemChart, mTopSrvChart, mCategoryTrendChart});
 }
+
+// ---------- Source des données : mois par mois ou fichier annuel importé ----------
+function mAnnualSource(){
+  const r = document.querySelector('input[name="mAnnualSource"]:checked');
+  return r && r.value === "import" ? "import" : "monthly";
+}
+async function refreshMAnnualSource(){
+  let info = {available:false};
+  try{ info = await (await fetch("/api/moussanada/annual-import")).json(); }catch(e){}
+  const imp = document.getElementById("mAnnualSourceImport");
+  imp.disabled = !info.available;
+  let wanted = null;
+  try{ wanted = localStorage.getItem("mAnnualSource"); }catch(e){}
+  const pick = (info.available && wanted === "import") ? "import" : "monthly";
+  document.querySelector(`input[name="mAnnualSource"][value="${pick}"]`).checked = true;
+  document.getElementById("mAnnualImportClearBtn").style.display = info.available && currentUser?.role === "admin" ? "" : "none";
+  document.getElementById("mAnnualImportInfo").textContent = info.available
+    ? `Fichier importé : ${info.filename} — ${(info.imported_at||"").replace("T"," ")} — ${info.months.length} mois, ${info.categories} catégories, ${info.demandeurs} demandeurs, ${info.services||0} services. Catégories, demandeurs et services couvrent toute la période du fichier (non filtrés par les dates ci-dessus).${info.services ? "" : " ⚠ Aucun service enregistré : ré-importez le fichier (feuille « rawData - Ticket - Services » requise)."}`
+    : "Aucun fichier annuel importé. Export GLPI consolidé (.xlsx) : feuilles « rawData - Tickets », « Ticket - Catégories », « Ticket - Demandeur », « Ticket - Services ».";
+}
+document.querySelectorAll('input[name="mAnnualSource"]').forEach(r=>r.addEventListener("change", ()=>{
+  try{ localStorage.setItem("mAnnualSource", mAnnualSource()); }catch(e){}
+  loadMAnnual();
+}));
+document.getElementById("mAnnualImportBtn").addEventListener("click", ()=>document.getElementById("mAnnualImportFile").click());
+document.getElementById("mAnnualImportFile").addEventListener("change", async (e)=>{
+  const file = e.target.files[0];
+  e.target.value = "";
+  if(!file) return;
+  const fd = new FormData(); fd.append("file", file);
+  showBusy("Import du fichier annuel...");
+  let data;
+  try{
+    const res = await fetch("/api/moussanada/annual-import", {method:"POST", body: fd});
+    data = await res.json();
+    if(!res.ok || !data.ok){ toast(data.error || "Import refusé"); return; }
+  } finally { hideBusy(); }
+  (data.warnings||[]).forEach(w=>toast(w));
+  toast(`Fichier annuel importé (${data.info.months.length} mois)`);
+  try{ localStorage.setItem("mAnnualSource", "import"); }catch(_){}
+  loadMAnnual();
+});
+document.getElementById("mAnnualImportClearBtn").addEventListener("click", async ()=>{
+  if(!confirm("Retirer le fichier annuel importé ? Les données mois par mois ne sont pas touchées.")) return;
+  await fetch("/api/moussanada/annual-import/clear", {method:"POST"});
+  try{ localStorage.setItem("mAnnualSource", "monthly"); }catch(_){}
+  loadMAnnual();
+});
+
+// ---------- Rapport de la période Moussanada : exports PDF / PPTX / Excel et envoi par email ----------
+function mAnnualPeriod(){
+  const y = new Date().getFullYear();
+  return {start: document.getElementById("mPeriodStart").value || `${y}-01`, end: document.getElementById("mPeriodEnd").value || `${y}-12`};
+}
+async function mAnnualDownload(fmt){
+  const {start, end} = mAnnualPeriod();
+  showBusy("Génération du rapport de la période...");
+  try{
+    const res = await fetch(`/api/moussanada/annual-report/${fmt}?start=${start}&end=${end}&source=${mAnnualSource()}`);
+    if(!res.ok){ const e = await res.json().catch(()=>({})); toast(e.error || e.description || "Erreur de génération"); return; }
+    const name = filenameFromResponse(res, `Rapport_Moussanada_${start}_${end}.${fmt}`);
+    const blob = await res.blob();
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = name;
+    a.click();
+    setTimeout(()=>URL.revokeObjectURL(a.href), 2000);
+  } finally { hideBusy(); }
+}
+document.getElementById("mAnnualXlsxBtn").addEventListener("click", ()=>mAnnualDownload("xlsx"));
+document.getElementById("mAnnualPdfBtn").addEventListener("click", ()=>mAnnualDownload("pdf"));
+document.getElementById("mAnnualPptxBtn").addEventListener("click", ()=>mAnnualDownload("pptx"));
+document.getElementById("mAnnualMailToggleBtn").addEventListener("click", ()=>{
+  const panel = document.getElementById("mAnnualEmailPanel");
+  const opening = panel.style.display === "none";
+  panel.style.display = opening ? "block" : "none";
+  if(opening) setupEmailPanel("mAnnualToCheckList", "mAnnualCcCheckList", "mAnnualGreetingInput");
+});
+document.getElementById("mAnnualPreviewMailBtn").addEventListener("click", async ()=>{
+  const {start, end} = mAnnualPeriod();
+  const greeting = document.getElementById("mAnnualGreetingInput").value.trim();
+  showBusy("Préparation de l'aperçu...");
+  try{
+    const res = await fetch(`/api/moussanada/annual-email-preview?start=${start}&end=${end}&source=${mAnnualSource()}&greeting=${encodeURIComponent(greeting)}`);
+    const data = await res.json();
+    openPreviewModal(data.subject, data.html);
+  } finally { hideBusy(); }
+});
+document.getElementById("mAnnualConfirmSendBtn").addEventListener("click", async ()=>{
+  const {to, cc} = getSelectedRecipients("mAnnualToCheckList", "mAnnualCcCheckList");
+  if(!to.length){ toast("Sélectionnez au moins un destinataire (À)"); return; }
+  const {start, end} = mAnnualPeriod();
+  const attachments = {};
+  document.querySelectorAll("[data-m-annual-att]").forEach(c=>{ attachments[c.dataset.mAnnualAtt] = c.checked; });
+  const greeting = document.getElementById("mAnnualGreetingInput").value.trim();
+  showBusy("Génération du rapport et des pièces jointes...");
+  let data;
+  try{
+    const res = await fetch("/api/moussanada/annual-send-email", {
+      method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({start, end, to, cc, greeting, attachments, source: mAnnualSource()})
+    });
+    data = await res.json();
+    if(!res.ok){ toast(data.error || data.description || "Envoi refusé"); return; }
+  } finally { hideBusy(); }
+  toast(data.opened ? "Ouverture dans Outlook..." : `Fichier .eml généré (${data.attachments.length} pièce(s) jointe(s)) — téléchargement`);
+  if(!data.opened && data.download){
+    const a = document.createElement("a"); a.href = data.download; a.download = data.file; a.click();
+  }
+  document.getElementById("mAnnualEmailPanel").style.display = "none";
+});
 
 // ============================================================
 // M-GUIDE (Guide de collecte GLPI)

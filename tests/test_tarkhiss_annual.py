@@ -145,7 +145,7 @@ def test_annual_report_end_to_end():
         assert len(Presentation(io.BytesIO(att.get_content())).slides) == len(Presentation(io.BytesIO(pptx)).slides)
         log = admin.get(U + "/api/tarkhiss/send-log").json()
         assert log[0]["ym"] == f"{start}_{end}" and log[0]["attachments"] == [f"Rapport_Tarkhiss_{start}_{end}.pptx"]
-        audit = open(os.path.join(srv.dir, "data", "audit_log.jsonl"), encoding="utf-8").read()
+        audit = srv.audit_text()
         assert audit.count('"annual_export"') >= 3 and audit.count('"annual_send_email"') == 2
 
         # Non-régression : exports et e-mail mensuels, sans mention SANAD

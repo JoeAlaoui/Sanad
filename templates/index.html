@@ -692,7 +692,7 @@
       <div class="panel-head panel-head-row">
         <div>
           <h1>Vue annuelle / trimestrielle</h1>
-          <p>Tendance sur la période, évolution du stock en retard.</p>
+          <p>Tendance sur la période, tickets en instance, catégories les plus demandées et top des demandeurs.</p>
         </div>
         <div class="period-picker">
           <div class="period-presets" id="mPeriodPresets"></div>
@@ -702,6 +702,54 @@
           </div>
         </div>
       </div>
+      <!-- Source des données de la vue, du rapport et des livrables -->
+      <div class="card" id="mAnnualSourceCard" style="margin-bottom:16px;">
+        <h2>Source des données</h2>
+        <div class="actions-row">
+          <label><input type="radio" name="mAnnualSource" value="monthly" checked> Données mois par mois</label>
+          <label><input type="radio" name="mAnnualSource" value="import" id="mAnnualSourceImport" disabled> Fichier annuel importé</label>
+          <button class="btn btn-outline" id="mAnnualImportBtn">⬆ Importer le fichier annuel</button>
+          <button class="btn btn-outline" id="mAnnualImportClearBtn" style="display:none;">Retirer le fichier</button>
+          <input type="file" id="mAnnualImportFile" accept=".xlsx,.xlsm" style="display:none;">
+        </div>
+        <p class="hint" id="mAnnualImportInfo">Aucun fichier annuel importé. Export GLPI consolidé (.xlsx) : feuilles « rawData - Tickets », « Ticket - Catégories », « Ticket - Demandeur ».</p>
+      </div>
+
+      <div class="dash-actions" id="mAnnualActions" style="margin-bottom:16px;">
+        <button class="btn btn-outline" id="mAnnualXlsxBtn">⬇ Excel</button>
+        <button class="btn btn-outline" id="mAnnualPdfBtn">⬇ PDF</button>
+        <button class="btn btn-outline" id="mAnnualPptxBtn">📊 PPTX</button>
+        <button class="btn btn-primary" id="mAnnualMailToggleBtn">✉ Envoyer par email</button>
+      </div>
+
+      <!-- Panneau d'envoi du rapport de période Moussanada -->
+      <div class="card email-panel" id="mAnnualEmailPanel" style="display:none;">
+        <h2>Envoi du rapport de la période par email</h2>
+        <p class="hint">Le corps de l'email reprend la Vue annuelle : total des tickets, en cours, en instance, tendance, catégories les plus demandées, top des demandeurs et détail par mois. Les pièces jointes (PDF, PPTX, Excel) contiennent les mêmes éléments.</p>
+        <div class="email-panel-grid">
+          <div>
+            <div class="mini-label">Destinataires (À)</div>
+            <div class="contact-check-list" id="mAnnualToCheckList"></div>
+          </div>
+          <div>
+            <div class="mini-label">Copie (Cc)</div>
+            <div class="contact-check-list" id="mAnnualCcCheckList"></div>
+          </div>
+        </div>
+        <div class="mini-label" style="margin-top:12px;">Formule d'appel (bonjour)</div>
+        <textarea id="mAnnualGreetingInput" rows="2" placeholder="Bonjour,"></textarea>
+        <div class="mini-label" style="margin-top:12px;">Rapports joints à l'email</div>
+        <div class="actions-row">
+          <label><input type="checkbox" data-m-annual-att="pdf" checked> PDF</label>
+          <label><input type="checkbox" data-m-annual-att="pptx"> PowerPoint (PPTX)</label>
+          <label><input type="checkbox" data-m-annual-att="xlsx"> Excel</label>
+        </div>
+        <div class="actions-row" style="margin-top:12px;">
+          <button class="btn btn-outline" id="mAnnualPreviewMailBtn">👁 Aperçu</button>
+          <button class="btn btn-primary" id="mAnnualConfirmSendBtn">✉ Confirmer et envoyer (Outlook)</button>
+        </div>
+      </div>
+
       <div id="mAnnualContent"></div>
     </section>
 

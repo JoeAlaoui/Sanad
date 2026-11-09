@@ -1,8 +1,8 @@
 # SANAD — Plateforme locale de pilotage du helpdesk
 
-Application web multi-utilisateurs construite avec Flask, JavaScript natif et des fichiers JSON
-(aucune base de données). Elle regroupe le support email et hotline, la gestion de tickets GLPI et
-le reporting métier PCHC.
+Application web multi-utilisateurs construite avec Flask et JavaScript natif. Elle regroupe le
+support email et hotline, la gestion de tickets GLPI et le reporting métier PCHC. Les données sont
+accessibles par une couche unique avec stockage JSON ou SQLite sélectionnable.
 
 ## Installation et lancement
 
@@ -49,6 +49,9 @@ Les restrictions sont appliquées côté API, et pas uniquement par masquage de 
 
 - Imports agrégés Excel/CSV et imports de tickets individuels ; indicateurs, tendances, catégories,
   services, techniciens, backlog et délais.
+- Vue annuelle et rapports sur une période libre, avec détail mensuel, catégories, demandeurs et
+  services. Un classeur annuel agrégé peut également être importé, consulté et utilisé pour générer
+  les rapports.
 - Connexion directe à l’API REST GLPI, profils d’import, pagination, test de connexion et contrôle
   des doublons entre sources.
 - Filtrage des techniciens appliqué aux tableaux de bord et aux rapports, sans réimporter les
@@ -70,6 +73,31 @@ Les restrictions sont appliquées côté API, et pas uniquement par masquage de 
   format `.eml`.
 - Les imports et exports sont journalisés ; une sauvegarde peut être créée avant un import.
 
+### Stockage et migration
+
+- `store.py` fournit une interface commune aux deux backends. Le mode JSON conserve les fichiers
+  historiques ; le mode SQLite regroupe les documents et journaux dans une base avec journalisation
+  WAL et index pour filtrer les tickets par période et statut.
+- Le backend se choisit avec `SANAD_STORE=json` ou `SANAD_STORE=sqlite`. En mode SQLite, le chemin
+  est défini par `SANAD_DB_PATH` (par défaut `data/sanad.db`). Pour une instance sous WSL, placer la
+  base dans le système de fichiers Linux plutôt que sous `/mnt/d`.
+- Migration contrôlée des fichiers JSON vers SQLite :
+
+  ```bash
+  python tools/migrate_json_to_sqlite.py <dossier-data> --dry-run
+  python tools/migrate_json_to_sqlite.py <dossier-data>
+  ```
+
+  La migration valide les documents avant la création de la base, vérifie les données migrées,
+  refuse d’écraser une base existante et conserve les fichiers JSON d’origine. Sauvegarder les
+  données avant la migration et tester d’abord sur une copie.
+- `tools/export_sqlite_to_json.py` permet de préparer un retour au backend JSON. Les snapshots
+  SQLite incluent une copie cohérente de la base ; la restauration d’une archive créée avec un
+  backend différent est refusée.
+- Sous Windows avec WSL, `Lancer-SANAD.bat` démarre l’application en SQLite. `Sauvegarde-SANAD.bat`
+  crée une copie cohérente de la base vers le dossier de sauvegarde choisi ; planifier son exécution
+  régulière et protéger les copies, qui contiennent des données de comptes et de configuration.
+
 ### Qualité, conformité et administration
 
 - Tableau de qualité des données et contrôles mensuels.
@@ -89,10 +117,11 @@ l’activer que sur un réseau de confiance ; les utilisateurs se connectent ave
 
 ## Données et sécurité
 
-Les données sont stockées localement dans `data/` au format JSON. Ce dossier contient notamment
-les comptes utilisateurs et la clé de signature des sessions ; il est exclu du dépôt Git. Les
-archives de sauvegarde peuvent également contenir ces fichiers et doivent être protégées comme des
-données sensibles. Aucun mot de passe n’est stocké en clair : les mots de passe sont hachés.
+Les données restent locales. En mode JSON, les documents sont stockés sous `data/`. En mode SQLite,
+la base est placée au chemin configuré par `SANAD_DB_PATH`. Les fichiers locaux de comptes et la clé
+de signature des sessions restent exclus du dépôt Git. Les sauvegardes peuvent contenir des données
+de comptes et de configuration et doivent être protégées. Aucun mot de passe n’est stocké en clair :
+les mots de passe sont hachés.
 
 Après remplacement de `data/.secret_key`, les cookies de session précédents ne sont plus valides ;
 les utilisateurs doivent se reconnecter. Cette rotation ne modifie pas les mots de passe.
@@ -106,11 +135,15 @@ python tests/test_retards.py
 python tests/test_rapports_mensuels.py
 python tests/test_pchc_export.py
 python tests/e2e_smoke.py
+python tests/test_store.py
+python tests/test_store_ops.py
+python tests/test_migration.py
+python tests/test_hardening.py
 ```
 
-Les tests du rapport annuel sont également disponibles dans le dossier `tests/`. Les tests de bout
-en bout utilisent un serveur et des données isolés. Pour désactiver le thread de sauvegarde
-automatique dans les tests qui lancent l’application :
+Les scripts de test des rapports annuels sont également disponibles dans le dossier `tests/`. Les
+tests de bout en bout utilisent un serveur et des données isolés. Pour désactiver le thread de
+sauvegarde automatique dans les tests qui lancent l’application :
 
 ```powershell
 $env:SANAD_NO_AUTO_SNAPSHOT = "1"

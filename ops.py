@@ -16,6 +16,7 @@ import zipfile
 from datetime import date, datetime, timedelta
 from html import escape as esc
 
+import store
 from flask import jsonify, request, send_file
 
 SNAP_RE = re.compile(r"^snapshot_\d{8}_\d{6}_[a-z-]+\.zip$")
@@ -57,7 +58,7 @@ def register(app, H):
     def tarkhiss_months():
         d = H.module_dir("tarkhiss")
         out = set()
-        for fn in os.listdir(d):
+        for fn in store.names(d):
             mm = re.match(r"^(calls|emails|analysis)_(\d{4}-\d{2})\.json$", fn)
             if mm:
                 out.add(mm.group(2))
@@ -66,7 +67,7 @@ def register(app, H):
     def moussanada_months():
         out = {ym for ym, row in H.load_timeseries().items() if any((row.get(k) or 0) for k in ("ouverts", "resolus", "clos", "en_retard"))}
         d = H.module_dir("moussanada")
-        for fn in os.listdir(d):
+        for fn in store.names(d):
             mm = re.match(r"^(sources|notes)_(\d{4}-\d{2})\.json$", fn)
             if mm:
                 out.add(mm.group(2))
@@ -122,15 +123,7 @@ def register(app, H):
         return {"ym": ym, "closed": closed, "score": score(checks), "checks": checks}
 
     def last_sync(module):
-        d = H.module_dir(module)
-        latest = None
-        for root, _, files in os.walk(d):
-            if os.path.basename(root) == "exports":
-                continue
-            for fn in files:
-                if fn.endswith(".json"):
-                    t = os.path.getmtime(os.path.join(root, fn))
-                    latest = t if latest is None or t > latest else latest
+        latest = store.latest_mtime(H.module_dir(module))
         return datetime.fromtimestamp(latest).isoformat(timespec="seconds") if latest else None
 
     def overview(n=12):
@@ -183,10 +176,18 @@ def register(app, H):
         for root, dirs, files in os.walk(DATA_DIR):
             dirs[:] = [d for d in dirs if d not in EXCLUDED_DIRS]
             for fn in files:
-                if fn.endswith(".tmp"):
+                if fn.endswith(".tmp") or fn.startswith("sanad.db"):   # la base est ajoutée ci-dessous (copie cohérente)
                     continue
                 full = os.path.join(root, fn)
                 yield full, "data/" + os.path.relpath(full, DATA_DIR).replace(os.sep, "/")
+        if store.backend_name() == "sqlite":
+            tmp = os.path.join(SNAP_DIR, f"sanad-{os.getpid()}-{threading.get_ident()}.db.tmp")
+            try:
+                store.snapshot_to(tmp)
+                yield tmp, "data/sanad.db"
+            finally:
+                if os.path.exists(tmp):
+                    os.remove(tmp)
         if os.path.isdir(H.UPLOAD_DIR):
             for fn in os.listdir(H.UPLOAD_DIR):
                 full = os.path.join(H.UPLOAD_DIR, fn)
@@ -260,6 +261,13 @@ def register(app, H):
             for n in names:
                 if n.startswith("/") or ".." in n.split("/") or not (n.startswith("data/") or n.startswith("uploads/")):
                     raise ValueError(f"Entrée non autorisée : {n}")
+            # Une archive d'un autre mode de stockage serait restaurée sans effet (ou à moitié) : refus explicite
+            has_db = "data/sanad.db" in names
+            has_docs = any(n.startswith("data/") and n.endswith(".json") for n in names)
+            if store.backend_name() == "sqlite" and not has_db and has_docs:
+                raise ValueError("Archive du mode JSON : cette instance utilise SQLite. Migrez-la d'abord avec tools/migrate_json_to_sqlite.py.")
+            if store.backend_name() == "json" and has_db:
+                raise ValueError("Archive du mode SQLite : cette instance utilise les fichiers JSON (SANAD_STORE=sqlite pour la restaurer).")
             contents = {}
             for n in names:  # vérification d'intégrité AVANT toute modification
                 c = z.read(n)
@@ -277,8 +285,16 @@ def register(app, H):
             if not target.startswith(os.path.normpath(base)):
                 raise ValueError("Chemin invalide")
             os.makedirs(os.path.dirname(target), exist_ok=True)
+            if arc == "data/sanad.db":
+                target = store.db_path() or target   # la base peut vivre hors de data/ (SANAD_DB_PATH)
+                store.close()
+                for ext in ("-wal", "-shm"):
+                    if os.path.exists(target + ext):
+                        os.remove(target + ext)
             with open(target, "wb") as f:
                 f.write(c)
+        if "data/sanad.db" in contents:
+            store.reopen()
         return safety, len(contents)
 
     @app.route("/api/admin/snapshots/<name>/restore", methods=["POST"])
@@ -445,27 +461,17 @@ def register(app, H):
         return buf
 
     def month_audit(ym):
-        out = []
-        if os.path.exists(H.AUDIT_LOG_FILE):
-            with open(H.AUDIT_LOG_FILE, "r", encoding="utf-8") as f:
-                for line in f:
-                    try:
-                        e = json.loads(line)
-                    except ValueError:
-                        continue
-                    if (e.get("ts") or "")[:7] == ym:
-                        out.append(e)
-        return out
+        return [e for e in store.read_jsonl(H.AUDIT_LOG_FILE) if (e.get("ts") or "")[:7] == ym]
 
     def month_files(ym):
         res = []
         for module in ("tarkhiss", "moussanada", "pchc"):
             d = H.module_dir(module)
-            for fn in sorted(os.listdir(d)):
+            for fn in store.names(d):
                 if ym in fn and fn.endswith(".json"):
                     full = os.path.join(d, fn)
-                    with open(full, "rb") as f:
-                        res.append((f"{module}/{fn}", hashlib.sha256(f.read()).hexdigest(), os.path.getmtime(full)))
+                    content = json.dumps(store.read_json(full, None), ensure_ascii=False, indent=2).encode("utf-8")
+                    res.append((f"{module}/{fn}", hashlib.sha256(content).hexdigest(), store.mtime(full)))
         return res
 
     def month_kpis(ym):

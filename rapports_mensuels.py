@@ -378,7 +378,7 @@ def moussanada_ctx(a, ym):
             techvol_wide=lambda: dash(tvol(), (8.2, 2.5)), radar=lambda: C.radar(techs),
             s_techvol=lambda: dash(tvol(), (4.4, 2.8)), s_tech=lambda: dash(two(techs), (4.4, 2.8)),
             s_radar=lambda: C.radar(techs, figsize=(3.6, 2.9)))
-    raw = [t for t in a.load_raw_tickets() if (t.get("date_ouverture") or "")[:7] == ym]
+    raw = a.load_raw_tickets(ym, ym)
     matrix = a.compute_heatmap_matrix(raw) if raw else None
     if matrix:
         makers["heat"] = lambda: C.heat(matrix, a_days(), [f"{h}h" for h in range(24)], (8.2, 2.8))
@@ -506,10 +506,9 @@ def moussanada_pptx(c):
 def late_section(a, ms, number, attached, now=None):
     """Section « Tickets en retard » de l'email : cartes KPI + TOP N (techniciens exclus écartés).
     Vide tant qu'aucun export de tickets bruts n'a été importé. Les exclusions ne sont jamais nommées."""
-    raw = a.load_raw_tickets()
-    if not raw:
+    if not a.raw_tickets_count():
         return ""
-    v = retards.view(raw, ms, now)
+    v = retards.view(a.load_raw_tickets(open_only=True), ms, now)
     m = Mail
     n = v["top_n"]
     title = f"Tickets en retard — TOP {n}" if v["shown_total"] > n else "Tickets en retard"

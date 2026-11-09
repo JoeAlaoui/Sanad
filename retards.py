@@ -5,7 +5,7 @@ retards.py — Tickets en retard (Moussanada), calculés à partir des tickets b
 Un ticket est « en retard » quand il n'est ni résolu ni clos ET que son échéance (colonne TTR de
 l'export, « temps de résolution » = date limite) est dépassée. Un ticket sans échéance renseignée
 n'est pas compté en retard (il est signalé à part). Le TOP de l'email peut écarter des techniciens
-(réglage `late_tickets.excluded_technicians`) ; l'Excel (joint ou téléchargé) les écarte aussi (`shown`).
+(réglage `late_tickets.excluded_technicians`) et des tickets précis (`late_tickets.excluded_tickets`, liste de n°) ; l'Excel (joint ou téléchargé), le TOP et les KPI de l'email les écartent aussi (`shown`).
 """
 import unicodedata
 from datetime import datetime
@@ -41,6 +41,12 @@ def settings_of(module_settings):
         top_n = DEFAULT_TOP_N
     top_n = min(max(top_n, 1), 50)
     return top_n, [str(x) for x in (cfg.get("excluded_technicians") or []) if str(x).strip()]
+
+
+def excluded_ticket_ids(module_settings):
+    """N° des tickets écartés un par un (réglage `late_tickets.excluded_tickets`), en texte."""
+    cfg = (module_settings or {}).get("late_tickets") or {}
+    return {str(x).strip() for x in (cfg.get("excluded_tickets") or []) if str(x).strip()}
 
 
 def late_label(hours):
@@ -89,7 +95,8 @@ def view(tickets, module_settings=None, now=None):
     top_n, excluded = settings_of(module_settings)
     late, no_due, open_total = compute(tickets, now)
     skip = {_norm(x) for x in excluded}
-    shown = [t for t in late if _norm(t["technicien"]) not in skip]
+    skip_ids = excluded_ticket_ids(module_settings)
+    shown = [t for t in late if _norm(t["technicien"]) not in skip and str(t["id"]) not in skip_ids]
     by_tech = {}
     for t in late:
         by_tech.setdefault(t["technicien"], []).append(t)
@@ -97,7 +104,7 @@ def view(tickets, module_settings=None, now=None):
                           for name, items in by_tech.items()), key=lambda x: (-x["late"], x["name"].lower()))
     total, avg_days, max_days, high = stats(late)
     return {
-        "as_of": now, "top_n": top_n, "excluded": excluded, "late": late, "shown": shown, "total": len(late),
+        "as_of": now, "top_n": top_n, "excluded": excluded, "excluded_tickets": sorted(skip_ids), "late": late, "shown": shown, "total": len(late),
         "top": shown[:top_n], "hidden": len(late) - len(shown), "shown_total": len(shown),
         "no_due": no_due, "open_total": open_total, "technicians": technicians,
         "avg_days": avg_days, "max_days": max_days, "high": high,
@@ -114,9 +121,10 @@ def to_json(v):
     skip = {_norm(x) for x in v["excluded"]}
     return {
         "as_of": v["as_of"].strftime("%d/%m/%Y %H:%M"), "top_n": v["top_n"], "top_n_choices": list(TOP_N_CHOICES),
-        "excluded": v["excluded"], "total": v["total"], "hidden": v["hidden"], "no_due": v["no_due"],
+        "excluded": v["excluded"], "excluded_tickets": v["excluded_tickets"], "total": v["total"], "hidden": v["hidden"], "no_due": v["no_due"],
         "open_total": v["open_total"], "technicians": v["technicians"],
         "avg_days": round(v["avg_days"], 1), "max_days": round(v["max_days"], 1), "high": v["high"],
         "top": [row(t) for t in v["top"]],
-        "all": [dict(row(t), excluded=_norm(t["technicien"]) in skip) for t in v["late"]],
+        "all": [dict(row(t), excluded=_norm(t["technicien"]) in skip or str(t["id"]) in v["excluded_tickets"],
+                     excluded_ticket=str(t["id"]) in v["excluded_tickets"]) for t in v["late"]],
     }

@@ -31,7 +31,9 @@ wsl.exe --exec bash -lc "test -x %WSL_DIR%/.venv/bin/python" >nul 2>&1
 if errorlevel 1 goto venv_manquant
 
 echo Demarrage du serveur dans une fenetre WSL...
-start "SANAD - Serveur" wsl.exe --exec bash -lc "cd %WSL_DIR% && exec .venv/bin/python app.py"
+REM Donnees dans SQLite (base sur le disque Linux de WSL, bien plus rapide que /mnt/d).
+REM Retour au mode fichiers JSON : supprimer SANAD_STORE et SANAD_DB_PATH ci-dessous (voir HANDOFF.md, lot 14).
+start "SANAD - Serveur" wsl.exe --exec bash -lc "export SANAD_STORE=sqlite SANAD_DB_PATH=$HOME/sanad-data/sanad.db; cd %WSL_DIR% && exec .venv/bin/python app.py"
 
 REM --- Attente du demarrage : 30 x 2 s max ---
 set /a _essai=0
